@@ -26,14 +26,24 @@ const VALID_SITES = ['com', 'eu', 'il'];
 
 // --- One-time-per-store authorization (Authorization Code Grant) ---
 //
-// Visit /auth/<site> once per store, approve the Shopify screen, and
+// Visit /auth/<route> once per store, approve the Shopify screen, and
 // /auth/callback will show you a permanent access token to copy into
 // Render as SHOPIFY_<SITE>_ACCESS_TOKEN. See README.md.
 //
+// ROUTE_TO_SITE maps the URL segment used in the browser (what a scanner
+// like Google Safe Browsing sees) to this app's internal site key (used for
+// the SHOPIFY_<SITE>_* env var lookups everywhere else, incl. /api/data and
+// /api/sync). Israel's real route is "co.il" rather than the bare "il" used
+// internally — /auth/il had been getting flagged by Google Safe Browsing as
+// a suspected phishing redirect, and "co.il" (matching the store's actual
+// natashadenona.co.il ccTLD) avoids that specific pattern without touching
+// any of the SHOPIFY_IL_* env var names.
+const ROUTE_TO_SITE = { com: 'com', eu: 'eu', 'co.il': 'il' };
+
 // IMPORTANT: /auth/callback is a literal path and must be registered BEFORE
-// the /auth/:site wildcard below — Express matches routes in registration
-// order, so if :site came first it would swallow "callback" as a site name
-// and the real callback handler would never run.
+// the /auth/:route wildcard below — Express matches routes in registration
+// order, so if :route came first it would swallow "callback" as a route
+// segment and the real callback handler would never run.
 app.get('/auth/callback', async (req, res) => {
   const { code, state: site } = req.query;
   if (!code || !site) {
@@ -51,10 +61,11 @@ app.get('/auth/callback', async (req, res) => {
   }
 });
 
-app.get('/auth/:site', (req, res) => {
-  const { site } = req.params;
-  if (!VALID_SITES.includes(site)) {
-    return res.status(400).send(`Unknown site "${site}". Must be one of: ${VALID_SITES.join(', ')}`);
+app.get('/auth/:route', (req, res) => {
+  const { route } = req.params;
+  const site = ROUTE_TO_SITE[route];
+  if (!site) {
+    return res.status(400).send(`Unknown site "${route}". Must be one of: ${Object.keys(ROUTE_TO_SITE).join(', ')}`);
   }
   const redirectUri = `${req.protocol}://${req.get('host')}/auth/callback`;
   try {
