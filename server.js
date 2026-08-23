@@ -1,11 +1,15 @@
 require('dotenv').config();
 const express = require('express');
 const cors = require('cors');
-const { fetchOrders } = require('./src/shopify');
+const { fetchOrders, getAuthorizeUrl, exchangeCodeForToken } = require('./src/shopify');
 const { aggregate } = require('./src/aggregate');
 
 const app = express();
 const PORT = process.env.PORT || 3000;
+
+// Render sits behind a proxy — trust its X-Forwarded-Proto so req.protocol
+// reports "https" (needed to build a correct OAuth redirect_uri below).
+app.set('trust proxy', true);
 
 // Lock this down to the dashboard's actual origin once you know it
 // (e.g. https://claude.site or wherever the artifact/desktop app serves it
@@ -19,6 +23,41 @@ app.use(
 app.use(express.json());
 
 const VALID_SITES = ['com', 'eu', 'il'];
+
+// --- One-time-per-store authorization (Authorization Code Grant) ---
+//
+// Visit /auth/<site> once per store, approve the Shopify screen, and
+// /auth/callback will show you a permanent access token to copy into
+// Render as SHOPIFY_<SITE>_ACCESS_TOKEN. See README.md.
+app.get('/auth/:site', (req, res) => {
+  const { site } = req.params;
+  if (!VALID_SITES.includes(site)) {
+    return res.status(400).send(`Unknown site "${site}". Must be one of: ${VALID_SITES.join(', ')}`);
+  }
+  const redirectUri = `${req.protocol}://${req.get('host')}/auth/callback`;
+  try {
+    res.redirect(getAuthorizeUrl(site, redirectUri));
+  } catch (err) {
+    res.status(500).send(err.message);
+  }
+});
+
+app.get('/auth/callback', async (req, res) => {
+  const { code, state: site } = req.query;
+  if (!code || !site) {
+    return res.status(400).send('Missing code or state in callback — start again at /auth/<site>.');
+  }
+  try {
+    const token = await exchangeCodeForToken(site, code);
+    res.send(`<!doctype html><html><body style="font-family:sans-serif;max-width:640px;margin:60px auto;line-height:1.5">
+      <h2>Authorization complete for "${site}"</h2>
+      <p>Copy this token and add it to Render as <code>SHOPIFY_${site.toUpperCase()}_ACCESS_TOKEN</code>, then you can close this tab. It does not expire — this is a one-time step per store.</p>
+      <textarea readonly style="width:100%;height:80px;font-family:monospace;font-size:13px;padding:8px">${token}</textarea>
+    </body></html>`);
+  } catch (err) {
+    res.status(500).send(err.message);
+  }
+});
 
 function shiftDateRange(startISO, endISO, { years = 0, months = 0 } = {}) {
   const start = new Date(startISO + 'T00:00:00Z');
