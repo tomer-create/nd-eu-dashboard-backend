@@ -1,0 +1,19 @@
+{
+  "name": "nd-dashboard-backend",
+  "version": "1.0.0",
+  "private": true,
+  "description": "Small backend that pulls live Shopify data for the Natasha Denona Sales Dashboard (sync button + date-switch live pull).",
+  "type": "commonjs",
+  "main": "server.js",
+  "engines": {
+    "node": ">=18.0.0"
+  },
+  "scripts": {
+    "start": "node server.js"
+  },
+  "dependencies": {
+    "cors": "^2.8.5",
+    "dotenv": "^16.4.5",
+    "express": "^4.19.2"
+  }
+}
