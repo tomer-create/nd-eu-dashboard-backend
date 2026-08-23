@@ -1,69 +1,89 @@
-// Shopify Admin API access: client-credentials token management + a small
-// GraphQL request helper with basic throttle-retry handling.
+// Shopify Admin API access via the standard Authorization Code Grant, plus
+// a small GraphQL request helper with basic throttle-retry handling.
 //
-// Each store (com / eu / il) is configured entirely through environment
-// variables — see .env.example / README.md for the exact names.
+// Each store (com / eu / il) is configured through environment variables —
+// see .env.example / README.md for the exact names.
+//
+// WHY NOT client_credentials? That grant is what the backend originally
+// used, and it's documented by Shopify's own developer community as
+// unreliable for paid/production stores: token issuance can succeed while
+// the `orders` field itself still comes back ACCESS_DENIED, regardless of
+// which scopes are configured on the app. This is a known rough edge in the
+// still-new (as of 2026) Dev-Dashboard custom-app model. The Authorization
+// Code Grant below is what Shopify's own docs recommend for backend/server
+// apps, doesn't have that problem, and produces a token that never expires
+// — so there's no 24h refresh logic to maintain either.
+//
+// One-time setup per store: visit GET /auth/<site> in a browser while
+// logged into that store's Shopify admin, approve the scopes, and you'll
+// land on /auth/callback showing a permanent access token. Copy that into
+// Render as SHOPIFY_<SITE>_ACCESS_TOKEN. See README.md.
 
 const API_VERSION = process.env.SHOPIFY_API_VERSION || '2026-07';
-
-// In-memory token cache, keyed by site. Fine for a single-instance Render
-// free/starter service; tokens are re-fetched automatically 5 minutes
-// before they expire.
-const tokenCache = new Map();
+const SCOPES = 'read_orders,read_products,read_inventory';
 
 function getSiteConfig(site) {
   const key = site.toUpperCase();
   const domain = process.env[`SHOPIFY_${key}_DOMAIN`];
   const clientId = process.env[`SHOPIFY_${key}_CLIENT_ID`];
   const clientSecret = process.env[`SHOPIFY_${key}_CLIENT_SECRET`];
+  const accessToken = process.env[`SHOPIFY_${key}_ACCESS_TOKEN`];
   if (!domain || !clientId || !clientSecret) {
     throw new Error(
-      `Missing Shopify config for site "${site}". Expected env vars ` +
+      `Missing Shopify app config for site "${site}". Expected env vars ` +
         `SHOPIFY_${key}_DOMAIN, SHOPIFY_${key}_CLIENT_ID, SHOPIFY_${key}_CLIENT_SECRET.`
     );
   }
-  return { site, domain, clientId, clientSecret };
+  return { site, domain, clientId, clientSecret, accessToken };
 }
 
-async function getAccessToken(site) {
-  const cached = tokenCache.get(site);
-  if (cached && cached.expiresAt > Date.now() + 5 * 60 * 1000) {
-    return cached.token;
-  }
+// Builds the URL to send the merchant to for the one-time authorization.
+function getAuthorizeUrl(site, redirectUri) {
+  const { domain, clientId } = getSiteConfig(site);
+  const url = new URL(`https://${domain}/admin/oauth/authorize`);
+  url.searchParams.set('client_id', clientId);
+  url.searchParams.set('scope', SCOPES);
+  url.searchParams.set('redirect_uri', redirectUri);
+  url.searchParams.set('state', site);
+  return url.toString();
+}
 
+// Exchanges the one-time `code` from the callback for a permanent
+// (non-expiring) offline access token.
+async function exchangeCodeForToken(site, code) {
   const { domain, clientId, clientSecret } = getSiteConfig(site);
   const res = await fetch(`https://${domain}/admin/oauth/access_token`, {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({
-      client_id: clientId,
-      client_secret: clientSecret,
-      grant_type: 'client_credentials',
-    }),
+    body: JSON.stringify({ client_id: clientId, client_secret: clientSecret, code }),
   });
 
   if (!res.ok) {
     const text = await res.text().catch(() => '');
-    throw new Error(`Shopify token request failed for "${site}" (${res.status}): ${text}`);
+    throw new Error(`Token exchange failed for "${site}" (${res.status}): ${text}`);
   }
 
   const data = await res.json();
-  // Client-credentials tokens for custom apps are valid ~24h.
-  const expiresInSec = data.expires_in || 24 * 60 * 60;
-  const token = data.access_token;
-  tokenCache.set(site, { token, expiresAt: Date.now() + expiresInSec * 1000 });
-  return token;
+  return data.access_token;
 }
 
 async function graphql(site, query, variables = {}, attempt = 0) {
-  const { domain } = getSiteConfig(site);
-  const token = await getAccessToken(site);
+  const { domain, accessToken } = getSiteConfig(site);
+
+  if (!accessToken) {
+    const key = site.toUpperCase();
+    throw new Error(
+      `No access token on file for site "${site}". Visit /auth/${site} once, approve the ` +
+        `Shopify authorization screen, then add the resulting token to Render as ` +
+        `SHOPIFY_${key}_ACCESS_TOKEN.`
+    );
+  }
 
   const res = await fetch(`https://${domain}/admin/api/${API_VERSION}/graphql.json`, {
     method: 'POST',
     headers: {
       'Content-Type': 'application/json',
-      'X-Shopify-Access-Token': token,
+      'X-Shopify-Access-Token': accessToken,
     },
     body: JSON.stringify({ query, variables }),
   });
@@ -147,4 +167,12 @@ async function fetchOrders(site, startISO, endISO) {
   return orders;
 }
 
-module.exports = { getSiteConfig, getAccessToken, graphql, fetchOrders, API_VERSION };
+module.exports = {
+  getSiteConfig,
+  getAuthorizeUrl,
+  exchangeCodeForToken,
+  graphql,
+  fetchOrders,
+  API_VERSION,
+  SCOPES,
+};
