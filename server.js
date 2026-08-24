@@ -1,7 +1,7 @@
 require('dotenv').config();
 const express = require('express');
 const cors = require('cors');
-const { fetchOrders, getAuthorizeUrl, exchangeCodeForToken } = require('./src/shopify');
+const { fetchOrders, fetchOrdersLight, getAuthorizeUrl, exchangeCodeForToken } = require('./src/shopify');
 const { aggregate } = require('./src/aggregate');
 
 const app = express();
@@ -114,14 +114,20 @@ async function buildDataResponse({ site, start, end, compare }) {
   const momRange = wantMom ? shiftDateRange(start, end, { months: 1 }) : null;
 
   // Fetch the current period plus both comparison periods concurrently —
-  // they're independent Shopify queries, and each can take several seconds
-  // to paginate through a month of orders. Running them in parallel instead
-  // of one-after-another cuts real-world sync latency by roughly 3x, which
-  // matters a lot on top of Render free-tier cold-start delay.
+  // they're independent Shopify queries. The comparison periods use
+  // fetchOrdersLight (a much cheaper GraphQL query — see shopify.js) since
+  // only gross/net sales + order count are read off them below; the full
+  // per-order detail (line items, refunds, shipping address, tags) is only
+  // needed for the current period's top_products/by_country/discounts.
+  // Confirmed via direct testing (2026-08-24): the full-detail query for all
+  // 3 periods concurrently was taking ~60s end to end, right at the edge of
+  // (and sometimes past) the dashboard's timeout — this cuts the GraphQL
+  // cost of 2 of those 3 fetches substantially, which also means less
+  // Shopify rate-limit contention between the concurrent requests.
   const [orders, yoyOrders, momOrders] = await Promise.all([
     fetchOrders(site, start, end),
-    wantYoy ? fetchOrders(site, yoyRange.start, yoyRange.end) : Promise.resolve(null),
-    wantMom ? fetchOrders(site, momRange.start, momRange.end) : Promise.resolve(null),
+    wantYoy ? fetchOrdersLight(site, yoyRange.start, yoyRange.end) : Promise.resolve(null),
+    wantMom ? fetchOrdersLight(site, momRange.start, momRange.end) : Promise.resolve(null),
   ]);
 
   const current = aggregate(orders);
