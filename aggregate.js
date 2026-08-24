@@ -95,7 +95,15 @@ function aggregate(orders, { tagLabels = DEFAULT_TAG_LABELS } = {}) {
     }
   }
 
-  const netSales = grossSales - discountsTotal;
+  // Net Sales = Gross Sales − Discounts − Returns. Matches Shopify's own
+  // "Net sales" definition and the P&L sheet's own "Discounts & Returns"
+  // combined-deduction formula (Row 9 "Total D&R %"). Previously this only
+  // subtracted discounts, which overstated live-synced Net Sales by
+  // whatever the period's returns came to (confirmed 2026-08-24: Tomer
+  // spotted a live sync showing $395.4K vs. $372,010.60 in Shopify's own
+  // report — a ~$23.4K gap that matches a normal return rate for this
+  // store almost exactly).
+  const netSales = grossSales - discountsTotal - returnsTotal;
   const ordersCount = orders.length;
   const aov = ordersCount ? netSales / ordersCount : 0;
 
