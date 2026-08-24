@@ -140,9 +140,17 @@ async function buildDataResponse({ site, start, end, compare }) {
   // are single-aggregate ShopifyQL queries (not paginated per-order like
   // fetchOrders/fetchOrdersLight), so they're cheap — adding 3 more of them
   // here doesn't meaningfully add to the latency that made the sync-timeout
-  // fix necessary. All 9 Shopify calls run in one Promise.all so none of
-  // this adds extra wall-clock time on top of the orders fetches.
-   const [
+  // fix necessary.
+  //
+  // topReturns (added 2026-08-24) is a 10th call in the same Promise.all,
+  // for the CURRENT period only -- Section 3 "Top Return Products" never had
+  // any live-sync path before this (see fetchTopReturnsByProduct in
+  // src/shopify.js for why it doesn't just reuse the refunds already fetched
+  // by ORDERS_QUERY). It's another single ShopifyQL aggregate call (capped
+  // at 15 rows server-side via LIMIT), so it's cheap the same way the
+  // reversals/COGS calls are. All 10 Shopify calls run in one Promise.all so
+  // none of this adds extra wall-clock time on top of the orders fetches.
+  const [
     orders,
     yoyOrders,
     momOrders,
@@ -170,6 +178,9 @@ async function buildDataResponse({ site, start, end, compare }) {
   current.kpis.cogs = currentCogs;
   const result = { site, start, end, ...current };
   result.top_returns = topReturns;
+  // Reassigned below as YoY/MoM per-product comparisons are computed —
+  // starts as the current period's own top_products list.
+  let topProducts = current.top_products;
 
   if (wantYoy) {
     const yoyAgg = applySalesReversals(aggregate(yoyOrders), yoyReversals);
