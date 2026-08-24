@@ -1,7 +1,7 @@
 require('dotenv').config();
 const express = require('express');
 const cors = require('cors');
-const { fetchOrders, fetchOrdersLight, fetchSalesReversals, getAuthorizeUrl, exchangeCodeForToken } = require('./src/shopify');
+const { fetchOrders, fetchOrdersLight, fetchSalesReversals, fetchCostOfGoodsSold, getAuthorizeUrl, exchangeCodeForToken } = require('./src/shopify');
 const { aggregate } = require('./src/aggregate');
 
 const app = express();
@@ -130,8 +130,18 @@ async function buildDataResponse({ site, start, end, compare }) {
   // above — confirmed 2026-08-24 that the Orders-API refunds approach
   // (attributed by order CREATION date) undercounts Shopify's own reported
   // returns by ~69%, because Shopify attributes a sales reversal by the
-  // REFUND date instead. All 6 Shopify calls run in one Promise.all so this
-  // doesn't add extra latency on top of the orders fetches.
+  // REFUND date instead.
+  //
+  // COGS for all 3 periods comes from fetchCostOfGoodsSold (ShopifyQL's own
+  // "cost_of_goods_sold" metric) — added 2026-08-24 per Tomer's request
+  // ("the COGS number isn't correct, you should pull it from Shopify as
+  // well"). Previously COGS on the dashboard came only from the P&L Google
+  // Sheet with no live-sync path. Both this and the sales_reversals calls
+  // are single-aggregate ShopifyQL queries (not paginated per-order like
+  // fetchOrders/fetchOrdersLight), so they're cheap — adding 3 more of them
+  // here doesn't meaningfully add to the latency that made the sync-timeout
+  // fix necessary. All 9 Shopify calls run in one Promise.all so none of
+  // this adds extra wall-clock time on top of the orders fetches.
   const [
     orders,
     yoyOrders,
@@ -139,6 +149,9 @@ async function buildDataResponse({ site, start, end, compare }) {
     currentReversals,
     yoyReversals,
     momReversals,
+    currentCogs,
+    yoyCogs,
+    momCogs,
   ] = await Promise.all([
     fetchOrders(site, start, end),
     wantYoy ? fetchOrdersLight(site, yoyRange.start, yoyRange.end) : Promise.resolve(null),
@@ -146,9 +159,13 @@ async function buildDataResponse({ site, start, end, compare }) {
     fetchSalesReversals(site, start, end),
     wantYoy ? fetchSalesReversals(site, yoyRange.start, yoyRange.end) : Promise.resolve(null),
     wantMom ? fetchSalesReversals(site, momRange.start, momRange.end) : Promise.resolve(null),
+    fetchCostOfGoodsSold(site, start, end),
+    wantYoy ? fetchCostOfGoodsSold(site, yoyRange.start, yoyRange.end) : Promise.resolve(null),
+    wantMom ? fetchCostOfGoodsSold(site, momRange.start, momRange.end) : Promise.resolve(null),
   ]);
 
   const current = applySalesReversals(aggregate(orders), currentReversals);
+  current.kpis.cogs = currentCogs;
   const result = { site, start, end, ...current };
   // Reassigned below as YoY/MoM per-product comparisons are computed —
   // starts as the current period's own top_products list.
@@ -161,6 +178,7 @@ async function buildDataResponse({ site, start, end, compare }) {
       gross_sales_change: pctChange(current.kpis.gross_sales, yoyAgg.kpis.gross_sales),
       net_sales_change: pctChange(current.kpis.net_sales, yoyAgg.kpis.net_sales),
       orders_change: pctChange(current.kpis.orders, yoyAgg.kpis.orders),
+      cogs_change: pctChange(current.kpis.cogs, yoyCogs),
     };
     topProducts = attachProductChange(topProducts, yoyAgg.top_products, 'gross_sales_yoy_change');
   }
@@ -172,6 +190,7 @@ async function buildDataResponse({ site, start, end, compare }) {
       gross_sales_change: pctChange(current.kpis.gross_sales, momAgg.kpis.gross_sales),
       net_sales_change: pctChange(current.kpis.net_sales, momAgg.kpis.net_sales),
       orders_change: pctChange(current.kpis.orders, momAgg.kpis.orders),
+      cogs_change: pctChange(current.kpis.cogs, momCogs),
     };
     topProducts = attachProductChange(topProducts, momAgg.top_products, 'gross_sales_mom_change');
   }
