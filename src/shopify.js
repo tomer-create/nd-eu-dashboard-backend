@@ -169,17 +169,21 @@ async function fetchOrders(site, startISO, endISO) {
 
 // Slimmed-down version of ORDERS_QUERY for the YoY/MoM comparison periods.
 // aggregate() in src/aggregate.js only reads gross_sales/net_sales/orders
-// (via lineItems + totalDiscountsSet) off the comparison periods' orders —
-// top_products/by_country/discounts/units are computed but discarded by
-// buildDataResponse() for yoy/mom, so there's no reason to pay for
-// refunds/refundLineItems/shippingAddress/tags on those two fetches. Each of
-// those adds real GraphQL query cost per order, and doing all 3 periods
-// (current + yoy + mom) concurrently means they compete for the same
-// per-shop rate-limit budget — the lighter this query, the less that
-// concurrency causes THROTTLED retries. (Fields left out here are simply
-// undefined on the returned node; aggregate() already treats
-// refunds/shippingAddress/tags as optional via `|| []` / `?.`, so it runs
-// unmodified against these lighter objects.)
+// off the comparison periods' orders — top_products/by_country/discounts
+// are computed but discarded by buildDataResponse() for yoy/mom, so there's
+// no reason to pay for lineItem titles/shippingAddress/tags on those two
+// fetches. Each of those adds real GraphQL query cost per order, and doing
+// all 3 periods (current + yoy + mom) concurrently means they compete for
+// the same per-shop rate-limit budget — the lighter this query, the less
+// that concurrency causes THROTTLED retries.
+// Includes just enough of the refunds shape (subtotalSet only, no
+// quantity/lineItem title) for aggregate()'s returnsTotal to come out
+// correct — Net Sales = Gross − Discounts − Returns needs this on every
+// period, not just the current one, or a YoY/MoM % change would compare
+// today's real (returns-subtracted) Net Sales against a comparison period's
+// inflated (returns-omitted) one. unitsReturned will end up NaN off this
+// query since quantity is missing, but that field isn't read from the
+// comparison periods' aggregate() output, so it's harmless.
 const ORDERS_QUERY_LIGHT = `
   query OrdersForRangeLight($cursor: String, $searchQuery: String!) {
     orders(first: 100, after: $cursor, query: $searchQuery, sortKey: CREATED_AT) {
@@ -191,6 +195,15 @@ const ORDERS_QUERY_LIGHT = `
             edges {
               node {
                 originalTotalSet { shopMoney { amount } }
+              }
+            }
+          }
+          refunds {
+            refundLineItems(first: 100) {
+              edges {
+                node {
+                  subtotalSet { shopMoney { amount } }
+                }
               }
             }
           }
