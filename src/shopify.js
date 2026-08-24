@@ -272,11 +272,21 @@ async function fetchSalesReversals(site, startISO, endISOExclusive) {
   }
   const rows = result.tableData.rows;
   if (!rows || !rows.length) return 0;
-  // Single column (sales_reversals), single row (no GROUP BY/TIMESERIES) —
-  // Shopify returns it as a negative number (it reduces sales); this file's
-  // convention is a positive "returns" figure that gets SUBTRACTED, so flip
-  // the sign here rather than at every call site.
-  return Math.abs(Number(rows[0][0]));
+  // BUG FIXED 2026-08-24: `rows` is an array of ROW OBJECTS keyed by column
+  // name (e.g. { "sales_reversals": "-23994.49" }), NOT an array of arrays —
+  // confirmed against a live shopifyqlQuery call. The original `rows[0][0]`
+  // silently read `undefined` off that object (array-index 0 on a plain
+  // object), so Number(undefined) produced NaN, which JSON.stringify turns
+  // into `null` on the wire — that's what showed up as returns_total/
+  // net_sales/average_order_value all coming back null in production, with
+  // no thrown error (since NaN propagates through arithmetic instead of
+  // throwing). Reading via Object.values() rather than the literal column
+  // name keeps this working even if Shopify ever aliases the column.
+  // Shopify returns the value as a negative number (it reduces sales); this
+  // file's convention is a positive "returns" figure that gets SUBTRACTED,
+  // so flip the sign here rather than at every call site.
+  const rawValue = Object.values(rows[0])[0];
+  return Math.abs(Number(rawValue));
 }
 
 module.exports = {
