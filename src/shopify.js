@@ -155,8 +155,28 @@ const ORDERS_QUERY = `
 
 // Fetches every order created in [startISO, endISO) for a site, following
 // pagination. startISO/endISO are plain 'YYYY-MM-DD' dates.
+//
+// -status:cancelled added 2026-08-24 after Tomer reported ND.EU's Gross
+// Sales tile reading higher than Shopify's own Analytics home figure for the
+// identical date range (dashboard sync: 633 orders / higher gross sales;
+// Shopify's "Gross sales" panel for Aug 1-24, 2026: 623 orders / 71,583.46
+// EUR). Root cause, confirmed by opening the actual orders: a handful of
+// orders each period are Shopify order "swaps" created by a returns/exchange
+// app (order notes carry `_swap-request-token`/`_swap-checkout-token`) that
+// get immediately Voided or Refunded to a €0.00 net total. This backend's
+// aggregate() (src/aggregate.js) sums each line item's `originalTotalSet` —
+// the PRE-cancellation value — with no check on order.cancelledAt, so it
+// kept counting a cancelled swap order's full original value (e.g. €130.68,
+// €106.92 confirmed on two real orders) even though the order nets to zero.
+// Shopify's own Analytics home "Gross sales" figure does not count these.
+// Excluding `status:cancelled` orders at the search-query level (rather than
+// fetching them and filtering client-side) matches Shopify's own number and
+// is cheaper than pulling line items for orders we're going to discard
+// anyway. This applies to both the current period and the YoY/MoM
+// comparison periods (see fetchOrdersLight below) since both use the same
+// aggregate() gross_sales calculation.
 async function fetchOrders(site, startISO, endISO) {
-  const searchQuery = `created_at:>=${startISO} created_at:<${endISO}`;
+  const searchQuery = `created_at:>=${startISO} created_at:<${endISO} -status:cancelled`;
   const orders = [];
   let cursor = null;
   let hasNextPage = true;
@@ -219,8 +239,12 @@ const ORDERS_QUERY_LIGHT = `
 
 // Same as fetchOrders, but for callers (YoY/MoM comparisons) that only need
 // gross/net sales + order count out of aggregate() — see ORDERS_QUERY_LIGHT.
+// -status:cancelled added 2026-08-24 — see the matching note on fetchOrders
+// above; comparison periods need the same exclusion so YoY/MoM % changes
+// aren't comparing a cancelled-inclusive current period against a
+// cancelled-inclusive (or differently-polluted) prior period.
 async function fetchOrdersLight(site, startISO, endISO) {
-  const searchQuery = `created_at:>=${startISO} created_at:<${endISO}`;
+  const searchQuery = `created_at:>=${startISO} created_at:<${endISO} -status:cancelled`;
   const orders = [];
   let cursor = null;
   let hasNextPage = true;
