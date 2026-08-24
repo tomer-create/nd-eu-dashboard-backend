@@ -20,7 +20,12 @@
 // Render as SHOPIFY_<SITE>_ACCESS_TOKEN. See README.md.
 
 const API_VERSION = process.env.SHOPIFY_API_VERSION || '2026-07';
-const SCOPES = 'read_orders,read_products,read_inventory';
+// read_reports added 2026-08-24 for fetchSalesReversals() (shopifyqlQuery) —
+// re-authorizing each store (visit /auth/<site> again) is required to mint a
+// new token carrying this scope; the old tokens only have the first three.
+// shopifyqlQuery also requires Shopify's separate Level 2 protected customer
+// data approval on the app itself — see README.md.
+const SCOPES = 'read_orders,read_products,read_inventory,read_reports';
 
 function getSiteConfig(site) {
   const key = site.toUpperCase();
@@ -168,22 +173,22 @@ async function fetchOrders(site, startISO, endISO) {
 }
 
 // Slimmed-down version of ORDERS_QUERY for the YoY/MoM comparison periods.
-// aggregate() in src/aggregate.js only reads gross_sales/net_sales/orders
-// off the comparison periods' orders — top_products/by_country/discounts
-// are computed but discarded by buildDataResponse() for yoy/mom, so there's
-// no reason to pay for lineItem titles/shippingAddress/tags on those two
-// fetches. Each of those adds real GraphQL query cost per order, and doing
-// all 3 periods (current + yoy + mom) concurrently means they compete for
-// the same per-shop rate-limit budget — the lighter this query, the less
-// that concurrency causes THROTTLED retries.
-// Includes just enough of the refunds shape (subtotalSet only, no
-// quantity/lineItem title) for aggregate()'s returnsTotal to come out
-// correct — Net Sales = Gross − Discounts − Returns needs this on every
-// period, not just the current one, or a YoY/MoM % change would compare
-// today's real (returns-subtracted) Net Sales against a comparison period's
-// inflated (returns-omitted) one. unitsReturned will end up NaN off this
-// query since quantity is missing, but that field isn't read from the
-// comparison periods' aggregate() output, so it's harmless.
+// aggregate() in src/aggregate.js only reads gross_sales/orders (via
+// lineItems + totalDiscountsSet) off the comparison periods' orders —
+// top_products/by_country/discounts/units/returns are computed but discarded
+// by buildDataResponse() for yoy/mom (returns now come from
+// fetchSalesReversals below, for all 3 periods, not from this query), so
+// there's no reason to pay for refunds/refundLineItems/shippingAddress/tags
+// on those two fetches. Each of those adds real GraphQL query cost per
+// order, and doing all 3 periods (current + yoy + mom) concurrently means
+// they compete for the same per-shop rate-limit budget — the lighter this
+// query, the less that concurrency causes THROTTLED retries. (Fields left
+// out here are simply undefined on the returned node; aggregate() already
+// treats refunds/shippingAddress/tags as optional via `|| []` / `?.`, so it
+// runs unmodified against these lighter objects. unitsReturned/returnsTotal
+// will come out as 0 off this query since there's no refunds block at all —
+// harmless, since server.js overrides both with the true sales_reversals
+// figure for every period.)
 const ORDERS_QUERY_LIGHT = `
   query OrdersForRangeLight($cursor: String, $searchQuery: String!) {
     orders(first: 100, after: $cursor, query: $searchQuery, sortKey: CREATED_AT) {
@@ -195,15 +200,6 @@ const ORDERS_QUERY_LIGHT = `
             edges {
               node {
                 originalTotalSet { shopMoney { amount } }
-              }
-            }
-          }
-          refunds {
-            refundLineItems(first: 100) {
-              edges {
-                node {
-                  subtotalSet { shopMoney { amount } }
-                }
               }
             }
           }
@@ -232,6 +228,57 @@ async function fetchOrdersLight(site, startISO, endISO) {
   return orders;
 }
 
+// Shopify's own "Sales reversals" figure (ShopifyQL), used as the
+// authoritative Returns number instead of the Orders-API approximation
+// above. Confirmed 2026-08-24 (Tomer: "you should pull the number from
+// Shopify Sales reversals number") that the Orders-API approach — refunds
+// attached to orders CREATED in the window — undercounts real returns by
+// ~69% for a normal period, because Shopify attributes a sales reversal by
+// the REFUND date, not the order's creation date. This queries that same
+// figure Shopify itself reports.
+//
+// Requires the read_reports access scope AND Shopify's Level 2 protected
+// customer data approval on the app (shopifyqlQuery touches customer/order
+// data) — see README.md for the one-time setup Tomer needs to do in the
+// Shopify Partner/Dev Dashboard before this will work. Until that's done,
+// this will throw an ACCESS_DENIED-style GraphQL error.
+async function fetchSalesReversals(site, startISO, endISOExclusive) {
+  // ShopifyQL's UNTIL is inclusive of the given day (confirmed empirically);
+  // this file's start/end convention is end-EXCLUSIVE (matches the
+  // created_at:< filters above), so step back one day to convert.
+  const untilDate = new Date(endISOExclusive + 'T00:00:00Z');
+  untilDate.setUTCDate(untilDate.getUTCDate() - 1);
+  const untilISO = untilDate.toISOString().slice(0, 10);
+
+  const shopifyqlQueryString = `FROM sales SHOW sales_reversals SINCE ${startISO} UNTIL ${untilISO}`;
+  const gqlQuery = `
+    query SalesReversals($q: String!) {
+      shopifyqlQuery(query: $q) {
+        parseErrors
+        tableData {
+          columns { name }
+          rows
+        }
+      }
+    }
+  `;
+
+  const data = await graphql(site, gqlQuery, { q: shopifyqlQueryString });
+  const result = data.shopifyqlQuery;
+  if (result.parseErrors && result.parseErrors.length) {
+    throw new Error(
+      `ShopifyQL parse error for "${site}" (query: ${shopifyqlQueryString}): ${result.parseErrors.join('; ')}`
+    );
+  }
+  const rows = result.tableData.rows;
+  if (!rows || !rows.length) return 0;
+  // Single column (sales_reversals), single row (no GROUP BY/TIMESERIES) —
+  // Shopify returns it as a negative number (it reduces sales); this file's
+  // convention is a positive "returns" figure that gets SUBTRACTED, so flip
+  // the sign here rather than at every call site.
+  return Math.abs(Number(rows[0][0]));
+}
+
 module.exports = {
   getSiteConfig,
   getAuthorizeUrl,
@@ -239,6 +286,7 @@ module.exports = {
   graphql,
   fetchOrders,
   fetchOrdersLight,
+  fetchSalesReversals,
   API_VERSION,
   SCOPES,
 };
