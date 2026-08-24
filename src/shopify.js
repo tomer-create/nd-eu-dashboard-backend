@@ -297,6 +297,57 @@ async function fetchSalesReversals(site, startISO, endISOExclusive) {
   return Math.abs(Number(rawValue));
 }
 
+// Shopify's own Cost of Goods Sold figure (ShopifyQL), pulled the same way
+// as fetchSalesReversals above. Added 2026-08-24 per Tomer's request ("the
+// COGS number isn't correct, you should pull it from Shopify as well") — the
+// dashboard's COGS tile previously came only from the P&L Google Sheet
+// (a manually maintained figure), with no live-sync path at all. That was
+// documented as something this backend "genuinely can't" supply, which was
+// true for the plain Orders API (it doesn't expose per-item cost) but not
+// for ShopifyQL's dedicated `cost_of_goods_sold` metric under `FROM sales`.
+// Confirmed live via a test query
+// (`FROM sales SHOW gross_sales, cost_of_goods_sold, gross_profit`) that
+// this field exists and returns real data for this shop — it relies on each
+// product variant's "cost per item" being set in Shopify; a variant with no
+// cost set contributes $0 here, same limitation Shopify's own reports have.
+async function fetchCostOfGoodsSold(site, startISO, endISOExclusive) {
+  // Same UNTIL-is-inclusive conversion as fetchSalesReversals above.
+  const untilDate = new Date(endISOExclusive + 'T00:00:00Z');
+  untilDate.setUTCDate(untilDate.getUTCDate() - 1);
+  const untilISO = untilDate.toISOString().slice(0, 10);
+
+  const shopifyqlQueryString = `FROM sales SHOW cost_of_goods_sold SINCE ${startISO} UNTIL ${untilISO}`;
+  const gqlQuery = `
+    query CostOfGoodsSold($q: String!) {
+      shopifyqlQuery(query: $q) {
+        parseErrors
+        tableData {
+          columns { name }
+          rows
+        }
+      }
+    }
+  `;
+
+  const data = await graphql(site, gqlQuery, { q: shopifyqlQueryString });
+  const result = data.shopifyqlQuery;
+  if (result.parseErrors && result.parseErrors.length) {
+    throw new Error(
+      `ShopifyQL parse error for "${site}" (query: ${shopifyqlQueryString}): ${result.parseErrors.join('; ')}`
+    );
+  }
+  const rows = result.tableData.rows;
+  if (!rows || !rows.length) return 0;
+  // Same row-shape as fetchSalesReversals — an array of ROW OBJECTS keyed by
+  // column name, not an array of arrays. Read via Object.values(), not
+  // rows[0][0] (see the BUG FOUND & FIXED note on fetchSalesReversals above
+  // — this is the exact mistake that caused a real production bug there).
+  // Unlike sales_reversals, Shopify returns this as a plain positive cost
+  // figure — no sign flip needed.
+  const rawValue = Object.values(rows[0])[0];
+  return Math.abs(Number(rawValue));
+}
+
 module.exports = {
   getSiteConfig,
   getAuthorizeUrl,
@@ -305,6 +356,7 @@ module.exports = {
   fetchOrders,
   fetchOrdersLight,
   fetchSalesReversals,
+  fetchCostOfGoodsSold,
   API_VERSION,
   SCOPES,
 };
