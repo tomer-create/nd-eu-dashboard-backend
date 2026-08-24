@@ -1,7 +1,7 @@
 require('dotenv').config();
 const express = require('express');
 const cors = require('cors');
-const { fetchOrders, fetchOrdersLight, getAuthorizeUrl, exchangeCodeForToken } = require('./src/shopify');
+const { fetchOrders, fetchOrdersLight, fetchSalesReversals, getAuthorizeUrl, exchangeCodeForToken } = require('./src/shopify');
 const { aggregate } = require('./src/aggregate');
 
 const app = express();
@@ -116,7 +116,7 @@ async function buildDataResponse({ site, start, end, compare }) {
   // Fetch the current period plus both comparison periods concurrently —
   // they're independent Shopify queries. The comparison periods use
   // fetchOrdersLight (a much cheaper GraphQL query — see shopify.js) since
-  // only gross/net sales + order count are read off them below; the full
+  // only gross sales + order count are read off them below; the full
   // per-order detail (line items, refunds, shipping address, tags) is only
   // needed for the current period's top_products/by_country/discounts.
   // Confirmed via direct testing (2026-08-24): the full-detail query for all
@@ -124,17 +124,35 @@ async function buildDataResponse({ site, start, end, compare }) {
   // (and sometimes past) the dashboard's timeout — this cuts the GraphQL
   // cost of 2 of those 3 fetches substantially, which also means less
   // Shopify rate-limit contention between the concurrent requests.
-  const [orders, yoyOrders, momOrders] = await Promise.all([
+  //
+  // Returns for all 3 periods come from fetchSalesReversals (Shopify's own
+  // ShopifyQL "sales_reversals" metric) rather than from the orders queries
+  // above — confirmed 2026-08-24 that the Orders-API refunds approach
+  // (attributed by order CREATION date) undercounts Shopify's own reported
+  // returns by ~69%, because Shopify attributes a sales reversal by the
+  // REFUND date instead. All 6 Shopify calls run in one Promise.all so this
+  // doesn't add extra latency on top of the orders fetches.
+  const [
+    orders,
+    yoyOrders,
+    momOrders,
+    currentReversals,
+    yoyReversals,
+    momReversals,
+  ] = await Promise.all([
     fetchOrders(site, start, end),
     wantYoy ? fetchOrdersLight(site, yoyRange.start, yoyRange.end) : Promise.resolve(null),
     wantMom ? fetchOrdersLight(site, momRange.start, momRange.end) : Promise.resolve(null),
+    fetchSalesReversals(site, start, end),
+    wantYoy ? fetchSalesReversals(site, yoyRange.start, yoyRange.end) : Promise.resolve(null),
+    wantMom ? fetchSalesReversals(site, momRange.start, momRange.end) : Promise.resolve(null),
   ]);
 
-  const current = aggregate(orders);
+  const current = applySalesReversals(aggregate(orders), currentReversals);
   const result = { site, start, end, ...current };
 
   if (wantYoy) {
-    const yoyAgg = aggregate(yoyOrders);
+    const yoyAgg = applySalesReversals(aggregate(yoyOrders), yoyReversals);
     result.yoy = {
       range: yoyRange,
       gross_sales_change: pctChange(current.kpis.gross_sales, yoyAgg.kpis.gross_sales),
@@ -144,7 +162,7 @@ async function buildDataResponse({ site, start, end, compare }) {
   }
 
   if (wantMom) {
-    const momAgg = aggregate(momOrders);
+    const momAgg = applySalesReversals(aggregate(momOrders), momReversals);
     result.mom = {
       range: momRange,
       gross_sales_change: pctChange(current.kpis.gross_sales, momAgg.kpis.gross_sales),
@@ -154,6 +172,28 @@ async function buildDataResponse({ site, start, end, compare }) {
   }
 
   return result;
+}
+
+// Overrides an aggregate() result's returns_total with Shopify's own
+// sales_reversals figure (see fetchSalesReversals in src/shopify.js), and
+// recomputes the two KPIs that are derived from it: net_sales and
+// average_order_value. units_returned is left as aggregate() computed it
+// (order-created-date based) — Tomer's request was specifically about the
+// Returns dollar figure, and Shopify's ShopifyQL sales_reversals metric
+// doesn't expose a units figure to replace it with.
+function applySalesReversals(aggResult, salesReversals) {
+  const { kpis } = aggResult;
+  const netSales = kpis.gross_sales - kpis.discounts_total - salesReversals;
+  const aov = kpis.orders ? netSales / kpis.orders : 0;
+  return {
+    ...aggResult,
+    kpis: {
+      ...kpis,
+      returns_total: salesReversals,
+      net_sales: netSales,
+      average_order_value: aov,
+    },
+  };
 }
 
 // GET /api/data?site=com&start=2026-08-01&end=2026-08-21&compare=yoy,mom
