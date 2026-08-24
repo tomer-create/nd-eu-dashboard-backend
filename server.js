@@ -1,7 +1,7 @@
 require('dotenv').config();
 const express = require('express');
 const cors = require('cors');
-const { fetchOrders, fetchOrdersLight, fetchSalesReversals, fetchCostOfGoodsSold, fetchTopReturnsByProduct, getAuthorizeUrl, exchangeCodeForToken } = require('./src/shopify');
+const { fetchOrders, fetchOrdersLight, fetchSalesReversals, fetchCostOfGoodsSold, fetchTopReturnsByProduct, fetchCountryBreakdown, getAuthorizeUrl, exchangeCodeForToken } = require('./src/shopify');
 const { aggregate } = require('./src/aggregate');
 
 const app = express();
@@ -148,8 +148,23 @@ async function buildDataResponse({ site, start, end, compare }) {
   // src/shopify.js for why it doesn't just reuse the refunds already fetched
   // by ORDERS_QUERY). It's another single ShopifyQL aggregate call (capped
   // at 15 rows server-side via LIMIT), so it's cheap the same way the
-  // reversals/COGS calls are. All 10 Shopify calls run in one Promise.all so
-  // none of this adds extra wall-clock time on top of the orders fetches.
+  // reversals/COGS calls are.
+  //
+  // countryBreakdown (added 2026-08-24, calls 11-13) replaces the by_country
+  // that used to come from aggregate() — Tomer reported ND.EU's Sales by
+  // Country section "show[ing] the country by name and not by country code,
+  // also ... Return Rate, YOY, MOM" not showing. aggregate()'s by_country
+  // only ever had a raw shippingAddress.countryCode and gross_sales/orders
+  // (see src/aggregate.js) — no real net sales, no returns, and obviously no
+  // YoY/MoM since aggregate() never sees a comparison period. ShopifyQL's
+  // `GROUP BY billing_country` gives full country display names AND can
+  // report net_sales/sales_reversals/orders in the same query — see
+  // fetchCountryBreakdown in src/shopify.js. Fetched for current/yoy/mom just
+  // like the reversals/COGS calls, so YoY/MoM can be computed per country the
+  // same way attachChangeByKey already does for products.
+  //
+  // All 13 Shopify calls run in one Promise.all so none of this adds extra
+  // wall-clock time on top of the orders fetches.
   const [
     orders,
     yoyOrders,
@@ -161,6 +176,9 @@ async function buildDataResponse({ site, start, end, compare }) {
     yoyCogs,
     momCogs,
     topReturns,
+    currentCountry,
+    yoyCountry,
+    momCountry,
   ] = await Promise.all([
     fetchOrders(site, start, end),
     wantYoy ? fetchOrdersLight(site, yoyRange.start, yoyRange.end) : Promise.resolve(null),
@@ -172,6 +190,9 @@ async function buildDataResponse({ site, start, end, compare }) {
     wantYoy ? fetchCostOfGoodsSold(site, yoyRange.start, yoyRange.end) : Promise.resolve(null),
     wantMom ? fetchCostOfGoodsSold(site, momRange.start, momRange.end) : Promise.resolve(null),
     fetchTopReturnsByProduct(site, start, end),
+    fetchCountryBreakdown(site, start, end),
+    wantYoy ? fetchCountryBreakdown(site, yoyRange.start, yoyRange.end) : Promise.resolve(null),
+    wantMom ? fetchCountryBreakdown(site, momRange.start, momRange.end) : Promise.resolve(null),
   ]);
 
   const current = applySalesReversals(aggregate(orders), currentReversals);
@@ -182,6 +203,17 @@ async function buildDataResponse({ site, start, end, compare }) {
   // starts as the current period's own top_products list.
   let topProducts = current.top_products;
 
+  // Overrides aggregate()'s code-only, returns-less by_country with the
+  // ShopifyQL-sourced breakdown — see the Promise.all comment above.
+  let byCountry = currentCountry.map((c) => ({
+    country: c.country,
+    orders: c.orders,
+    gross_sales: c.gross_sales,
+    net_sales: c.net_sales,
+    aov: c.orders ? c.net_sales / c.orders : null,
+    return_rate: c.gross_sales ? c.return_value / c.gross_sales : null,
+  }));
+
   if (wantYoy) {
     const yoyAgg = applySalesReversals(aggregate(yoyOrders), yoyReversals);
     result.yoy = {
@@ -191,7 +223,8 @@ async function buildDataResponse({ site, start, end, compare }) {
       orders_change: pctChange(current.kpis.orders, yoyAgg.kpis.orders),
       cogs_change: pctChange(current.kpis.cogs, yoyCogs),
     };
-    topProducts = attachProductChange(topProducts, yoyAgg.top_products, 'gross_sales_yoy_change');
+    topProducts = attachChangeByKey(topProducts, yoyAgg.top_products, 'title', 'gross_sales_yoy_change');
+    byCountry = attachChangeByKey(byCountry, yoyCountry, 'country', 'gross_sales_yoy_change');
   }
 
   if (wantMom) {
@@ -203,30 +236,35 @@ async function buildDataResponse({ site, start, end, compare }) {
       orders_change: pctChange(current.kpis.orders, momAgg.kpis.orders),
       cogs_change: pctChange(current.kpis.cogs, momCogs),
     };
-    topProducts = attachProductChange(topProducts, momAgg.top_products, 'gross_sales_mom_change');
+    topProducts = attachChangeByKey(topProducts, momAgg.top_products, 'title', 'gross_sales_mom_change');
+    byCountry = attachChangeByKey(byCountry, momCountry, 'country', 'gross_sales_mom_change');
   }
 
   result.top_products = topProducts;
+  result.by_country = byCountry;
   return result;
 }
 
 // Added 2026-08-24 per Tomer's request ("Top 15 selling products, the YOY
-// and MOM does not pulling data" on the live Sync path). Matches each
-// current-period product to the SAME product title in a comparison period's
-// top_products list (from aggregate() — now available for yoy/mom too since
-// ORDERS_QUERY_LIGHT fetches lineItems.title, see shopify.js) and computes a
-// gross-sales % change, same formula as the store-wide pctChange() above. A
-// product with no matching title in the comparison period (a brand-new
-// launch, or a product renamed between the two periods — this matches by
-// exact title string, there's no stable product ID carried through
-// aggregate()) gets `null` for this field rather than a misleading number.
-function attachProductChange(currentProducts, comparisonProducts, field) {
-  const comparisonByTitle = new Map(
-    (comparisonProducts || []).map((p) => [p.title, p.gross_sales])
+// and MOM does not pulling data" on the live Sync path); generalized the
+// same day to also serve the Sales by Country YoY/MoM fix (was named
+// attachProductChange, keyed only on `title` — renamed/parameterized rather
+// than duplicated, since the country version is identical except for which
+// field identifies a matching row). Matches each current-period row (product
+// or country) to the SAME `key` value in a comparison period's list and
+// computes a gross-sales % change, same formula as the store-wide
+// pctChange() above. A row with no match in the comparison period (a
+// brand-new product/a country with zero orders that period, or a renamed
+// product) gets `null` for this field rather than a misleading number —
+// matching is by exact string equality, there's no stable ID carried through
+// aggregate() or fetchCountryBreakdown for either dimension.
+function attachChangeByKey(currentRows, comparisonRows, key, field) {
+  const comparisonByKey = new Map(
+    (comparisonRows || []).map((r) => [r[key], r.gross_sales])
   );
-  return currentProducts.map((p) => ({
-    ...p,
-    [field]: pctChange(p.gross_sales, comparisonByTitle.get(p.title)),
+  return currentRows.map((r) => ({
+    ...r,
+    [field]: pctChange(r.gross_sales, comparisonByKey.get(r[key])),
   }));
 }
 
