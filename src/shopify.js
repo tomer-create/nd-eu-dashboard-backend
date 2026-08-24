@@ -347,7 +347,82 @@ async function fetchCostOfGoodsSold(site, startISO, endISOExclusive) {
   const rawValue = Object.values(rows[0])[0];
   return Math.abs(Number(rawValue));
 }
+fetchTopReturnsByProduct,
+  // Per-product Returns breakdown (Section 3 "Top Return Products" on the
+// dashboard), live via ShopifyQL — added 2026-08-24 after Tomer reported
+// ND.EU's Top 15 Return Products section "doesn't show at all." That section
+// previously had NO live-sync path whatsoever for any site — only ND.COM
+// carried a one-time, manually-pulled year-to-date snapshot baked into the
+// dashboard's embedded data, so every other site (and any future month)
+// always showed a "you need to upload/re-authorize" placeholder no matter
+// what was clicked.
+//
+// This deliberately does NOT reuse aggregate()'s existing per-order refund
+// data (order.refunds[].refundLineItems), even though that data is already
+// fetched by ORDERS_QUERY and already carries a lineItem.title — that
+// approach attributes a refund by the CREATION date of the original order,
+// the same approximation that was already found (2026-08-24, see
+// fetchSalesReversals above) to undercount Shopify's own reported returns by
+// ~69%, because Shopify attributes a sales reversal by the REFUND date
+// instead. Using the Orders-API approximation here would make Section 3's
+// per-product $ values inconsistent with the accurate store-wide Returns
+// figure already shown in Section 1. Instead this calls the same accurate
+// `sales_reversals` ShopifyQL metric, grouped by product — the same
+// technique used for ND.COM's original snapshot, just made callable live for
+// any site and date range.
+//
+// Ranks by the SELECTED period only (not year-to-date like the ND.COM
+// snapshot) — a true live YTD pull would need an extra always-Jan-1-to-today
+// query on every sync, left for a future pass. See dashboard-build-notes.md.
+async function fetchTopReturnsByProduct(site, startISO, endISOExclusive, limit = 15) {
+  // Same UNTIL-is-inclusive conversion as fetchSalesReversals/fetchCostOfGoodsSold above.
+  const untilDate = new Date(endISOExclusive + 'T00:00:00Z');
+  untilDate.setUTCDate(untilDate.getUTCDate() - 1);
+  const untilISO = untilDate.toISOString().slice(0, 10);
 
+  const shopifyqlQueryString = `FROM sales SHOW gross_sales, sales_reversals GROUP BY product_title ORDER BY sales_reversals ASC SINCE ${startISO} UNTIL ${untilISO} LIMIT ${limit}`;
+  const gqlQuery = `
+    query TopReturnsByProduct($q: String!) {
+      shopifyqlQuery(query: $q) {
+        parseErrors
+        tableData {
+          columns { name }
+          rows
+        }
+      }
+    }
+  `;
+
+  const data = await graphql(site, gqlQuery, { q: shopifyqlQueryString });
+  const result = data.shopifyqlQuery;
+  if (result.parseErrors && result.parseErrors.length) {
+    throw new Error(
+      `ShopifyQL parse error for "${site}" (query: ${shopifyqlQueryString}): ${result.parseErrors.join('; ')}`
+    );
+  }
+
+  // Same row-shape caveat as fetchSalesReversals/fetchCostOfGoodsSold: rows
+  // come back as an array of ROW OBJECTS, not an array of arrays — but with
+  // 3 columns here (product_title, gross_sales, sales_reversals) instead of
+  // 1, read each row via the `columns` list rather than a hardcoded key name
+  // (Object.values() ordering isn't a documented guarantee for a 3-column
+  // row the way it's fine for the single-column queries above).
+  const colNames = (result.tableData.columns || []).map((c) => c.name);
+  const rows = result.tableData.rows || [];
+  return rows
+    .map((row) => {
+      const values = Array.isArray(row) ? row : colNames.map((name) => row[name]);
+      const obj = {};
+      colNames.forEach((name, i) => { obj[name] = values[i]; });
+      return obj;
+    })
+    .filter((r) => r.product_title)
+    .map((r) => ({
+      title: r.product_title,
+      gross_sales: Number(r.gross_sales) || 0,
+      return_value: Math.abs(Number(r.sales_reversals) || 0),
+    }));
+}
 module.exports = {
   getSiteConfig,
   getAuthorizeUrl,
@@ -357,6 +432,7 @@ module.exports = {
   fetchOrdersLight,
   fetchSalesReversals,
   fetchCostOfGoodsSold,
+  fetchTopReturnsByProduct,
   API_VERSION,
   SCOPES,
 };
