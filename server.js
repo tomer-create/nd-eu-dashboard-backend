@@ -1,7 +1,7 @@
 require('dotenv').config();
 const express = require('express');
 const cors = require('cors');
-const { fetchOrders, fetchOrdersLight, fetchSalesReversals, fetchCostOfGoodsSold, getAuthorizeUrl, exchangeCodeForToken } = require('./src/shopify');
+const { fetchOrders, fetchOrdersLight, fetchSalesReversals, fetchCostOfGoodsSold, fetchTopReturnsByProduct, getAuthorizeUrl, exchangeCodeForToken } = require('./src/shopify');
 const { aggregate } = require('./src/aggregate');
 
 const app = express();
@@ -142,7 +142,7 @@ async function buildDataResponse({ site, start, end, compare }) {
   // here doesn't meaningfully add to the latency that made the sync-timeout
   // fix necessary. All 9 Shopify calls run in one Promise.all so none of
   // this adds extra wall-clock time on top of the orders fetches.
-  const [
+   const [
     orders,
     yoyOrders,
     momOrders,
@@ -152,6 +152,7 @@ async function buildDataResponse({ site, start, end, compare }) {
     currentCogs,
     yoyCogs,
     momCogs,
+    topReturns,
   ] = await Promise.all([
     fetchOrders(site, start, end),
     wantYoy ? fetchOrdersLight(site, yoyRange.start, yoyRange.end) : Promise.resolve(null),
@@ -162,14 +163,13 @@ async function buildDataResponse({ site, start, end, compare }) {
     fetchCostOfGoodsSold(site, start, end),
     wantYoy ? fetchCostOfGoodsSold(site, yoyRange.start, yoyRange.end) : Promise.resolve(null),
     wantMom ? fetchCostOfGoodsSold(site, momRange.start, momRange.end) : Promise.resolve(null),
+    fetchTopReturnsByProduct(site, start, end),
   ]);
 
   const current = applySalesReversals(aggregate(orders), currentReversals);
   current.kpis.cogs = currentCogs;
   const result = { site, start, end, ...current };
-  // Reassigned below as YoY/MoM per-product comparisons are computed —
-  // starts as the current period's own top_products list.
-  let topProducts = current.top_products;
+  result.top_returns = topReturns;
 
   if (wantYoy) {
     const yoyAgg = applySalesReversals(aggregate(yoyOrders), yoyReversals);
