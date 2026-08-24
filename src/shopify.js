@@ -173,22 +173,29 @@ async function fetchOrders(site, startISO, endISO) {
 }
 
 // Slimmed-down version of ORDERS_QUERY for the YoY/MoM comparison periods.
-// aggregate() in src/aggregate.js only reads gross_sales/orders (via
-// lineItems + totalDiscountsSet) off the comparison periods' orders —
-// top_products/by_country/discounts/units/returns are computed but discarded
-// by buildDataResponse() for yoy/mom (returns now come from
-// fetchSalesReversals below, for all 3 periods, not from this query), so
-// there's no reason to pay for refunds/refundLineItems/shippingAddress/tags
-// on those two fetches. Each of those adds real GraphQL query cost per
+// aggregate() in src/aggregate.js reads gross_sales/orders (via lineItems +
+// totalDiscountsSet) AND per-product gross_sales (via lineItems.title) off
+// the comparison periods' orders — by_country/discounts/units/returns are
+// computed but discarded by buildDataResponse() for yoy/mom (returns come
+// from fetchSalesReversals below, for all 3 periods, not from this query),
+// so there's no reason to pay for refunds/refundLineItems/shippingAddress/
+// tags on those two fetches. Each of those adds real GraphQL query cost per
 // order, and doing all 3 periods (current + yoy + mom) concurrently means
 // they compete for the same per-shop rate-limit budget — the lighter this
-// query, the less that concurrency causes THROTTLED retries. (Fields left
-// out here are simply undefined on the returned node; aggregate() already
-// treats refunds/shippingAddress/tags as optional via `|| []` / `?.`, so it
-// runs unmodified against these lighter objects. unitsReturned/returnsTotal
-// will come out as 0 off this query since there's no refunds block at all —
-// harmless, since server.js overrides both with the true sales_reversals
-// figure for every period.)
+// query, the less that concurrency causes THROTTLED retries. `title` was
+// added 2026-08-24 to support real per-product YoY/MoM on Section 2 (see
+// attachProductChange() in server.js) — it's a cheap scalar per line item,
+// not the expensive part of the original full query (that was
+// refunds/shippingAddress/tags, still excluded here), so this shouldn't
+// meaningfully change the latency this lighter query was built to fix.
+// (Fields left out here are simply undefined on the returned node;
+// aggregate() already treats refunds/shippingAddress/tags as optional via
+// `|| []` / `?.`, so it runs unmodified against these lighter objects.
+// unitsSold/unitsReturned/returnsTotal will come out as 0/NaN off this query
+// since quantity/refunds aren't fetched — harmless, since server.js only
+// reads gross_sales (store-wide and per-product) and orders off these
+// periods, and overrides returns_total with the true sales_reversals figure
+// for every period.)
 const ORDERS_QUERY_LIGHT = `
   query OrdersForRangeLight($cursor: String, $searchQuery: String!) {
     orders(first: 100, after: $cursor, query: $searchQuery, sortKey: CREATED_AT) {
@@ -199,6 +206,7 @@ const ORDERS_QUERY_LIGHT = `
           lineItems(first: 100) {
             edges {
               node {
+                title
                 originalTotalSet { shopMoney { amount } }
               }
             }
