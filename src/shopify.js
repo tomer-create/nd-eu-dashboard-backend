@@ -167,12 +167,65 @@ async function fetchOrders(site, startISO, endISO) {
   return orders;
 }
 
+// Slimmed-down version of ORDERS_QUERY for the YoY/MoM comparison periods.
+// aggregate() in src/aggregate.js only reads gross_sales/net_sales/orders
+// (via lineItems + totalDiscountsSet) off the comparison periods' orders —
+// top_products/by_country/discounts/units are computed but discarded by
+// buildDataResponse() for yoy/mom, so there's no reason to pay for
+// refunds/refundLineItems/shippingAddress/tags on those two fetches. Each of
+// those adds real GraphQL query cost per order, and doing all 3 periods
+// (current + yoy + mom) concurrently means they compete for the same
+// per-shop rate-limit budget — the lighter this query, the less that
+// concurrency causes THROTTLED retries. (Fields left out here are simply
+// undefined on the returned node; aggregate() already treats
+// refunds/shippingAddress/tags as optional via `|| []` / `?.`, so it runs
+// unmodified against these lighter objects.)
+const ORDERS_QUERY_LIGHT = `
+  query OrdersForRangeLight($cursor: String, $searchQuery: String!) {
+    orders(first: 100, after: $cursor, query: $searchQuery, sortKey: CREATED_AT) {
+      pageInfo { hasNextPage endCursor }
+      edges {
+        node {
+          totalDiscountsSet { shopMoney { amount } }
+          lineItems(first: 100) {
+            edges {
+              node {
+                originalTotalSet { shopMoney { amount } }
+              }
+            }
+          }
+        }
+      }
+    }
+  }
+`;
+
+// Same as fetchOrders, but for callers (YoY/MoM comparisons) that only need
+// gross/net sales + order count out of aggregate() — see ORDERS_QUERY_LIGHT.
+async function fetchOrdersLight(site, startISO, endISO) {
+  const searchQuery = `created_at:>=${startISO} created_at:<${endISO}`;
+  const orders = [];
+  let cursor = null;
+  let hasNextPage = true;
+
+  while (hasNextPage) {
+    const data = await graphql(site, ORDERS_QUERY_LIGHT, { cursor, searchQuery });
+    const { edges, pageInfo } = data.orders;
+    for (const edge of edges) orders.push(edge.node);
+    hasNextPage = pageInfo.hasNextPage;
+    cursor = pageInfo.endCursor;
+  }
+
+  return orders;
+}
+
 module.exports = {
   getSiteConfig,
   getAuthorizeUrl,
   exchangeCodeForToken,
   graphql,
   fetchOrders,
+  fetchOrdersLight,
   API_VERSION,
   SCOPES,
 };
