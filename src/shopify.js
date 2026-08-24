@@ -347,8 +347,8 @@ async function fetchCostOfGoodsSold(site, startISO, endISOExclusive) {
   const rawValue = Object.values(rows[0])[0];
   return Math.abs(Number(rawValue));
 }
-fetchTopReturnsByProduct,
-  // Per-product Returns breakdown (Section 3 "Top Return Products" on the
+
+// Per-product Returns breakdown (Section 3 "Top Return Products" on the
 // dashboard), live via ShopifyQL — added 2026-08-24 after Tomer reported
 // ND.EU's Top 15 Return Products section "doesn't show at all." That section
 // previously had NO live-sync path whatsoever for any site — only ND.COM
@@ -423,6 +423,7 @@ async function fetchTopReturnsByProduct(site, startISO, endISOExclusive, limit =
       return_value: Math.abs(Number(r.sales_reversals) || 0),
     }));
 }
+
 module.exports = {
   getSiteConfig,
   getAuthorizeUrl,
