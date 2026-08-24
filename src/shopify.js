@@ -424,6 +424,71 @@ async function fetchTopReturnsByProduct(site, startISO, endISOExclusive, limit =
     }));
 }
 
+// Per-country breakdown (Section 5 "Sales by Country" on the dashboard), live
+// via ShopifyQL — added 2026-08-24 after Tomer reported that on ND.EU this
+// section "show[s] the country by name and not by country code, also shows
+// all the other data isn't showing like Return Rate, YOY, MOM."
+//
+// Root cause: the live-sync path's by_country previously came from
+// aggregate() in src/aggregate.js, which groups raw Orders-API results by
+// `order.shippingAddress?.countryCode` — a raw 2-letter ISO code (e.g. "GB"),
+// with no net_sales/orders-derived AOV, no returns figure, and obviously no
+// comparison-period YoY/MoM (aggregate() never sees a comparison period).
+// ND.COM's embedded snapshot never had this problem because it was built by
+// hand from a ShopifyQL `GROUP BY billing_country` pull, which returns full
+// country display names ("United States", not "US") and can include
+// sales_reversals in the same query for a real per-country return rate. This
+// function makes that same technique callable live for any site/date range,
+// exactly the same pattern as fetchTopReturnsByProduct above.
+async function fetchCountryBreakdown(site, startISO, endISOExclusive, limit = 100) {
+  // Same UNTIL-is-inclusive conversion as the other shopifyqlQuery helpers above.
+  const untilDate = new Date(endISOExclusive + 'T00:00:00Z');
+  untilDate.setUTCDate(untilDate.getUTCDate() - 1);
+  const untilISO = untilDate.toISOString().slice(0, 10);
+
+  const shopifyqlQueryString = `FROM sales SHOW gross_sales, net_sales, sales_reversals, orders GROUP BY billing_country ORDER BY gross_sales DESC SINCE ${startISO} UNTIL ${untilISO} LIMIT ${limit}`;
+  const gqlQuery = `
+    query CountryBreakdown($q: String!) {
+      shopifyqlQuery(query: $q) {
+        parseErrors
+        tableData {
+          columns { name }
+          rows
+        }
+      }
+    }
+  `;
+
+  const data = await graphql(site, gqlQuery, { q: shopifyqlQueryString });
+  const result = data.shopifyqlQuery;
+  if (result.parseErrors && result.parseErrors.length) {
+    throw new Error(
+      `ShopifyQL parse error for "${site}" (query: ${shopifyqlQueryString}): ${result.parseErrors.join('; ')}`
+    );
+  }
+
+  // Same row-shape caveat as the other multi-column shopifyqlQuery helpers
+  // above: rows come back as an array of ROW OBJECTS, read via the `columns`
+  // list rather than a hardcoded key/positional assumption.
+  const colNames = (result.tableData.columns || []).map((c) => c.name);
+  const rows = result.tableData.rows || [];
+  return rows
+    .map((row) => {
+      const values = Array.isArray(row) ? row : colNames.map((name) => row[name]);
+      const obj = {};
+      colNames.forEach((name, i) => { obj[name] = values[i]; });
+      return obj;
+    })
+    .filter((r) => r.billing_country)
+    .map((r) => ({
+      country: r.billing_country,
+      gross_sales: Number(r.gross_sales) || 0,
+      net_sales: Number(r.net_sales) || 0,
+      orders: Number(r.orders) || 0,
+      return_value: Math.abs(Number(r.sales_reversals) || 0),
+    }));
+}
+
 module.exports = {
   getSiteConfig,
   getAuthorizeUrl,
@@ -434,6 +499,7 @@ module.exports = {
   fetchSalesReversals,
   fetchCostOfGoodsSold,
   fetchTopReturnsByProduct,
+  fetchCountryBreakdown,
   API_VERSION,
   SCOPES,
 };
