@@ -150,6 +150,9 @@ async function buildDataResponse({ site, start, end, compare }) {
 
   const current = applySalesReversals(aggregate(orders), currentReversals);
   const result = { site, start, end, ...current };
+  // Reassigned below as YoY/MoM per-product comparisons are computed —
+  // starts as the current period's own top_products list.
+  let topProducts = current.top_products;
 
   if (wantYoy) {
     const yoyAgg = applySalesReversals(aggregate(yoyOrders), yoyReversals);
@@ -159,6 +162,7 @@ async function buildDataResponse({ site, start, end, compare }) {
       net_sales_change: pctChange(current.kpis.net_sales, yoyAgg.kpis.net_sales),
       orders_change: pctChange(current.kpis.orders, yoyAgg.kpis.orders),
     };
+    topProducts = attachProductChange(topProducts, yoyAgg.top_products, 'gross_sales_yoy_change');
   }
 
   if (wantMom) {
@@ -169,9 +173,31 @@ async function buildDataResponse({ site, start, end, compare }) {
       net_sales_change: pctChange(current.kpis.net_sales, momAgg.kpis.net_sales),
       orders_change: pctChange(current.kpis.orders, momAgg.kpis.orders),
     };
+    topProducts = attachProductChange(topProducts, momAgg.top_products, 'gross_sales_mom_change');
   }
 
+  result.top_products = topProducts;
   return result;
+}
+
+// Added 2026-08-24 per Tomer's request ("Top 15 selling products, the YOY
+// and MOM does not pulling data" on the live Sync path). Matches each
+// current-period product to the SAME product title in a comparison period's
+// top_products list (from aggregate() — now available for yoy/mom too since
+// ORDERS_QUERY_LIGHT fetches lineItems.title, see shopify.js) and computes a
+// gross-sales % change, same formula as the store-wide pctChange() above. A
+// product with no matching title in the comparison period (a brand-new
+// launch, or a product renamed between the two periods — this matches by
+// exact title string, there's no stable product ID carried through
+// aggregate()) gets `null` for this field rather than a misleading number.
+function attachProductChange(currentProducts, comparisonProducts, field) {
+  const comparisonByTitle = new Map(
+    (comparisonProducts || []).map((p) => [p.title, p.gross_sales])
+  );
+  return currentProducts.map((p) => ({
+    ...p,
+    [field]: pctChange(p.gross_sales, comparisonByTitle.get(p.title)),
+  }));
 }
 
 // Overrides an aggregate() result's returns_total with Shopify's own
