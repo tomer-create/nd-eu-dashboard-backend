@@ -108,28 +108,39 @@ async function buildDataResponse({ site, start, end, compare }) {
     throw err;
   }
 
-  const orders = await fetchOrders(site, start, end);
+  const wantYoy = compare.includes('yoy');
+  const wantMom = compare.includes('mom');
+  const yoyRange = wantYoy ? shiftDateRange(start, end, { years: 1 }) : null;
+  const momRange = wantMom ? shiftDateRange(start, end, { months: 1 }) : null;
+
+  // Fetch the current period plus both comparison periods concurrently —
+  // they're independent Shopify queries, and each can take several seconds
+  // to paginate through a month of orders. Running them in parallel instead
+  // of one-after-another cuts real-world sync latency by roughly 3x, which
+  // matters a lot on top of Render free-tier cold-start delay.
+  const [orders, yoyOrders, momOrders] = await Promise.all([
+    fetchOrders(site, start, end),
+    wantYoy ? fetchOrders(site, yoyRange.start, yoyRange.end) : Promise.resolve(null),
+    wantMom ? fetchOrders(site, momRange.start, momRange.end) : Promise.resolve(null),
+  ]);
+
   const current = aggregate(orders);
   const result = { site, start, end, ...current };
 
-  if (compare.includes('yoy')) {
-    const range = shiftDateRange(start, end, { years: 1 });
-    const yoyOrders = await fetchOrders(site, range.start, range.end);
+  if (wantYoy) {
     const yoyAgg = aggregate(yoyOrders);
     result.yoy = {
-      range,
+      range: yoyRange,
       gross_sales_change: pctChange(current.kpis.gross_sales, yoyAgg.kpis.gross_sales),
       net_sales_change: pctChange(current.kpis.net_sales, yoyAgg.kpis.net_sales),
       orders_change: pctChange(current.kpis.orders, yoyAgg.kpis.orders),
     };
   }
 
-  if (compare.includes('mom')) {
-    const range = shiftDateRange(start, end, { months: 1 });
-    const momOrders = await fetchOrders(site, range.start, range.end);
+  if (wantMom) {
     const momAgg = aggregate(momOrders);
     result.mom = {
-      range,
+      range: momRange,
       gross_sales_change: pctChange(current.kpis.gross_sales, momAgg.kpis.gross_sales),
       net_sales_change: pctChange(current.kpis.net_sales, momAgg.kpis.net_sales),
       orders_change: pctChange(current.kpis.orders, momAgg.kpis.orders),
