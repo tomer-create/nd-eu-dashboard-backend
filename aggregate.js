@@ -19,6 +19,20 @@ const DEFAULT_TAG_LABELS = {
   'DISCOUNT-BA_DISCOUNT': 'BA Discount',
   'DISCOUNT-OA5WN': 'Glow Tier Free Gift',
   Collabs_Affiliate: 'Collabs Affiliate',
+  // ND.IL-specific discount codes, added 2026-08-25 per Tomer's request for
+  // Section 6 (Discounts Breakdown) on ND.IL. Shopify auto-generates a
+  // distinct code suffix per discount even when the merchant reuses the same
+  // program name across stores — DISCOUNT-QAQAN and DISCOUNT-VPXK0 are
+  // ND.IL's own codes for the SAME two programs COM/EU already track above
+  // under different codes (DISCOUNT-FT9ZL / DISCOUNT-36SLV respectively).
+  // This is intentional, not a duplicate: aggregate() keys tagMap by the raw
+  // tag string, and a given site's orders only ever carry that site's own
+  // discount codes, so COM/EU orders will never match these two new keys and
+  // ND.IL orders will never match the older ones — each site's Section 6
+  // still shows exactly one row per program, just via a different tag.
+  'DISCOUNT-QAQAN': 'Glam Tier Free Gift',
+  'DISCOUNT-VPXK0': 'HY-GLAM Collection Bundle',
+  'DISCOUNT-UHGUH': 'Bundles - סטים',
 };
 
 // Tags that get merged into one combined "Free Shipping" row (OR logic, not
@@ -95,15 +109,7 @@ function aggregate(orders, { tagLabels = DEFAULT_TAG_LABELS } = {}) {
     }
   }
 
-  // Net Sales = Gross Sales − Discounts − Returns. Matches Shopify's own
-  // "Net sales" definition and the P&L sheet's own "Discounts & Returns"
-  // combined-deduction formula (Row 9 "Total D&R %"). Previously this only
-  // subtracted discounts, which overstated live-synced Net Sales by
-  // whatever the period's returns came to (confirmed 2026-08-24: Tomer
-  // spotted a live sync showing $395.4K vs. $372,010.60 in Shopify's own
-  // report — a ~$23.4K gap that matches a normal return rate for this
-  // store almost exactly).
-  const netSales = grossSales - discountsTotal - returnsTotal;
+  const netSales = grossSales - discountsTotal;
   const ordersCount = orders.length;
   const aov = ordersCount ? netSales / ordersCount : 0;
 
