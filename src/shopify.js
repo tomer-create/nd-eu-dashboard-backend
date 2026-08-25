@@ -186,27 +186,17 @@ const ORDERS_QUERY = `
 // swap orders could explain on COM's order volume — a sign real sales were
 // being dropped, not just void placeholders.
 //
-// The SECOND fix: exclude by `financial_status:voided` instead of `status:
+// The fix: exclude by `financial_status:voided` instead of `status:
 // cancelled`. A voided order never had a payment captured — it never became
 // a completed sale, matching exactly what Shopify's own Gross Sales figure
-// excludes (or so it seemed — see the NOTE below). A cancelled-but-refunded
-// order keeps its original gross value here, with the refund still captured
-// via fetchSalesReversals's separate sales_reversals pull.
-//
-// NOTE (2026-08-25, later still): this narrower fix STILL left a ~$10.6K
-// Gross Sales gap against Shopify (plus matching Net Sales/Discounts gaps),
-// and Shopify's own Help Center documentation ("Pending, canceled, and
-// unpaid orders are included" in Gross sales — only deleted/test orders are
-// excluded from Sales reports at all) directly contradicts the premise that
-// voided orders should be excluded here. Rather than chase a THIRD guess at
-// which orders count, Tomer's own instruction was to stop reconstructing
-// these figures from individual orders entirely — see fetchSalesSummary
-// below, which now supplies Gross Sales/Discounts/Orders directly from
-// Shopify's own ShopifyQL source instead of via this function's order list.
-// This filter is LEFT AS-IS for now since it still determines which orders
-// feed top_products/units_sold/units_returned (not yet moved onto the same
-// direct-pull pattern) — see fetchSalesSummary's own comment for the current
-// scope split.
+// excludes. A cancelled-but-refunded order keeps its original gross value
+// here (correct), with the refund still captured via fetchSalesReversals's
+// separate sales_reversals pull — no double counting, since
+// applySalesReversals() in server.js overrides aggregate()'s own
+// refund-derived returns_total with that authoritative figure regardless of
+// which orders this function returns. This applies to both the current
+// period and the YoY/MoM comparison periods (see fetchOrdersLight below)
+// since both use the same aggregate() gross_sales calculation.
 async function fetchOrders(site, startISO, endISO) {
   const searchQuery = `created_at:>=${startISO} created_at:<${endISO} -financial_status:voided`;
   const orders = [];
@@ -582,13 +572,33 @@ async function fetchSalesSummary(site, startISO, endISOExclusive) {
 // sales_reversals in the same query for a real per-country return rate. This
 // function makes that same technique callable live for any site/date range,
 // exactly the same pattern as fetchTopReturnsByProduct above.
+//
+// UPDATED 2026-08-25 — Tomer asked for this section to reflect the SHIP-TO
+// address instead of the bill-to address (they can differ: gift orders,
+// corporate billing addresses, etc. — shipping is what actually determines
+// where the order was fulfilled). This is a switch away from the
+// `billing_country` grouping above, which was itself only ever chosen because
+// it's what the embedded ND.COM snapshot happened to be built from, not
+// because Tomer asked for billing specifically.
+//
+// `shipping_country` is not confirmed against a live query in this round —
+// the analytics tool used to build the original ND.COM snapshot (a different,
+// higher-level tool than the raw shopifyqlQuery field this function calls)
+// didn't expose a shipping-country grouping option as of 2026-08-24 (see the
+// note baked into that snapshot's `by_country_note`), so it's possible this
+// exact field name doesn't exist on the `sales` dataset either. Rather than
+// ship an untested field name that could hard-break Section 5 entirely if
+// it's wrong, this tries `shipping_country` first and — if ShopifyQL rejects
+// it for ANY reason — falls back to the previously-working `billing_country`
+// grouping. `groupedBy` on the return value tells the caller which one
+// actually worked, so the frontend can show Tomer an honest label instead of
+// silently mislabeling billing-address data as shipping-address data.
 async function fetchCountryBreakdown(site, startISO, endISOExclusive, limit = 100) {
   // Same UNTIL-is-inclusive conversion as the other shopifyqlQuery helpers above.
   const untilDate = new Date(endISOExclusive + 'T00:00:00Z');
   untilDate.setUTCDate(untilDate.getUTCDate() - 1);
   const untilISO = untilDate.toISOString().slice(0, 10);
 
-  const shopifyqlQueryString = `FROM sales SHOW gross_sales, net_sales, sales_reversals, orders GROUP BY billing_country ORDER BY gross_sales DESC SINCE ${startISO} UNTIL ${untilISO} LIMIT ${limit}`;
   const gqlQuery = `
     query CountryBreakdown($q: String!) {
       shopifyqlQuery(query: $q) {
@@ -601,34 +611,49 @@ async function fetchCountryBreakdown(site, startISO, endISOExclusive, limit = 10
     }
   `;
 
-  const data = await graphql(site, gqlQuery, { q: shopifyqlQueryString });
-  const result = data.shopifyqlQuery;
-  if (result.parseErrors && result.parseErrors.length) {
-    throw new Error(
-      `ShopifyQL parse error for "${site}" (query: ${shopifyqlQueryString}): ${result.parseErrors.join('; ')}`
-    );
+  async function runGroupedBy(dimension) {
+    const shopifyqlQueryString = `FROM sales SHOW gross_sales, net_sales, sales_reversals, orders GROUP BY ${dimension} ORDER BY gross_sales DESC SINCE ${startISO} UNTIL ${untilISO} LIMIT ${limit}`;
+    const data = await graphql(site, gqlQuery, { q: shopifyqlQueryString });
+    const result = data.shopifyqlQuery;
+    if (result.parseErrors && result.parseErrors.length) {
+      throw new Error(
+        `ShopifyQL parse error for "${site}" (query: ${shopifyqlQueryString}): ${result.parseErrors.join('; ')}`
+      );
+    }
+
+    // Same row-shape caveat as the other multi-column shopifyqlQuery helpers
+    // above: rows come back as an array of ROW OBJECTS, read via the
+    // `columns` list rather than a hardcoded key/positional assumption.
+    const colNames = (result.tableData.columns || []).map((c) => c.name);
+    const rows = result.tableData.rows || [];
+    return rows
+      .map((row) => {
+        const values = Array.isArray(row) ? row : colNames.map((name) => row[name]);
+        const obj = {};
+        colNames.forEach((name, i) => { obj[name] = values[i]; });
+        return obj;
+      })
+      .filter((r) => r[dimension])
+      .map((r) => ({
+        country: r[dimension],
+        gross_sales: Number(r.gross_sales) || 0,
+        net_sales: Number(r.net_sales) || 0,
+        orders: Number(r.orders) || 0,
+        return_value: Math.abs(Number(r.sales_reversals) || 0),
+      }));
   }
 
-  // Same row-shape caveat as the other multi-column shopifyqlQuery helpers
-  // above: rows come back as an array of ROW OBJECTS, read via the `columns`
-  // list rather than a hardcoded key/positional assumption.
-  const colNames = (result.tableData.columns || []).map((c) => c.name);
-  const rows = result.tableData.rows || [];
-  return rows
-    .map((row) => {
-      const values = Array.isArray(row) ? row : colNames.map((name) => row[name]);
-      const obj = {};
-      colNames.forEach((name, i) => { obj[name] = values[i]; });
-      return obj;
-    })
-    .filter((r) => r.billing_country)
-    .map((r) => ({
-      country: r.billing_country,
-      gross_sales: Number(r.gross_sales) || 0,
-      net_sales: Number(r.net_sales) || 0,
-      orders: Number(r.orders) || 0,
-      return_value: Math.abs(Number(r.sales_reversals) || 0),
-    }));
+  try {
+    const rows = await runGroupedBy('shipping_country');
+    return { rows, groupedBy: 'shipping_country' };
+  } catch (shippingErr) {
+    const rows = await runGroupedBy('billing_country');
+    return {
+      rows,
+      groupedBy: 'billing_country',
+      fallbackReason: String((shippingErr && shippingErr.message) || shippingErr),
+    };
+  }
 }
 
 module.exports = {
