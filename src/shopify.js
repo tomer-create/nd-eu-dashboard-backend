@@ -396,8 +396,8 @@ async function fetchCostOfGoodsSold(site, startISO, endISOExclusive) {
 // any site and date range.
 //
 // Ranks by the SELECTED period only (not year-to-date like the ND.COM
-// snapshot) — a true live YTD pull would need an extra always-Jan-1-to-today
-// query on every sync, left for a future pass. See dashboard-build-notes.md.
+// snapshot) — reused as-is 2026-08-25 for a second, wider-range call to
+// support Section 3's "Return Ratio (YTD)" column, see server.js.
 async function fetchTopReturnsByProduct(site, startISO, endISOExclusive, limit = 15) {
   // Same UNTIL-is-inclusive conversion as fetchSalesReversals/fetchCostOfGoodsSold above.
   const untilDate = new Date(endISOExclusive + 'T00:00:00Z');
