@@ -186,17 +186,27 @@ const ORDERS_QUERY = `
 // swap orders could explain on COM's order volume — a sign real sales were
 // being dropped, not just void placeholders.
 //
-// The fix: exclude by `financial_status:voided` instead of `status:
+// The SECOND fix: exclude by `financial_status:voided` instead of `status:
 // cancelled`. A voided order never had a payment captured — it never became
 // a completed sale, matching exactly what Shopify's own Gross Sales figure
-// excludes. A cancelled-but-refunded order keeps its original gross value
-// here (correct), with the refund still captured via fetchSalesReversals's
-// separate sales_reversals pull — no double counting, since
-// applySalesReversals() in server.js overrides aggregate()'s own
-// refund-derived returns_total with that authoritative figure regardless of
-// which orders this function returns. This applies to both the current
-// period and the YoY/MoM comparison periods (see fetchOrdersLight below)
-// since both use the same aggregate() gross_sales calculation.
+// excludes (or so it seemed — see the NOTE below). A cancelled-but-refunded
+// order keeps its original gross value here, with the refund still captured
+// via fetchSalesReversals's separate sales_reversals pull.
+//
+// NOTE (2026-08-25, later still): this narrower fix STILL left a ~$10.6K
+// Gross Sales gap against Shopify (plus matching Net Sales/Discounts gaps),
+// and Shopify's own Help Center documentation ("Pending, canceled, and
+// unpaid orders are included" in Gross sales — only deleted/test orders are
+// excluded from Sales reports at all) directly contradicts the premise that
+// voided orders should be excluded here. Rather than chase a THIRD guess at
+// which orders count, Tomer's own instruction was to stop reconstructing
+// these figures from individual orders entirely — see fetchSalesSummary
+// below, which now supplies Gross Sales/Discounts/Orders directly from
+// Shopify's own ShopifyQL source instead of via this function's order list.
+// This filter is LEFT AS-IS for now since it still determines which orders
+// feed top_products/units_sold/units_returned (not yet moved onto the same
+// direct-pull pattern) — see fetchSalesSummary's own comment for the current
+// scope split.
 async function fetchOrders(site, startISO, endISO) {
   const searchQuery = `created_at:>=${startISO} created_at:<${endISO} -financial_status:voided`;
   const orders = [];
@@ -470,6 +480,92 @@ async function fetchTopReturnsByProduct(site, startISO, endISOExclusive, limit =
     }));
 }
 
+// Shopify's own authoritative "Gross sales / Discounts / Orders" totals
+// (ShopifyQL), pulled the same way as fetchSalesReversals/fetchCostOfGoodsSold
+// above. Added 2026-08-25 after TWO earlier same-day fixes
+// (`-status:cancelled`, then narrowed to `-financial_status:voided` on
+// fetchOrders/fetchOrdersLight's search query) tried to reconstruct which
+// orders Shopify's own Gross Sales/Net Sales/Discounts tiles count by
+// including/excluding orders order-by-order — and got it wrong in two
+// different directions (ND.EU overcounted, then ND.COM undercounted), with a
+// ~$10.6K gap still remaining even after the narrower fix, alongside a
+// Shopify Help Center finding ("Pending, canceled, and unpaid orders are
+// included" in Gross sales — only deleted/test orders are excluded from
+// Sales reports at all) that directly contradicted the voided-order-exclusion
+// premise the two prior fixes were built on.
+//
+// Tomer's own instruction after seeing that back-and-forth: stop trying to
+// reconstruct these figures from individual orders — just pull the same
+// number Shopify itself shows for each one. `shopifyqlQuery`'s `FROM sales`
+// source IS what Shopify's own Analytics/Reports panels are computed from
+// (same mechanism already used for fetchSalesReversals/fetchCostOfGoodsSold
+// above), so a direct SHOW pull can't drift from what Tomer sees in Shopify,
+// no matter what inclusion/exclusion rule Shopify applies internally for
+// cancelled/voided/test/whatever-else orders — this makes the entire class
+// of "which orders count" bug structurally impossible instead of chasing it
+// order-status by order-status a third time.
+//
+// Deliberately narrow in scope: only gross_sales/discounts/orders (the 3
+// figures Tomer reported as mismatched) come from here. Net Sales is still
+// derived as gross_sales - discounts - sales_reversals in server.js's
+// applySalesReversals() (unchanged) — using this function's authoritative
+// gross_sales/discounts as the inputs instead of aggregate()'s order-derived
+// ones — rather than also pulling Shopify's own `net_sales` column
+// separately, so there's exactly one source of truth per figure and the
+// on-page arithmetic (Gross Sales - Discounts - Returns = Net Sales) can't
+// ever silently disagree with itself from two independently-rounded pulls.
+// top_products/units_sold/units_returned/by_country still come from the
+// Orders API via aggregate() (by_country is itself further overridden by
+// fetchCountryBreakdown below) — `FROM sales` has no per-order dimension to
+// replace those with.
+async function fetchSalesSummary(site, startISO, endISOExclusive) {
+  // Same UNTIL-is-inclusive conversion as the other shopifyqlQuery helpers above.
+  const untilDate = new Date(endISOExclusive + 'T00:00:00Z');
+  untilDate.setUTCDate(untilDate.getUTCDate() - 1);
+  const untilISO = untilDate.toISOString().slice(0, 10);
+
+  const shopifyqlQueryString = `FROM sales SHOW gross_sales, discounts, orders SINCE ${startISO} UNTIL ${untilISO}`;
+  const gqlQuery = `
+    query SalesSummary($q: String!) {
+      shopifyqlQuery(query: $q) {
+        parseErrors
+        tableData {
+          columns { name }
+          rows
+        }
+      }
+    }
+  `;
+
+  const data = await graphql(site, gqlQuery, { q: shopifyqlQueryString });
+  const result = data.shopifyqlQuery;
+  if (result.parseErrors && result.parseErrors.length) {
+    throw new Error(
+      `ShopifyQL parse error for "${site}" (query: ${shopifyqlQueryString}): ${result.parseErrors.join('; ')}`
+    );
+  }
+
+  // Same row-shape caveat as the other multi-column shopifyqlQuery helpers
+  // above (fetchTopReturnsByProduct/fetchCountryBreakdown): rows come back as
+  // an array of ROW OBJECTS, read via the `columns` list rather than a
+  // hardcoded key/positional assumption.
+  const colNames = (result.tableData.columns || []).map((c) => c.name);
+  const rows = result.tableData.rows || [];
+  if (!rows.length) return { gross_sales: 0, discounts_total: 0, orders: 0 };
+  const row = rows[0];
+  const values = Array.isArray(row) ? row : colNames.map((name) => row[name]);
+  const obj = {};
+  colNames.forEach((name, i) => { obj[name] = values[i]; });
+  return {
+    gross_sales: Number(obj.gross_sales) || 0,
+    // Shopify returns this as a negative "reduces sales" number, same sign
+    // convention as sales_reversals (see fetchSalesReversals above) — flip to
+    // a positive dollar figure, this file's convention throughout.
+    discounts_total: Math.abs(Number(obj.discounts) || 0),
+    orders: Number(obj.orders) || 0,
+  };
+}
+
 // Per-country breakdown (Section 5 "Sales by Country" on the dashboard), live
 // via ShopifyQL — added 2026-08-24 after Tomer reported that on ND.EU this
 // section "show[s] the country by name and not by country code, also shows
@@ -546,6 +642,7 @@ module.exports = {
   fetchCostOfGoodsSold,
   fetchTopReturnsByProduct,
   fetchCountryBreakdown,
+  fetchSalesSummary,
   API_VERSION,
   SCOPES,
 };
