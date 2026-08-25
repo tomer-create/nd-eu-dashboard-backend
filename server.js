@@ -91,6 +91,29 @@ function pctChange(curr, prev) {
   return (curr - prev) / Math.abs(prev);
 }
 
+// Per-site fixed-percentage COGS override — added 2026-08-25 per Tomer's
+// request ("on ND.IL COGS should be calculated as 30% out of the gross
+// sales"). ND.IL's live ShopifyQL cost_of_goods_sold pull relies on each
+// product variant having a "cost per item" set in Shopify admin (see the
+// note on fetchCostOfGoodsSold in src/shopify.js) — Tomer's request implies
+// that isn't reliably populated for this store, so rather than keep
+// reporting an understated/zeroed live figure, ND.IL's COGS is now a fixed
+// 30% of Gross Sales instead. Keyed by site so another store can get the
+// same treatment later without touching the call sites below — sites not
+// listed here are unaffected and keep using the live ShopifyQL figure.
+const COGS_PCT_OF_GROSS = { il: 0.3 };
+
+// Resolves the COGS figure to report for a period: the fixed-percentage
+// override for sites in COGS_PCT_OF_GROSS above (computed off that SAME
+// period's own corrected gross_sales, so YoY/MoM comparisons stay apples-
+// to-apples), or the live ShopifyQL cost_of_goods_sold pull for every other
+// site, unchanged from before.
+function resolveCogs(site, grossSales, shopifyCogs) {
+  const pct = COGS_PCT_OF_GROSS[site];
+  if (pct != null) return grossSales * pct;
+  return shopifyCogs;
+}
+
 app.get('/health', (req, res) => res.json({ ok: true, time: new Date().toISOString() }));
 
 // Pulls fresh Shopify data for [start, end) and returns it in the shape the
@@ -170,12 +193,11 @@ async function buildDataResponse({ site, start, end, compare }) {
   // only ever had a raw shippingAddress.countryCode and gross_sales/orders
   // (see src/aggregate.js) — no real net sales, no returns, and obviously no
   // YoY/MoM since aggregate() never sees a comparison period. ShopifyQL's
-  // GROUP BY (shipping_country, falling back to billing_country — see
-  // fetchCountryBreakdown in src/shopify.js) gives full country display
-  // names AND can report net_sales/sales_reversals/orders in the same query.
-  // Fetched for current/yoy/mom just like the reversals/COGS calls, so
-  // YoY/MoM can be computed per country the same way attachChangeByKey
-  // already does for products.
+  // `GROUP BY billing_country` gives full country display names AND can
+  // report net_sales/sales_reversals/orders in the same query — see
+  // fetchCountryBreakdown in src/shopify.js. Fetched for current/yoy/mom just
+  // like the reversals/COGS calls, so YoY/MoM can be computed per country the
+  // same way attachChangeByKey already does for products.
   //
   // ytdTopReturns (added 2026-08-25, call 14) is a YTD-scoped call to the
   // same fetchTopReturnsByProduct used for the period-ranked topReturns list
@@ -246,7 +268,7 @@ async function buildDataResponse({ site, start, end, compare }) {
   const momCountry = momCountryResult ? momCountryResult.rows : null;
 
   const current = applySalesReversals(applySalesSummary(aggregate(orders), currentSalesSummary), currentReversals);
-  current.kpis.cogs = currentCogs;
+  current.kpis.cogs = resolveCogs(site, current.kpis.gross_sales, currentCogs);
   const result = { site, start, end, ...current };
 
   // Attach each period-ranked product's YTD return ratio by matching on
@@ -279,12 +301,13 @@ async function buildDataResponse({ site, start, end, compare }) {
 
   if (wantYoy) {
     const yoyAgg = applySalesReversals(applySalesSummary(aggregate(yoyOrders), yoySalesSummary), yoyReversals);
+    const yoyCogsFinal = resolveCogs(site, yoyAgg.kpis.gross_sales, yoyCogs);
     result.yoy = {
       range: yoyRange,
       gross_sales_change: pctChange(current.kpis.gross_sales, yoyAgg.kpis.gross_sales),
       net_sales_change: pctChange(current.kpis.net_sales, yoyAgg.kpis.net_sales),
       orders_change: pctChange(current.kpis.orders, yoyAgg.kpis.orders),
-      cogs_change: pctChange(current.kpis.cogs, yoyCogs),
+      cogs_change: pctChange(current.kpis.cogs, yoyCogsFinal),
     };
     topProducts = attachChangeByKey(topProducts, yoyAgg.top_products, 'title', 'gross_sales_yoy_change');
     byCountry = attachChangeByKey(byCountry, yoyCountry, 'country', 'gross_sales_yoy_change');
@@ -292,12 +315,13 @@ async function buildDataResponse({ site, start, end, compare }) {
 
   if (wantMom) {
     const momAgg = applySalesReversals(applySalesSummary(aggregate(momOrders), momSalesSummary), momReversals);
+    const momCogsFinal = resolveCogs(site, momAgg.kpis.gross_sales, momCogs);
     result.mom = {
       range: momRange,
       gross_sales_change: pctChange(current.kpis.gross_sales, momAgg.kpis.gross_sales),
       net_sales_change: pctChange(current.kpis.net_sales, momAgg.kpis.net_sales),
       orders_change: pctChange(current.kpis.orders, momAgg.kpis.orders),
-      cogs_change: pctChange(current.kpis.cogs, momCogs),
+      cogs_change: pctChange(current.kpis.cogs, momCogsFinal),
     };
     topProducts = attachChangeByKey(topProducts, momAgg.top_products, 'title', 'gross_sales_mom_change');
     byCountry = attachChangeByKey(byCountry, momCountry, 'country', 'gross_sales_mom_change');
