@@ -1,7 +1,7 @@
 require('dotenv').config();
 const express = require('express');
 const cors = require('cors');
-const { fetchOrders, fetchOrdersLight, fetchSalesReversals, fetchCostOfGoodsSold, fetchTopReturnsByProduct, fetchCountryBreakdown, getAuthorizeUrl, exchangeCodeForToken } = require('./src/shopify');
+const { fetchOrders, fetchOrdersLight, fetchSalesReversals, fetchCostOfGoodsSold, fetchTopReturnsByProduct, fetchCountryBreakdown, fetchSalesSummary, getAuthorizeUrl, exchangeCodeForToken } = require('./src/shopify');
 const { aggregate } = require('./src/aggregate');
 
 const app = express();
@@ -186,7 +186,15 @@ async function buildDataResponse({ site, start, end, compare }) {
   // not the ranking). ND.EU's full catalog is well under 250 distinct titles
   // sold in a year, so this shouldn't silently truncate.
   //
-  // All 14 Shopify calls run in one Promise.all so none of this adds extra
+  // salesSummary calls (added 2026-08-25, calls 15-17) pull Shopify's own
+  // authoritative gross_sales/discounts/orders totals via `FROM sales SHOW`
+  // ShopifyQL — see fetchSalesSummary in src/shopify.js for the full
+  // rationale (replaces the earlier approach of reconstructing these figures
+  // by including/excluding individual orders, which got the wrong answer
+  // twice in one day). Same cheap single-aggregate-call shape as the
+  // reversals/COGS calls, so this doesn't add meaningful latency.
+  //
+  // All 17 Shopify calls run in one Promise.all so none of this adds extra
   // wall-clock time on top of the orders fetches.
   const [
     orders,
@@ -203,6 +211,9 @@ async function buildDataResponse({ site, start, end, compare }) {
     currentCountry,
     yoyCountry,
     momCountry,
+    currentSalesSummary,
+    yoySalesSummary,
+    momSalesSummary,
   ] = await Promise.all([
     fetchOrders(site, start, end),
     wantYoy ? fetchOrdersLight(site, yoyRange.start, yoyRange.end) : Promise.resolve(null),
@@ -218,9 +229,12 @@ async function buildDataResponse({ site, start, end, compare }) {
     fetchCountryBreakdown(site, start, end),
     wantYoy ? fetchCountryBreakdown(site, yoyRange.start, yoyRange.end) : Promise.resolve(null),
     wantMom ? fetchCountryBreakdown(site, momRange.start, momRange.end) : Promise.resolve(null),
+    fetchSalesSummary(site, start, end),
+    wantYoy ? fetchSalesSummary(site, yoyRange.start, yoyRange.end) : Promise.resolve(null),
+    wantMom ? fetchSalesSummary(site, momRange.start, momRange.end) : Promise.resolve(null),
   ]);
 
-  const current = applySalesReversals(aggregate(orders), currentReversals);
+  const current = applySalesReversals(applySalesSummary(aggregate(orders), currentSalesSummary), currentReversals);
   current.kpis.cogs = currentCogs;
   const result = { site, start, end, ...current };
 
@@ -253,7 +267,7 @@ async function buildDataResponse({ site, start, end, compare }) {
   }));
 
   if (wantYoy) {
-    const yoyAgg = applySalesReversals(aggregate(yoyOrders), yoyReversals);
+    const yoyAgg = applySalesReversals(applySalesSummary(aggregate(yoyOrders), yoySalesSummary), yoyReversals);
     result.yoy = {
       range: yoyRange,
       gross_sales_change: pctChange(current.kpis.gross_sales, yoyAgg.kpis.gross_sales),
@@ -266,7 +280,7 @@ async function buildDataResponse({ site, start, end, compare }) {
   }
 
   if (wantMom) {
-    const momAgg = applySalesReversals(aggregate(momOrders), momReversals);
+    const momAgg = applySalesReversals(applySalesSummary(aggregate(momOrders), momSalesSummary), momReversals);
     result.mom = {
       range: momRange,
       gross_sales_change: pctChange(current.kpis.gross_sales, momAgg.kpis.gross_sales),
@@ -304,6 +318,52 @@ function attachChangeByKey(currentRows, comparisonRows, key, field) {
     ...r,
     [field]: pctChange(r.gross_sales, comparisonByKey.get(r[key])),
   }));
+}
+
+// Overrides an aggregate() result's gross_sales/discounts_total/orders with
+// Shopify's own authoritative "FROM sales" ShopifyQL totals (see
+// fetchSalesSummary in src/shopify.js for the full rationale — this replaces
+// the earlier approach of reconstructing these 3 figures by including/
+// excluding individual orders via search-query filters, which produced a
+// wrong-direction fix twice in one day on 2026-08-25). net_sales is NOT
+// pulled directly here — it's still derived downstream by
+// applySalesReversals() from these corrected gross_sales/discounts_total
+// values plus the separately-sourced sales_reversals figure, so there's
+// exactly one source of truth per figure and the on-page arithmetic (Gross
+// Sales - Discounts - Returns = Net Sales) can never disagree with itself.
+//
+// Section 6's per-tag discount breakdown and its Total row denominator
+// (discounts_total_gross/discounts_total_abs, both read by the frontend) are
+// rescaled against the new authoritative discounts_total so Section 1's
+// Discounts tile and Section 6's own percentages stay consistent with each
+// other — otherwise Section 6's tag rows (still built from aggregate()'s
+// order-derived total) would sum to a slightly different total than what
+// Section 1 now shows.
+//
+// Deliberately NOT touched here: top_products, by_country (already
+// overridden separately by fetchCountryBreakdown), units_sold,
+// units_returned — `FROM sales` has no per-order/per-product dimension to
+// replace those with; they still come from the Orders API via aggregate().
+function applySalesSummary(aggResult, summary) {
+  const { kpis, discounts } = aggResult;
+  const newDiscountsTotal = summary.discounts_total;
+  const rescaledDiscounts = discounts.map((d) => ({
+    ...d,
+    pct_of_total_discounts: newDiscountsTotal ? d.discount_value / newDiscountsTotal : null,
+  }));
+  return {
+    ...aggResult,
+    kpis: {
+      ...kpis,
+      gross_sales: summary.gross_sales,
+      discounts_total: newDiscountsTotal,
+      orders: summary.orders,
+    },
+    discounts: rescaledDiscounts,
+    discounts_total_gross: summary.gross_sales,
+    discounts_total_abs: newDiscountsTotal,
+    discounts_total_orders: summary.orders,
+  };
 }
 
 // Overrides an aggregate() result's returns_total with Shopify's own
