@@ -233,11 +233,22 @@ async function fetchOrders(site, startISO, endISO) {
 // (Fields left out here are simply undefined on the returned node;
 // aggregate() already treats refunds/shippingAddress/tags as optional via
 // `|| []` / `?.`, so it runs unmodified against these lighter objects.
-// unitsSold/unitsReturned/returnsTotal will come out as 0/NaN off this query
-// since quantity/refunds aren't fetched — harmless, since server.js only
-// reads gross_sales (store-wide and per-product) and orders off these
-// periods, and overrides returns_total with the true sales_reversals figure
-// for every period.)
+// unitsReturned/returnsTotal still come out as 0 off this query since refunds
+// aren't fetched — harmless, since server.js overrides returns_total with the
+// true sales_reversals figure for every period and never reads a store-wide
+// unitsReturned off a comparison period. unitsSold/per-product units_sold
+// USED TO be 0/NaN here too before the `quantity` field below was added —
+// see that note for why a comparison period's per-product unit counts are
+// now needed.)
+// `quantity` added 2026-08-25 alongside the ND.IL retail-price COGS feature
+// (see fetchProductRetailPrices/RETAIL_COGS_SITES in server.js) — computing a
+// period's implied retail value (units sold x current catalog price, per
+// product) needs per-product UNIT COUNTS for the YoY/MoM comparison periods
+// too, not just the current period (which already had quantity via the full
+// ORDERS_QUERY). Same cheap-scalar reasoning as when `title` was added here
+// on 2026-08-24: this is a plain per-line-item integer, not one of the
+// expensive fields (refunds/shippingAddress/tags) that were stripped out to
+// fix the original sync-timeout bug, so it shouldn't reintroduce that risk.
 const ORDERS_QUERY_LIGHT = `
   query OrdersForRangeLight($cursor: String, $searchQuery: String!) {
     orders(first: 100, after: $cursor, query: $searchQuery, sortKey: CREATED_AT) {
@@ -249,6 +260,7 @@ const ORDERS_QUERY_LIGHT = `
             edges {
               node {
                 title
+                quantity
                 originalTotalSet { shopMoney { amount } }
               }
             }
@@ -656,6 +668,79 @@ async function fetchCountryBreakdown(site, startISO, endISOExclusive, limit = 10
   }
 }
 
+// Product catalog query for fetchProductRetailPrices below — plain Admin API
+// (not shopifyqlQuery), since Shopify's catalog/pricing data isn't part of
+// the `sales` ShopifyQL dataset used everywhere else in this file. Only
+// needs `read_products`, already in SCOPES — no re-authorization required for
+// this feature, unlike the shopifyqlQuery-based helpers above.
+const PRODUCTS_QUERY = `
+  query ProductsForRetailPrice($cursor: String) {
+    products(first: 250, after: $cursor) {
+      pageInfo { hasNextPage endCursor }
+      edges {
+        node {
+          title
+          priceRangeV2 { minVariantPrice { amount } }
+        }
+      }
+    }
+  }
+`;
+
+// Pulls the CURRENT Shopify catalog price for every product, keyed by
+// product title — added 2026-08-25 for the ND.IL COGS feature ("on ND.IL
+// COGS should be calculated as 30% out of the gross sales" → clarified to
+// "a different retail/list price" → "take the product price from Shopify
+// directly", not a manually-supplied price list). Used by
+// computeCogsFromRetailPrices() in server.js to estimate a period's implied
+// retail value as (units sold x this catalog price), per product, then take
+// a fixed % of that as COGS.
+//
+// Keyed by TITLE, matching the same title-only granularity aggregate() and
+// attachChangeByKey() already use throughout this codebase for per-product
+// data — there's no stable product ID carried through the orders pipeline to
+// match on instead (see the attachChangeByKey comment in server.js). For a
+// product with multiple variants (e.g. different shades) sharing one title,
+// this uses `priceRangeV2.minVariantPrice` — the lowest-priced variant — as a
+// single representative price rather than fetching every variant's own sales
+// split (aggregate() doesn't track sales by variant, only by title, so a
+// true weighted-average price isn't available without a bigger rework). This
+// slightly UNDERSTATES retail value (and therefore COGS) for a multi-priced
+// product versus its true sales mix — acceptable for a percentage-based
+// estimate, but worth knowing if ND.IL's catalog has meaningfully
+// wide-ranging variant prices under one title.
+//
+// This is a CURRENT snapshot of catalog prices, not a historical price
+// at-time-of-sale — a product whose price changed mid-period (or since) will
+// have its ENTIRE period's units valued at today's price. Tomer asked
+// explicitly to pull "the product price from Shopify directly" rather than
+// maintain a separate price list, so this trade-off is the direct
+// consequence of that choice; flag it if ND.IL runs frequent price changes
+// and the resulting COGS estimate looks unstable month to month.
+//
+// Fetches the full catalog once per Sync (paginated, 250 products/page) —
+// this is independent of date range, so it's called once and reused for the
+// current/YoY/MoM periods in the same request rather than 3 times.
+async function fetchProductRetailPrices(site) {
+  const prices = new Map();
+  let cursor = null;
+  let hasNextPage = true;
+
+  while (hasNextPage) {
+    const data = await graphql(site, PRODUCTS_QUERY, { cursor });
+    const { edges, pageInfo } = data.products;
+    for (const edge of edges) {
+      const { title, priceRangeV2 } = edge.node;
+      const price = Number(priceRangeV2?.minVariantPrice?.amount || 0);
+      prices.set(title, price);
+    }
+    hasNextPage = pageInfo.hasNextPage;
+    cursor = pageInfo.endCursor;
+  }
+
+  return prices;
+}
+
 module.exports = {
   getSiteConfig,
   getAuthorizeUrl,
@@ -668,6 +753,7 @@ module.exports = {
   fetchTopReturnsByProduct,
   fetchCountryBreakdown,
   fetchSalesSummary,
+  fetchProductRetailPrices,
   API_VERSION,
   SCOPES,
 };
