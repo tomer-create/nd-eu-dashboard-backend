@@ -113,6 +113,19 @@ async function buildDataResponse({ site, start, end, compare }) {
   const yoyRange = wantYoy ? shiftDateRange(start, end, { years: 1 }) : null;
   const momRange = wantMom ? shiftDateRange(start, end, { months: 1 }) : null;
 
+  // YTD range for Section 3's "Return Ratio (YTD)" column — added 2026-08-25
+  // per Tomer's request to fix it for ND.EU. Until now the live-sync path
+  // hardcoded return_ratio_ytd to null (see mergeLiveIntoMonthData in
+  // dashboard_v2.html), showing "—" for every site except ND.COM, which has
+  // a one-time hand-pulled YTD snapshot baked into the dashboard's embedded
+  // data. "YTD" here means Jan 1 through the same end boundary as the
+  // selected period — derived from the last INCLUDED day (end minus 1,
+  // since `end` itself is exclusive) rather than `end` directly, so this
+  // still means the right year if a sync range ever crossed midnight UTC.
+  const lastIncludedDate = new Date(end + 'T00:00:00Z');
+  lastIncludedDate.setUTCDate(lastIncludedDate.getUTCDate() - 1);
+  const ytdStart = `${lastIncludedDate.getUTCFullYear()}-01-01`;
+
   // Fetch the current period plus both comparison periods concurrently —
   // they're independent Shopify queries. The comparison periods use
   // fetchOrdersLight (a much cheaper GraphQL query — see shopify.js) since
@@ -163,7 +176,17 @@ async function buildDataResponse({ site, start, end, compare }) {
   // like the reversals/COGS calls, so YoY/MoM can be computed per country the
   // same way attachChangeByKey already does for products.
   //
-  // All 13 Shopify calls run in one Promise.all so none of this adds extra
+  // ytdTopReturns (added 2026-08-25, call 14) is a YTD-scoped call to the
+  // same fetchTopReturnsByProduct used for the period-ranked topReturns list
+  // below — see the ytdStart comment above. LIMIT 250 here (vs. 15 for the
+  // period-ranked list) so this YTD pull is virtually certain to cover every
+  // product that makes the period's top 15, even though this table stays
+  // ranked by the SELECTED period's return $ value, not YTD (matching this
+  // live path's existing behavior — only the ratio column's scope changes,
+  // not the ranking). ND.EU's full catalog is well under 250 distinct titles
+  // sold in a year, so this shouldn't silently truncate.
+  //
+  // All 14 Shopify calls run in one Promise.all so none of this adds extra
   // wall-clock time on top of the orders fetches.
   const [
     orders,
@@ -176,6 +199,7 @@ async function buildDataResponse({ site, start, end, compare }) {
     yoyCogs,
     momCogs,
     topReturns,
+    ytdTopReturns,
     currentCountry,
     yoyCountry,
     momCountry,
@@ -190,6 +214,7 @@ async function buildDataResponse({ site, start, end, compare }) {
     wantYoy ? fetchCostOfGoodsSold(site, yoyRange.start, yoyRange.end) : Promise.resolve(null),
     wantMom ? fetchCostOfGoodsSold(site, momRange.start, momRange.end) : Promise.resolve(null),
     fetchTopReturnsByProduct(site, start, end),
+    fetchTopReturnsByProduct(site, ytdStart, end, 250),
     fetchCountryBreakdown(site, start, end),
     wantYoy ? fetchCountryBreakdown(site, yoyRange.start, yoyRange.end) : Promise.resolve(null),
     wantMom ? fetchCountryBreakdown(site, momRange.start, momRange.end) : Promise.resolve(null),
@@ -198,7 +223,20 @@ async function buildDataResponse({ site, start, end, compare }) {
   const current = applySalesReversals(aggregate(orders), currentReversals);
   current.kpis.cogs = currentCogs;
   const result = { site, start, end, ...current };
-  result.top_returns = topReturns;
+
+  // Attach each period-ranked product's YTD return ratio by matching on
+  // exact product title against the YTD list above — same "no stable ID"
+  // caveat as attachChangeByKey below. A product with no YTD returns match
+  // (brand new this period, or a title that doesn't appear in the YTD list
+  // for some other reason) gets null rather than a misleading number.
+  const ytdReturnsByTitle = new Map((ytdTopReturns || []).map((r) => [r.title, r]));
+  result.top_returns = topReturns.map((r) => {
+    const ytd = ytdReturnsByTitle.get(r.title);
+    return {
+      ...r,
+      return_ratio_ytd: ytd && ytd.gross_sales ? ytd.return_value / ytd.gross_sales : null,
+    };
+  });
   // Reassigned below as YoY/MoM per-product comparisons are computed —
   // starts as the current period's own top_products list.
   let topProducts = current.top_products;
