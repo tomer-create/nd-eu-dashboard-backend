@@ -156,27 +156,49 @@ const ORDERS_QUERY = `
 // Fetches every order created in [startISO, endISO) for a site, following
 // pagination. startISO/endISO are plain 'YYYY-MM-DD' dates.
 //
-// -status:cancelled added 2026-08-24 after Tomer reported ND.EU's Gross
-// Sales tile reading higher than Shopify's own Analytics home figure for the
-// identical date range (dashboard sync: 633 orders / higher gross sales;
-// Shopify's "Gross sales" panel for Aug 1-24, 2026: 623 orders / 71,583.46
-// EUR). Root cause, confirmed by opening the actual orders: a handful of
-// orders each period are Shopify order "swaps" created by a returns/exchange
-// app (order notes carry `_swap-request-token`/`_swap-checkout-token`) that
-// get immediately Voided or Refunded to a €0.00 net total. This backend's
+// -status:cancelled (added 2026-08-24, NARROWED to -financial_status:voided
+// on 2026-08-25 — read this note before touching this filter again):
+//
+// The original bug (Tomer: ND.EU's Gross Sales tile reading higher than
+// Shopify's own Analytics home figure for the same range — dashboard sync:
+// 633 orders / higher gross sales; Shopify's "Gross sales" panel for Aug
+// 1-24, 2026: 623 orders / 71,583.46 EUR) was real: a handful of orders each
+// period are Shopify order "swaps" created by a returns/exchange app (order
+// notes carry `_swap-request-token`/`_swap-checkout-token`) that get
+// immediately Voided (no payment ever captured) with a €0.00 net total.
 // aggregate() (src/aggregate.js) sums each line item's `originalTotalSet` —
-// the PRE-cancellation value — with no check on order.cancelledAt, so it
-// kept counting a cancelled swap order's full original value (e.g. €130.68,
-// €106.92 confirmed on two real orders) even though the order nets to zero.
-// Shopify's own Analytics home "Gross sales" figure does not count these.
-// Excluding `status:cancelled` orders at the search-query level (rather than
-// fetching them and filtering client-side) matches Shopify's own number and
-// is cheaper than pulling line items for orders we're going to discard
-// anyway. This applies to both the current period and the YoY/MoM
-// comparison periods (see fetchOrdersLight below) since both use the same
-// aggregate() gross_sales calculation.
+// the PRE-cancellation value — with no check on the order's status at all,
+// so it kept counting these voided placeholder orders' full original value
+// even though no sale ever actually happened.
+//
+// The FIRST fix (`-status:cancelled`) over-corrected: `status:cancelled` on
+// Shopify also matches orders that were legitimately sold (payment
+// captured, financial_status `refunded`/`partially_refunded`) and then
+// cancelled — those orders' ORIGINAL sale amount is still counted in
+// Shopify's own Gross Sales (the refund shows up separately, in "Sales
+// reversals" — see fetchSalesReversals below, which server.js already uses
+// as the authoritative Returns figure). Excluding ALL `status:cancelled`
+// orders wholesale therefore threw away real, already-completed sales, not
+// just the never-paid swap placeholders — confirmed 2026-08-25 when Tomer
+// reported ND.COM's live Gross Sales reading LOWER than Shopify's own figure
+// by $18,622.41 on a $489,596.45 base (Aug 1-25, 2026), the opposite
+// direction from the original EU bug and a much bigger gap than a handful of
+// swap orders could explain on COM's order volume — a sign real sales were
+// being dropped, not just void placeholders.
+//
+// The fix: exclude by `financial_status:voided` instead of `status:
+// cancelled`. A voided order never had a payment captured — it never became
+// a completed sale, matching exactly what Shopify's own Gross Sales figure
+// excludes. A cancelled-but-refunded order keeps its original gross value
+// here (correct), with the refund still captured via fetchSalesReversals's
+// separate sales_reversals pull — no double counting, since
+// applySalesReversals() in server.js overrides aggregate()'s own
+// refund-derived returns_total with that authoritative figure regardless of
+// which orders this function returns. This applies to both the current
+// period and the YoY/MoM comparison periods (see fetchOrdersLight below)
+// since both use the same aggregate() gross_sales calculation.
 async function fetchOrders(site, startISO, endISO) {
-  const searchQuery = `created_at:>=${startISO} created_at:<${endISO} -status:cancelled`;
+  const searchQuery = `created_at:>=${startISO} created_at:<${endISO} -financial_status:voided`;
   const orders = [];
   let cursor = null;
   let hasNextPage = true;
@@ -239,12 +261,12 @@ const ORDERS_QUERY_LIGHT = `
 
 // Same as fetchOrders, but for callers (YoY/MoM comparisons) that only need
 // gross/net sales + order count out of aggregate() — see ORDERS_QUERY_LIGHT.
-// -status:cancelled added 2026-08-24 — see the matching note on fetchOrders
-// above; comparison periods need the same exclusion so YoY/MoM % changes
-// aren't comparing a cancelled-inclusive current period against a
-// cancelled-inclusive (or differently-polluted) prior period.
+// -financial_status:voided (narrowed from -status:cancelled 2026-08-25) —
+// see the full note on fetchOrders above; comparison periods need the same
+// exclusion so YoY/MoM % changes aren't comparing a voided-inclusive current
+// period against a voided-inclusive (or differently-polluted) prior period.
 async function fetchOrdersLight(site, startISO, endISO) {
-  const searchQuery = `created_at:>=${startISO} created_at:<${endISO} -status:cancelled`;
+  const searchQuery = `created_at:>=${startISO} created_at:<${endISO} -financial_status:voided`;
   const orders = [];
   let cursor = null;
   let hasNextPage = true;
