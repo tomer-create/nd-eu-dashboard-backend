@@ -170,11 +170,12 @@ async function buildDataResponse({ site, start, end, compare }) {
   // only ever had a raw shippingAddress.countryCode and gross_sales/orders
   // (see src/aggregate.js) — no real net sales, no returns, and obviously no
   // YoY/MoM since aggregate() never sees a comparison period. ShopifyQL's
-  // `GROUP BY billing_country` gives full country display names AND can
-  // report net_sales/sales_reversals/orders in the same query — see
-  // fetchCountryBreakdown in src/shopify.js. Fetched for current/yoy/mom just
-  // like the reversals/COGS calls, so YoY/MoM can be computed per country the
-  // same way attachChangeByKey already does for products.
+  // GROUP BY (shipping_country, falling back to billing_country — see
+  // fetchCountryBreakdown in src/shopify.js) gives full country display
+  // names AND can report net_sales/sales_reversals/orders in the same query.
+  // Fetched for current/yoy/mom just like the reversals/COGS calls, so
+  // YoY/MoM can be computed per country the same way attachChangeByKey
+  // already does for products.
   //
   // ytdTopReturns (added 2026-08-25, call 14) is a YTD-scoped call to the
   // same fetchTopReturnsByProduct used for the period-ranked topReturns list
@@ -208,9 +209,9 @@ async function buildDataResponse({ site, start, end, compare }) {
     momCogs,
     topReturns,
     ytdTopReturns,
-    currentCountry,
-    yoyCountry,
-    momCountry,
+    currentCountryResult,
+    yoyCountryResult,
+    momCountryResult,
     currentSalesSummary,
     yoySalesSummary,
     momSalesSummary,
@@ -233,6 +234,16 @@ async function buildDataResponse({ site, start, end, compare }) {
     wantYoy ? fetchSalesSummary(site, yoyRange.start, yoyRange.end) : Promise.resolve(null),
     wantMom ? fetchSalesSummary(site, momRange.start, momRange.end) : Promise.resolve(null),
   ]);
+
+  // fetchCountryBreakdown now returns { rows, groupedBy, fallbackReason? }
+  // instead of a bare array — added 2026-08-25 when Tomer asked for Sales by
+  // Country to use the shipping address instead of billing (see the big
+  // comment on fetchCountryBreakdown in src/shopify.js for why this needs a
+  // try-shipping/fall-back-to-billing shape rather than a straight rename).
+  // Unwrap here so the rest of this function reads exactly like before.
+  const currentCountry = currentCountryResult.rows;
+  const yoyCountry = yoyCountryResult ? yoyCountryResult.rows : null;
+  const momCountry = momCountryResult ? momCountryResult.rows : null;
 
   const current = applySalesReversals(applySalesSummary(aggregate(orders), currentSalesSummary), currentReversals);
   current.kpis.cogs = currentCogs;
@@ -294,6 +305,12 @@ async function buildDataResponse({ site, start, end, compare }) {
 
   result.top_products = topProducts;
   result.by_country = byCountry;
+  // Tells the frontend which address ShopifyQL actually grouped by — the
+  // shipping-country query can fall back to billing (see fetchCountryBreakdown
+  // in src/shopify.js), and Tomer should see an honest label either way
+  // instead of Section 5 silently mislabeling billing-address data as
+  // shipping-address data.
+  result.by_country_grouped_by = currentCountryResult.groupedBy;
   return result;
 }
 
