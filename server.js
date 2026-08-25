@@ -1,7 +1,7 @@
 require('dotenv').config();
 const express = require('express');
 const cors = require('cors');
-const { fetchOrders, fetchOrdersLight, fetchSalesReversals, fetchCostOfGoodsSold, fetchTopReturnsByProduct, fetchCountryBreakdown, fetchSalesSummary, getAuthorizeUrl, exchangeCodeForToken } = require('./src/shopify');
+const { fetchOrders, fetchOrdersLight, fetchSalesReversals, fetchCostOfGoodsSold, fetchTopReturnsByProduct, fetchCountryBreakdown, fetchSalesSummary, fetchProductRetailPrices, getAuthorizeUrl, exchangeCodeForToken } = require('./src/shopify');
 const { aggregate } = require('./src/aggregate');
 
 const app = express();
@@ -91,26 +91,56 @@ function pctChange(curr, prev) {
   return (curr - prev) / Math.abs(prev);
 }
 
-// Per-site fixed-percentage COGS override — added 2026-08-25 per Tomer's
-// request ("on ND.IL COGS should be calculated as 30% out of the gross
-// sales"). ND.IL's live ShopifyQL cost_of_goods_sold pull relies on each
+// Per-site "retail-price COGS" override — added 2026-08-25 per Tomer's
+// request, refined over three rounds: (1) "COGS should be calculated as 30%
+// out of the gross sales" — implemented as a straight 30% x gross_sales
+// override; (2) clarified that "retail price" means something OTHER than
+// gross_sales (which is already product price x quantity BEFORE discounts —
+// see fetchSalesSummary's comment in src/shopify.js — so a plain rename
+// wouldn't have changed anything); (3) clarified that the retail/list price
+// should come directly from Shopify's own product catalog, not a manually
+// maintained price list. See fetchProductRetailPrices in src/shopify.js for
+// the catalog-price fetch and its "current snapshot, not historical price"
+// caveat. ND.IL's live ShopifyQL cost_of_goods_sold pull relies on each
 // product variant having a "cost per item" set in Shopify admin (see the
 // note on fetchCostOfGoodsSold in src/shopify.js) — Tomer's request implies
-// that isn't reliably populated for this store, so rather than keep
-// reporting an understated/zeroed live figure, ND.IL's COGS is now a fixed
-// 30% of Gross Sales instead. Keyed by site so another store can get the
-// same treatment later without touching the call sites below — sites not
-// listed here are unaffected and keep using the live ShopifyQL figure.
-const COGS_PCT_OF_GROSS = { il: 0.3 };
+// that isn't reliably populated for this store, so this fixed-percentage-of-
+// retail-value estimate stands in instead. Keyed by site so another store
+// could get the same treatment later without touching the call sites below —
+// sites not listed here are unaffected and keep using the live ShopifyQL
+// cost_of_goods_sold figure.
+const RETAIL_COGS_SITES = { il: 0.3 };
 
-// Resolves the COGS figure to report for a period: the fixed-percentage
-// override for sites in COGS_PCT_OF_GROSS above (computed off that SAME
-// period's own corrected gross_sales, so YoY/MoM comparisons stay apples-
-// to-apples), or the live ShopifyQL cost_of_goods_sold pull for every other
-// site, unchanged from before.
-function resolveCogs(site, grossSales, shopifyCogs) {
-  const pct = COGS_PCT_OF_GROSS[site];
-  if (pct != null) return grossSales * pct;
+// Estimates a period's implied retail value as SUM(units_sold x current
+// catalog price) across every product sold that period, then returns `pct`
+// of that as COGS. `topProducts` is an aggregate()-shaped array (from either
+// the current period or a YoY/MoM comparison period — see the 3 call sites
+// below), each row already carrying `units_sold`/`gross_sales`/`title`.
+// `retailPriceByTitle` is the Map returned by fetchProductRetailPrices,
+// keyed by exact product title (same title-only matching this codebase uses
+// everywhere else — see the comment on fetchProductRetailPrices).
+//
+// FALLBACK: a product sold in the period but missing from the current
+// catalog price lookup (discontinued/renamed since, or a title mismatch)
+// falls back to that product's own gross_sales for this estimate, rather
+// than being silently dropped from the COGS total — flagged to Tomer when
+// this was proposed, no objection raised, so this is the standing default.
+function computeCogsFromRetailPrices(topProducts, retailPriceByTitle, pct) {
+  let retailValue = 0;
+  for (const p of topProducts || []) {
+    const price = retailPriceByTitle.get(p.title);
+    retailValue += price != null ? price * (p.units_sold || 0) : (p.gross_sales || 0);
+  }
+  return retailValue * pct;
+}
+
+// Resolves the COGS figure to report for a period: the retail-price-based
+// estimate above for sites in RETAIL_COGS_SITES (when the catalog price
+// lookup succeeded), or the live ShopifyQL cost_of_goods_sold pull for every
+// other site — unchanged from before this feature existed.
+function resolveCogs(site, topProducts, retailPrices, shopifyCogs) {
+  const pct = RETAIL_COGS_SITES[site];
+  if (pct != null && retailPrices) return computeCogsFromRetailPrices(topProducts, retailPrices, pct);
   return shopifyCogs;
 }
 
@@ -217,7 +247,16 @@ async function buildDataResponse({ site, start, end, compare }) {
   // twice in one day). Same cheap single-aggregate-call shape as the
   // reversals/COGS calls, so this doesn't add meaningful latency.
   //
-  // All 17 Shopify calls run in one Promise.all so none of this adds extra
+  // retailPrices (added 2026-08-25, call 18) fetches the current Shopify
+  // catalog price for every product — see fetchProductRetailPrices in
+  // src/shopify.js and RETAIL_COGS_SITES above. Only fetched for sites that
+  // actually use the retail-price COGS override (currently just ND.IL) —
+  // skipped entirely for every other site so this doesn't add latency to
+  // ND.COM/ND.EU syncs. Unlike the other calls above, this ISN'T
+  // date-range-scoped (it's a catalog snapshot) — fetched once and reused for
+  // the current/YoY/MoM periods below rather than 3 times.
+  //
+  // All 18 Shopify calls run in one Promise.all so none of this adds extra
   // wall-clock time on top of the orders fetches.
   const [
     orders,
@@ -237,6 +276,7 @@ async function buildDataResponse({ site, start, end, compare }) {
     currentSalesSummary,
     yoySalesSummary,
     momSalesSummary,
+    retailPrices,
   ] = await Promise.all([
     fetchOrders(site, start, end),
     wantYoy ? fetchOrdersLight(site, yoyRange.start, yoyRange.end) : Promise.resolve(null),
@@ -255,6 +295,7 @@ async function buildDataResponse({ site, start, end, compare }) {
     fetchSalesSummary(site, start, end),
     wantYoy ? fetchSalesSummary(site, yoyRange.start, yoyRange.end) : Promise.resolve(null),
     wantMom ? fetchSalesSummary(site, momRange.start, momRange.end) : Promise.resolve(null),
+    RETAIL_COGS_SITES[site] != null ? fetchProductRetailPrices(site) : Promise.resolve(null),
   ]);
 
   // fetchCountryBreakdown now returns { rows, groupedBy, fallbackReason? }
@@ -268,7 +309,7 @@ async function buildDataResponse({ site, start, end, compare }) {
   const momCountry = momCountryResult ? momCountryResult.rows : null;
 
   const current = applySalesReversals(applySalesSummary(aggregate(orders), currentSalesSummary), currentReversals);
-  current.kpis.cogs = resolveCogs(site, current.kpis.gross_sales, currentCogs);
+  current.kpis.cogs = resolveCogs(site, current.top_products, retailPrices, currentCogs);
   const result = { site, start, end, ...current };
 
   // Attach each period-ranked product's YTD return ratio by matching on
@@ -301,7 +342,7 @@ async function buildDataResponse({ site, start, end, compare }) {
 
   if (wantYoy) {
     const yoyAgg = applySalesReversals(applySalesSummary(aggregate(yoyOrders), yoySalesSummary), yoyReversals);
-    const yoyCogsFinal = resolveCogs(site, yoyAgg.kpis.gross_sales, yoyCogs);
+    const yoyCogsFinal = resolveCogs(site, yoyAgg.top_products, retailPrices, yoyCogs);
     result.yoy = {
       range: yoyRange,
       gross_sales_change: pctChange(current.kpis.gross_sales, yoyAgg.kpis.gross_sales),
@@ -315,7 +356,7 @@ async function buildDataResponse({ site, start, end, compare }) {
 
   if (wantMom) {
     const momAgg = applySalesReversals(applySalesSummary(aggregate(momOrders), momSalesSummary), momReversals);
-    const momCogsFinal = resolveCogs(site, momAgg.kpis.gross_sales, momCogs);
+    const momCogsFinal = resolveCogs(site, momAgg.top_products, retailPrices, momCogs);
     result.mom = {
       range: momRange,
       gross_sales_change: pctChange(current.kpis.gross_sales, momAgg.kpis.gross_sales),
