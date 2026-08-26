@@ -33,6 +33,25 @@ const DEFAULT_TAG_LABELS = {
   'DISCOUNT-QAQAN': 'Glam Tier Free Gift',
   'DISCOUNT-VPXK0': 'HY-GLAM Collection Bundle',
   'DISCOUNT-UHGUH': 'Bundles - סטים',
+  // ND.IL-specific "Annual Reward Sale" codes, added 2026-08-26 per Tomer's
+  // request for Section 6 on ND.IL.
+  'DISCOUNT-I1KYC': 'Annual Reward Sale Bronze',
+  'DISCOUNT-Y40T0': 'Annual Reward Sale Glam',
+  // ND.EU-specific "Bi-Annual Reward Sale" codes, added 2026-08-26 per
+  // Tomer's request for Section 6 on ND.EU. Same program names as the
+  // ND.COM/ND.US codes just below, but each store mints its own distinct
+  // code — same non-collision logic as the ND.IL codes documented above:
+  // a given site's orders only ever carry that site's own codes, so this is
+  // three extra rows for EU and three different extra rows for COM, never
+  // double-counted or cross-matched.
+  'DISCOUNT-TQZF5': 'Bi-Annual Reward Sale Bronze',
+  'DISCOUNT-UG8ID': 'Bi-Annual Reward Sale Glow',
+  'DISCOUNT-DS71A': 'Bi-Annual Reward Sale Glam',
+  // ND.COM/ND.US-specific "Bi-Annual Reward Sale" codes, added 2026-08-26 per
+  // Tomer's request for Section 6 on ND.COM.
+  'DISCOUNT-1TL82': 'Bi-Annual Reward Sale Bronze',
+  'DISCOUNT-EJ75N': 'Bi-Annual Reward Sale Glow',
+  'DISCOUNT-JBD6Q': 'Bi-Annual Reward Sale Glam',
 };
 
 // Tags that get merged into one combined "Free Shipping" row (OR logic, not
