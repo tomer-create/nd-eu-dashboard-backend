@@ -19,6 +19,20 @@ const DEFAULT_TAG_LABELS = {
   'DISCOUNT-BA_DISCOUNT': 'BA Discount',
   'DISCOUNT-OA5WN': 'Glow Tier Free Gift',
   Collabs_Affiliate: 'Collabs Affiliate',
+  // ND.IL-specific discount codes, added 2026-08-25 per Tomer's request for
+  // Section 6 (Discounts Breakdown) on ND.IL. Shopify auto-generates a
+  // distinct code suffix per discount even when the merchant reuses the same
+  // program name across stores — DISCOUNT-QAQAN and DISCOUNT-VPXK0 are
+  // ND.IL's own codes for the SAME two programs COM/EU already track above
+  // under different codes (DISCOUNT-FT9ZL / DISCOUNT-36SLV respectively).
+  // This is intentional, not a duplicate: aggregate() keys tagMap by the raw
+  // tag string, and a given site's orders only ever carry that site's own
+  // discount codes, so COM/EU orders will never match these two new keys and
+  // ND.IL orders will never match the older ones — each site's Section 6
+  // still shows exactly one row per program, just via a different tag.
+  'DISCOUNT-QAQAN': 'Glam Tier Free Gift',
+  'DISCOUNT-VPXK0': 'HY-GLAM Collection Bundle',
+  'DISCOUNT-UHGUH': 'Bundles - סטים',
 };
 
 // Tags that get merged into one combined "Free Shipping" row (OR logic, not
