@@ -553,19 +553,32 @@ function monthLabelText() {
 }
 function isCombinedView() { return state.month === 'YTD' || state.site === 'all'; }
 
-// Recomputes a ratio-style KPI's YoY from its numerator/denominator KPIs'
-// own YoY figures (implied prior-year value = actual / (1+yoy)), using only
-// the entries where BOTH have a prior-year comparison available.
-function deriveRatioYoY(entries, getNum, getDen, numIsCurrency, denIsCurrency) {
+// Recomputes a ratio-style KPI's YoY (or MoM — see `field` below) from its
+// numerator/denominator KPIs' own YoY/MoM figures (implied prior value =
+// actual / (1+change)), using only the entries where BOTH have that
+// comparison available.
+//
+// `field` is 'yoy' or 'mom'. This is safe to call with 'mom' across a set of
+// entries that are all the SAME period for different sites (e.g. "All Sites
+// (USD)" for one specific month) — each site's own MoM already compares that
+// same month to the same prior month, so summing is coherent. It is NOT
+// meaningful across a set of entries that are DIFFERENT periods (e.g. one
+// site's Year-to-Date, which combines 12 different months) — each month's
+// "prior month" is a different, non-overlapping period, so there's no single
+// coherent "previous period" to sum against. Callers must not invoke this
+// with field:'mom' for a Year-to-Date combine; see the `isYTD` guards at each
+// call site below.
+function deriveRatioChange(entries, getNum, getDen, numIsCurrency, denIsCurrency, field) {
   let curNum = 0, curDen = 0, priorNum = 0, priorDen = 0, any = false;
   entries.forEach(e => {
     const kpisByLabel = {};
     e.monthData.kpis.forEach(k => kpisByLabel[k.label] = k);
     const nk = getNum(kpisByLabel), dk = getDen(kpisByLabel);
-    if (nk.yoy === null || nk.yoy === undefined || dk.yoy === null || dk.yoy === undefined) return;
+    const nChange = nk[field], dChange = dk[field];
+    if (nChange === null || nChange === undefined || dChange === null || dChange === undefined) return;
     any = true;
     const nFx = numIsCurrency ? e.fx : 1, dFx = denIsCurrency ? e.fx : 1;
-    const nPrior = nk.actual / (1 + nk.yoy), dPrior = dk.actual / (1 + dk.yoy);
+    const nPrior = nk.actual / (1 + nChange), dPrior = dk.actual / (1 + dChange);
     curNum += nk.actual * nFx; curDen += dk.actual * dFx;
     priorNum += nPrior * nFx; priorDen += dPrior * dFx;
   });
@@ -573,6 +586,9 @@ function deriveRatioYoY(entries, getNum, getDen, numIsCurrency, denIsCurrency) {
   const nowRatio = curNum / curDen, priorRatio = priorNum / priorDen;
   if (!priorRatio) return null;
   return (nowRatio - priorRatio) / priorRatio;
+}
+function deriveRatioYoY(entries, getNum, getDen, numIsCurrency, denIsCurrency) {
+  return deriveRatioChange(entries, getNum, getDen, numIsCurrency, denIsCurrency, 'yoy');
 }
 
 // Channels hidden from a specific site's own Section 4 table — added
@@ -669,12 +685,28 @@ function combineOtherCosts(entries) {
   return { items, total_other_costs_actual, total_other_costs_goal };
 }
 
-function combineKPIsRaw(entries) {
+// `isYTD` distinguishes the two combined-view shapes this is called with:
+// - "All Sites (USD)" for ONE specific month: entries are one per SITE, all
+//   for the SAME period. MoM is well-defined here (each site's own MoM
+//   already compares that same month to the same prior month), so it's
+//   combined the same way YoY is.
+// - A site's (or All Sites') Year-to-Date: entries are 12 DIFFERENT months.
+//   YoY still works (each month's own YoY compares it to the same month last
+//   year — 12 coherent, non-overlapping prior periods that sum to "last
+//   year's YTD"). MoM does not: each month's "prior month" is a different
+//   period (Jan's is last Dec, Feb's is this Jan, ...), so there's no single
+//   coherent "previous period" for a YTD sum to compare against — stays null.
+// Bug fixed 2026-08-31: this used to hardcode mom:null unconditionally,
+// which also blanked it for the "All Sites (USD), one month" case where it
+// IS meaningful (Tomer reported: "On the All sites (USD), it doesn't show
+// the MOM and YOY" — YoY was already fine; MoM was the part actually broken).
+function combineKPIsRaw(entries, isYTD) {
   const labels = entries[0].monthData.kpis.map(k => k.label);
   const rawByLabel = {};
   labels.forEach(label => {
     let actual = 0, goalSum = 0, goalHasValue = false, fmt, higher_is_better, dataCount = 0;
     let yoyActual = 0, yoyPrior = 0, yoyCount = 0;
+    let momActual = 0, momPrior = 0, momCount = 0;
     entries.forEach(e => {
       const k = e.monthData.kpis.find(x => x.label === label);
       fmt = k.fmt; higher_is_better = k.higher_is_better;
@@ -686,15 +718,16 @@ function combineKPIsRaw(entries) {
         const prior = k.actual / (1 + k.yoy);
         yoyActual += k.actual * fx; yoyPrior += prior * fx; yoyCount++;
       }
+      if (!isYTD && k.mom !== null && k.mom !== undefined) {
+        const prior = k.actual / (1 + k.mom);
+        momActual += k.actual * fx; momPrior += prior * fx; momCount++;
+      }
     });
     rawByLabel[label] = {
       actual, goal: goalHasValue ? goalSum : null, fmt, higher_is_better,
       no_data: dataCount === 0, partial: dataCount > 0 && dataCount < entries.length,
       yoy: yoyCount ? (yoyActual - yoyPrior) / yoyPrior : null,
-      // MoM isn't meaningful for a combined multi-month/site view (there's
-      // no single "previous month" to compare a Year-to-Date sum against),
-      // so it's intentionally left null here — the tile shows "MoM —".
-      mom: null,
+      mom: momCount ? (momActual - momPrior) / momPrior : null,
     };
   });
   return { labels, rawByLabel };
@@ -733,7 +766,12 @@ function combineMonthDatas(entries, opts) {
   const chanSpendGoal = channels.reduce((s, c) => s + (c.spend_goal || 0), 0);
   const ppcFee = oc.items.find(o => o.label === 'PPC Agency Fee') || { actual: 0, goal: 0 };
 
-  const { labels, rawByLabel } = combineKPIsRaw(entries);
+  // `isYTD` gates MoM combination — see the big comment on combineKPIsRaw
+  // for why MoM is meaningful for "All Sites (USD), one month" but not for
+  // a Year-to-Date combine (12 different months with no single shared
+  // "previous period" to sum against).
+  const isYTD = !!opts.isYTD;
+  const { labels, rawByLabel } = combineKPIsRaw(entries, isYTD);
   const grossActual = rawByLabel['Gross Sales'].actual;
   const grossGoal = rawByLabel['Gross Sales'].goal;
 
@@ -744,27 +782,35 @@ function combineMonthDatas(entries, opts) {
   rawByLabel['AOV'].actual = ordersActual ? netActual / ordersActual : null;
   rawByLabel['AOV'].goal = ordersGoal ? netGoal / ordersGoal : null;
   rawByLabel['AOV'].yoy = deriveRatioYoY(entries, m => m['Net Sales'], m => m['Number of Orders'], true, false);
+  rawByLabel['AOV'].mom = isYTD ? null : deriveRatioChange(entries, m => m['Net Sales'], m => m['Number of Orders'], true, false, 'mom');
 
   const discActual = rawByLabel['Discounts'].actual, discGoal = rawByLabel['Discounts'].goal;
   rawByLabel['% Discount Ratio'].actual = grossActual ? discActual / grossActual : null;
   rawByLabel['% Discount Ratio'].goal = grossGoal ? discGoal / grossGoal : null;
   rawByLabel['% Discount Ratio'].yoy = deriveRatioYoY(entries, m => m['Discounts'], m => m['Gross Sales'], true, true);
+  rawByLabel['% Discount Ratio'].mom = isYTD ? null : deriveRatioChange(entries, m => m['Discounts'], m => m['Gross Sales'], true, true, 'mom');
 
   const retActual = rawByLabel['Returns'].actual, retGoal = rawByLabel['Returns'].goal;
   rawByLabel['% Returns Ratio'].actual = grossActual ? retActual / grossActual : null;
   rawByLabel['% Returns Ratio'].goal = grossGoal ? retGoal / grossGoal : null;
   rawByLabel['% Returns Ratio'].yoy = deriveRatioYoY(entries, m => m['Returns'], m => m['Gross Sales'], true, true);
+  rawByLabel['% Returns Ratio'].mom = isYTD ? null : deriveRatioChange(entries, m => m['Returns'], m => m['Gross Sales'], true, true, 'mom');
 
   const profitActual = rawByLabel['Profit'].actual, profitGoal = rawByLabel['Profit'].goal;
   rawByLabel['Profit Margin'].actual = grossActual ? profitActual / grossActual : null;
   rawByLabel['Profit Margin'].goal = grossGoal ? profitGoal / grossGoal : null;
   rawByLabel['Profit Margin'].yoy = deriveRatioYoY(entries, m => m['Profit'], m => m['Gross Sales'], true, true);
+  rawByLabel['Profit Margin'].mom = isYTD ? null : deriveRatioChange(entries, m => m['Profit'], m => m['Gross Sales'], true, true, 'mom');
 
   const totalSpend = chanSpendActual + (ppcFee.actual || 0);
   const totalSpendGoal = chanSpendGoal + (ppcFee.goal || 0);
   rawByLabel['Blended ROAS'].actual = totalSpend ? grossActual / totalSpend : null;
   rawByLabel['Blended ROAS'].goal = totalSpendGoal ? grossGoal / totalSpendGoal : null;
+  // Blended ROAS has no YoY/MoM in the single-site view either (see the
+  // note in mergeLiveIntoMonthData) — no source data to derive either from,
+  // combined view or not.
   rawByLabel['Blended ROAS'].yoy = null;
+  rawByLabel['Blended ROAS'].mom = null;
 
   const kpis = labels.map(label => {
     const r = rawByLabel[label];
@@ -906,7 +952,7 @@ function combineMonthDatas(entries, opts) {
 
 function getSiteYTDData(site) {
   const entries = DATA.meta.months_available.map(mon => ({ monthData: getSingleSiteMonthData(site, mon), fx: 1 }));
-  return combineMonthDatas(entries, { label: ytdLabel() + ' — ' + siteMeta(site).name });
+  return combineMonthDatas(entries, { label: ytdLabel() + ' — ' + siteMeta(site).name, isYTD: true });
 }
 
 // Returns the monthData to render for the current state — a single
@@ -931,7 +977,7 @@ function getMonthData() {
   // labels in the All Sites combine — see the comment there.
   const entries = sites.map((s, i) => ({ monthData: perSite[i], fx: FX_TO_USD[s], site: s }));
   const label = (isYTD ? ytdLabel() : monthLabelText()) + ', all sites';
-  return combineMonthDatas(entries, { label });
+  return combineMonthDatas(entries, { label, isYTD });
 }
 
 async function performSync() {
