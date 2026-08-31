@@ -1,4 +1,5 @@
 require('dotenv').config();
+const path = require('path');
 const express = require('express');
 const cors = require('cors');
 const { fetchOrders, fetchOrdersLight, fetchSalesReversals, fetchCostOfGoodsSold, fetchTopReturnsByProduct, fetchCountryBreakdown, fetchSalesSummary, fetchProductRetailPrices, getAuthorizeUrl, exchangeCodeForToken } = require('./src/shopify');
@@ -22,6 +23,22 @@ app.use(
   })
 );
 app.use(express.json());
+
+// Serves the dashboard itself (public/index.html + any assets alongside it)
+// from this same service — added 2026-08-31 after discovering that pages
+// published via Claude's Artifact tool run in a sandbox that silently
+// blocks fetch() to any external domain, which is why the Sync button
+// always failed with "Failed to fetch" on the claude.ai artifact link (for
+// every section, not just the new Triple Whale one — see
+// dashboard-build-notes.md for the full investigation). Serving the
+// dashboard HTML from this same Render service puts the page and the API on
+// the same origin, so Sync's fetch calls are no longer cross-origin at all
+// and the sandbox restriction doesn't apply. Visit this service's own URL
+// directly (e.g. https://nd-dashboard-backend.onrender.com/) to use the
+// live, Sync-capable dashboard — the claude.ai artifact link can stay
+// around as a snapshot-only preview, but Sync will never work there.
+// express.static serves public/index.html automatically for GET /.
+app.use(express.static(path.join(__dirname, 'public')));
 
 const VALID_SITES = ['com', 'eu', 'il'];
 
