@@ -3,6 +3,7 @@ const express = require('express');
 const cors = require('cors');
 const { fetchOrders, fetchOrdersLight, fetchSalesReversals, fetchCostOfGoodsSold, fetchTopReturnsByProduct, fetchCountryBreakdown, fetchSalesSummary, fetchProductRetailPrices, getAuthorizeUrl, exchangeCodeForToken } = require('./src/shopify');
 const { aggregate } = require('./src/aggregate');
+const { fetchChannelPerformance } = require('./src/triplewhale');
 
 const app = express();
 const PORT = process.env.PORT || 3000;
@@ -256,7 +257,19 @@ async function buildDataResponse({ site, start, end, compare }) {
   // date-range-scoped (it's a catalog snapshot) — fetched once and reused for
   // the current/YoY/MoM periods below rather than 3 times.
   //
-  // All 18 Shopify calls run in one Promise.all so none of this adds extra
+  // channelPerformance (added 2026-08-31, call 19) pulls Section 4's live
+  // spend/CV-per-channel figures from Triple Whale — see src/triplewhale.js
+  // for the full data-model rationale (why "Last Click" order_revenue is
+  // "Pixel CV" and channel_reported_conversion_value is "Channel CV", and
+  // which of the 9 requested channels get which). Only for the CURRENT
+  // period — Section 4 doesn't have a YoY/MoM comparison view, so there's no
+  // equivalent of the yoy/mom Shopify calls above. Wrapped so a Triple Whale
+  // outage or a not-yet-configured TRIPLEWHALE_API_KEY can never fail the
+  // rest of the sync (see fetchChannelPerformance's own try/catch too — this
+  // is a second, redundant safety net since it runs inside the same
+  // Promise.all as calls that ARE allowed to throw).
+  //
+  // All 19 calls run in one Promise.all so none of this adds extra
   // wall-clock time on top of the orders fetches.
   const [
     orders,
@@ -277,6 +290,7 @@ async function buildDataResponse({ site, start, end, compare }) {
     yoySalesSummary,
     momSalesSummary,
     retailPrices,
+    channelPerformance,
   ] = await Promise.all([
     fetchOrders(site, start, end),
     wantYoy ? fetchOrdersLight(site, yoyRange.start, yoyRange.end) : Promise.resolve(null),
@@ -296,6 +310,10 @@ async function buildDataResponse({ site, start, end, compare }) {
     wantYoy ? fetchSalesSummary(site, yoyRange.start, yoyRange.end) : Promise.resolve(null),
     wantMom ? fetchSalesSummary(site, momRange.start, momRange.end) : Promise.resolve(null),
     RETAIL_COGS_SITES[site] != null ? fetchProductRetailPrices(site) : Promise.resolve(null),
+    fetchChannelPerformance(site, start, end).catch((err) => {
+      console.error(`fetchChannelPerformance threw for site=${site}:`, err.message);
+      return null;
+    }),
   ]);
 
   // fetchCountryBreakdown now returns { rows, groupedBy, fallbackReason? }
@@ -376,6 +394,17 @@ async function buildDataResponse({ site, start, end, compare }) {
   // instead of Section 5 silently mislabeling billing-address data as
   // shipping-address data.
   result.by_country_grouped_by = currentCountryResult.groupedBy;
+
+  // Section 4 (Marketing & Sales Channel Performance) live sync — added
+  // 2026-08-31. `channelPerformance` is null when TRIPLEWHALE_API_KEY isn't
+  // configured yet, the store has no Triple Whale channel data for this
+  // range, or the request failed (already logged above) — in all of those
+  // cases we simply omit `channels` from the response and the frontend
+  // keeps showing the existing P&L-sheet snapshot for Section 4, same as
+  // before this feature existed.
+  if (channelPerformance) {
+    result.channels = channelPerformance;
+  }
   return result;
 }
 
