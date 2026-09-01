@@ -4,17 +4,27 @@
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
 <title>Natasha Denona — Monthly Sales Dashboard</title>
-<!-- Favicon + header logo added 2026-08-31 per Tomer's request. Both are
-     screenshots cropped from natashadenona.com's own live header/favicon
-     (the "ND" monogram at natashadenona.com/cdn/shop/files/android-chrome-512x512_32x32.png
-     and the "NATASHA DENONA" wordmark next to it), captured via Claude-in-Chrome
-     zoom+crop since this dashboard's network sandbox can't fetch external
-     image bytes directly. Embedded as base64 data URIs so the dashboard stays
-     a single self-contained file (same reasoning as everything else here) —
-     no dependency on natashadenona.com staying reachable. If a cleaner,
-     higher-res, or transparent-background source file becomes available,
-     swap these two data URIs for it; layout/CSS won't need to change. -->
-<link rel="icon" type="image/png" href="data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAACAAAAAgCAIAAAD8GO2jAAAEHElEQVR4nN1WPSx0XRCec869uzYRu4J8/qIhitUhFOJnFVajExESQkQjIkgkCiEakagpFCqJRCEq0YjodF6NEDZCNiQaP1ns3ntmvmI47i77dorvm+rm3DnzPDNnnjlHEBH8pslfjf6/ALDMFxERkZSSv4UQ5hciSinZ4cMZCQm11koppZQQgvciotbatm2zV2ithRAcTrtaKgkA3ugZeNrVQgrmwb/YHxEB4Ds/yywR0Z/TP7W1tdrVylJeACGE4zi2bd/e3k5OThKSRs1phUKhlpaWaDRa/E+xshQicjZfFBGRPi0aje7s7BBRKpUijxmf09NTTldKqdQXCSnl/Pz8+/s7O7N9lNSEQMRIJBIIBB4eHohIa238uLJEdHFxIaUcHBxkEolE4uzsbHV1NRwOA0B9fT3v5V28JQ2gq6sLACKRCP82eWQDMLFcx11YWACAurq6l5cXwy+ZTKYBRKNRrt3Y2BgRJZNJDqS1dh2XiM7Pz6WUQ0NDvO5lioiLi4sAMDIyorVOJpNMMbNEwWCwpaUFADY3NxHRm4TJwABwaKbiOi4itra2AsDx8bHruMwv7ZCbmppKS0uvr6+Li4uFECcnJ4jI3E0GAMAAGcYABwcHpoZMKw0gEonk5uYS0dHREQBUVlY+PT2ZKv8dwFSspqYmFAo9PT3xetqoICIp5evra3Nz8/Ly8tXV1cDAQIbovsvwS/AaAaC5ufnx8TEej2tX/wAAAJZlAcDMzEx/f//u7u7S0tKP4TJMKcXyrKqqAoB4PP7BmOlwOuabBbi+vh4Oh+fm5vb29lilrutmAzBpseZt22a8rNPUdd1AILC9va2U6unpicViPAMMG0q/qXgcpVKpWCzmOE5JSUkqlSKkrAC2bTuOEw6HNzY2EolEd3e3EMLv92fz5/NTUu3v71dUVJSXl/t8PmWprABCCMuytKv7+vqmp6dPTk7Gx8cDgQB4xldGxgCwvb19c3PT29vr9/n5kNPatL29PRgMZswsdmhvbweAiYkJpdTAwICRHqvp7e1Na31/f19QUJCTk3N5eflVRi9AW1tbXl7edwBEvL+/LyoqAgAp5fDwsNGwQbq7u2toaACAtbU1rz7SADo6OvLz85mUNzqr7PDwkAFGR0cR8fn5+eXlJZFIXFxcrKyshEIhKeXs7Kw3YCZAQ0OD3+9/fX39ngEPpZWVFZ/PJ4QoLCwMBoOhUMjv93ODlpWVbW1tZUQnIsvb+52dndXV1T7bR98eS5ZlEdHU1NTz8/PR0REiWpYlpbQsq6qqqrGxsb+/37STV+pfre1t52zDwLtOn7cx3+RGJRluaW2KGh3HMW+A74aI2tWI6DiOCYSEPzr/kAFnZ0hl25NMJvkk6POZ461BRgZ/K8iPli1QNvvvPx1/HeBfGcpsMKoxgLoAAAAASUVORK5CYII=">
+<!-- Header logo added 2026-08-31 per Tomer's request — screenshot cropped
+     from natashadenona.com's own live header (the "NATASHA DENONA" wordmark),
+     captured via Claude-in-Chrome zoom+crop since this dashboard's network
+     sandbox can't fetch external image bytes directly. Embedded as a base64
+     data URI so the dashboard stays a single self-contained file (same
+     reasoning as everything else here) — no dependency on
+     natashadenona.com staying reachable.
+     Favicon replaced 2026-09-01 per Tomer's request ("create new favicon
+     'ND Lytics'") — no longer the natashadenona.com monogram. This is a
+     custom "ND" mark with a small ascending 3-bar chart underneath (standing
+     in for "Lytics"/analytics), designed and rendered locally (an HTML/CSS
+     mockup screenshotted via Playwright at 512px then downsampled to 32x32
+     with PIL/LANCZOS for crisp small-size antialiasing) since "ND Lytics"
+     isn't an existing brand asset anywhere to source from. Full "ND Lytics"
+     text doesn't stay legible at 16-32px favicon sizes, hence "ND" + the
+     bars as a compact analytics accent instead of literal text — see
+     assets/nd_lytics_v2_512.png locally for the full-size version and
+     favicon_design2.html-style source if this needs revisiting. White
+     opaque background (not transparent), matching Tomer's earlier favicon
+     preference. If a logo becomes available, swap this data URI for it. -->
+<link rel="icon" type="image/png" href="data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAACAAAAAgCAIAAAD8GO2jAAAEIElEQVR4nN1WPUwjRxR+Mx4vBzG7ARMrkiHIPgkhCij4OYogGZkIQkFDgQgFuYafBgq7RJZMg4yQ4i5BgoIUVIjGRqILRSRKG5CIBCLiJ+JP4GAOgvHuzEsxx7IcxuQkaPJV9pt573v/swQR4TVBX9X6/4KAWf8gohDiIzOlhBDzSAiBiIQQSqn8bdUCAHlkVZEgL1tkzrnNZssRgRCCUrq+vj4xMaEoiqqqU1NTiqJIByml09PTKysr9fX1wWAwEokkk8mioiLpr6IoLpertrbW7/drmiZN3TMgIiIahoGIsVhMJgcAotGolMujnp4eAPD7/YjY0tKS032PxzM3N2dak3hQA0VRGGPFxcU3NzeRSKS3t7esrExG7XA4GGOqqgKApmmMMbfbHQgEFEW5vr5OJpOxWGx3d7e/vz+TyQwMDNznyhrB8vIyALjd7srKSgAYHR1FxNvbW0R8//49AHR1dSFiZ2cnAFRXV6MFq6ur5eXliqJomra3t4eInHNEzNGmDodjaGiIMTY7O7uxsWG323MmRAhxeXlpGIau69lstrm5ORwO67qeTqcXFhbkBcg5BycnJ319fX6//+rqKhQKPe68+w6xQAjR3t7udDoJIYlEAgCkYg4CwzAKCgrGx8ftdns8Ho/H41L4FA3cDYGqqpqmIWI6nc5HwBi7uLhoamrq7u42DCMUCklhHgIJmSsAMPs7N4EEIobD4ZKSkkQiMT8/73K5TKceg3MuhNjZ2Tk9PQUAr9f7DIHNZiOEVFVVDQ8PA8Dk5OTh4aGpkzNoSmk0GjUMgxDS0dEBeVJkQggRCAQqKio2NzdlB3POrRfMiT0+Pg4Gg4uLi5zztrY2n88nhJBz8CCzslamGue8tLR0bGxscHBQLgB5JK+lUimfzyd33/7+/tHREQDU1NTMzMwQYllx1kFbWloCAEVRtre3pZBzns1mGxoa5GW5KlpbW2UarSn1eDwjIyNnZ2dyJZsD+JFKruJUKpVMJhljjY2NhYWFpvzg4GBra4sQ4nQ66+rq1tbWzs/PGWNmzR0Oh9fr1TQN7vbmfVZecF1zzh8/CQ8IzAfnk51uvjCfPDgEQCqTOzxm/YwIEO/MAUhTiPD0Hvl8AiuOL/ShuYOsjoqd/PLjN19r7CmyZxYAFwgACMAoufiHn18ZAsGlsoyOGwc3gIRQvL4V8k7OYJ4hsNF7rZ+WT3/9PSUQhvxlgz7nGzslAJQSmjdL+QgyOv72x4esgTYK39eqCEAooQicI8rCAhCS2/FnCAQCJfBXKvvDz7sGRyDkz6kaLuD8ygCAG10gwt/XBgGgFHjeIuYmkE59WWQb+e4r2TyFCnn3tiijOwHg3dsv3ii0/9tSAKAE1EIKTxQAXvy76DH+UxcBgI0SgZaPOPLgKI+FV4/gXws7WIcBot2fAAAAAElFTkSuQmCC">
 <style>
   :root {
     color-scheme: light;
@@ -56,7 +66,7 @@
   .brand .sub { font-size: 12px; color: var(--text-muted); margin-top: 2px; }
   .brand { display: flex; align-items: center; gap: 10px; }
   .brand-logo { height: 34px; width: auto; display: block; }
-  .controls { display: flex; align-items: center; justify-content: flex-end; gap: 10px; flex-wrap: wrap; }
+  .controls { display: flex; align-items: center; justify-content: flex-start; gap: 10px; flex-wrap: wrap; }
   .site-tabs { display: flex; background: var(--surface-1); border: 1px solid var(--border); border-radius: 10px; padding: 3px; gap: 2px; }
   .site-tab { border: none; background: transparent; padding: 7px 14px; border-radius: 8px; font-size: 12.5px;
     font-weight: 600; color: var(--text-secondary); cursor: pointer; font-family: inherit; }
