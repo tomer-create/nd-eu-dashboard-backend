@@ -509,7 +509,22 @@ function mergeLiveIntoMonthData(monthData, live) {
       // that YTD pull has no matching product (e.g. a brand-new item), not
       // hardcoded null for every live row like before.
       return_ratio_ytd: p.return_ratio_ytd != null ? p.return_ratio_ytd : null,
-      pct_of_total_returns: live.kpis.returns_total ? p.return_value / live.kpis.returns_total : null,
+      // Fixed 2026-09-02 — Tomer reported this column "not pulling data"
+      // (showing — for every row). Root cause: `live.kpis.returns_total ?
+      // ... : null` treated a genuinely-zero store-wide returns total (very
+      // early in a new month, e.g. ND.EU on Sept 1-2 with no returns
+      // recorded yet) the same as a MISSING total — both fell through to
+      // null/"—", which reads as broken even though $0 returns store-wide
+      // legitimately means every product's share of that $0 is 0%, not
+      // "unknown." Distinguish the two: only show "—" when returns_total is
+      // truly absent (undefined/null); when it's a real number that happens
+      // to be 0, show 0% instead (0 ÷ 0 is undefined mathematically, but
+      // every row's return_value must also be 0 in that case, so 0% is the
+      // honest, non-alarming answer — consistent with the $0.00 already
+      // shown in the Return $ Value column for the same row).
+      pct_of_total_returns: (live.kpis.returns_total !== undefined && live.kpis.returns_total !== null)
+        ? (live.kpis.returns_total > 0 ? p.return_value / live.kpis.returns_total : 0)
+        : null,
     }));
     merged.top_returns_source = 'live_backend';
   }
@@ -1358,9 +1373,54 @@ function renderTopProducts(monthData) {
       <td>${yoyCell(p.yoy)}</td>
       <td>${yoyCell(p.mom)}</td>
     </tr>`).join('');
+  // Total row -- added 2026-09-02 per Tomer's request. Like Section 3, this
+  // table is inherently capped at the top 15 products (server-side), so this
+  // Total is an honest sum of the products SHOWN above, not a true
+  // store-wide total -- labeled accordingly. % of Total Sales is the SUM of
+  // each row's own already-correctly-scoped share (each computed against the
+  // true store-wide gross_sales), not forced to equal 100%. YoY/MoM are
+  // derived via implied-prior-value summation (same technique as Section 5's
+  // country Total): for each product with a known change, back out its prior
+  // value from gross_sales and the change, sum current and prior separately
+  // across all such products, then take the ratio of the sums -- this gives
+  // a properly weighted blended change rather than an average of percentages.
+  const products = monthData.top_products;
+  const totalGross = products.reduce((s, p) => s + (p.gross_sales || 0), 0);
+  const totalNetSalesEst = products.reduce((s, p) => s + (p.net_sales_est || 0), 0);
+  let totalUnitsSold = null;
+  if (products.some(p => p.units_sold !== null && p.units_sold !== undefined)) {
+    totalUnitsSold = products.reduce((s, p) => s + (p.units_sold || 0), 0);
+  }
+  let totalPctOfTotal = null;
+  if (products.some(p => p.pct_of_total !== null && p.pct_of_total !== undefined)) {
+    totalPctOfTotal = products.reduce((s, p) => s + (p.pct_of_total || 0), 0);
+  }
+  function impliedChangeTotal(field) {
+    let curSum = 0, priorSum = 0, any = false;
+    products.forEach(p => {
+      if (p[field] !== null && p[field] !== undefined && p.gross_sales) {
+        const prior = p.gross_sales / (1 + p[field]);
+        curSum += p.gross_sales;
+        priorSum += prior;
+        any = true;
+      }
+    });
+    return any && priorSum ? (curSum - priorSum) / priorSum : null;
+  }
+  const totalYoy = impliedChangeTotal('yoy');
+  const totalMom = impliedChangeTotal('mom');
+  const totalRow = products.length ? `<tr class="total-row">
+      <td>Total (products shown above)</td>
+      <td>${fmtVal(totalGross, 'currency-full')}</td>
+      <td>${fmtVal(totalNetSalesEst, 'currency-full')}</td>
+      <td>${totalUnitsSold !== null ? totalUnitsSold.toLocaleString('en-US') : '—'}</td>
+      <td>${totalPctOfTotal !== null ? fmtVal(totalPctOfTotal, 'percent') : '—'}</td>
+      <td>${yoyCell(totalYoy)}</td>
+      <td>${yoyCell(totalMom)}</td>
+    </tr>` : '';
   el.innerHTML = `<table class="dtable">
     <thead><tr><th style="text-align:left">Product</th><th>Gross Sales</th><th>Net Sales (est.)</th><th>Units Sold</th><th>% of Total Sales</th><th>YoY</th><th>MoM</th></tr></thead>
-    <tbody>${rows}</tbody>
+    <tbody>${rows}${totalRow}</tbody>
   </table>
   <div style="margin-top:10px;font-size:11px;color:var(--text-muted)">${srcNote}</div>`;
 }
@@ -1401,6 +1461,13 @@ function renderPlaceholder(id) {
   </div>`;
 }
 
+// Matches product titles like "I NEED A WARM EYESHADOW PALETTE SAMPLE" or
+// "HY-GLAM CONCEALER SAMPLE" — a whole-word match so it doesn't accidentally
+// catch an unrelated title that merely contains "sample" as a substring.
+function isSampleProduct(title) {
+  return typeof title === 'string' && /\bsample\b/i.test(title);
+}
+
 function renderReturns(monthData) {
   const badgeEl = document.getElementById('mtd-flag-3');
   if (!monthData.top_returns) {
@@ -1431,7 +1498,14 @@ function renderReturns(monthData) {
   //    server.js). Ranking itself still stays period-based, not YTD — only
   //    the ratio column's scope changed.
   const scopeLabel = isLive ? monthLabel : 'YTD';
-  const rows = monthData.top_returns.map((p, i) => `<tr>
+  // Excludes Samples (per Tomer's 2026-09-02 request) -- free/trial items,
+  // not real sellable products, that skew the return ranking (a $0-cost
+  // sample "returned" shows up disproportionately in ratio terms). Filtered
+  // here at render time (not at merge time) so it applies uniformly whether
+  // the list came from a live sync or the embedded YTD snapshot -- both
+  // funnel through this function.
+  const products = monthData.top_returns.filter(p => !isSampleProduct(p.title));
+  const rows = products.map((p, i) => `<tr>
       <td>${i+1}. ${p.title}</td>
       <td>${fmtVal(p.gross_sales, 'currency-full')}</td>
       <td>${fmtVal(p.return_value, 'currency-full')}</td>
@@ -1439,11 +1513,42 @@ function renderReturns(monthData) {
       <td>${p.return_ratio_ytd != null ? fmtVal(p.return_ratio_ytd, 'percent') : '—'}</td>
       <td>${p.pct_of_total_returns != null ? fmtVal(p.pct_of_total_returns, 'percent') : '—'}</td>
     </tr>`).join('');
+  // Total row -- added 2026-09-02 per Tomer's request. This table is
+  // inherently capped at the top 15 return products (server-side), so unlike
+  // Sections 5/6/7 this Total can only ever be an honest sum of the products
+  // SHOWN above, not a true store-wide total -- labeled accordingly. Return
+  // Ratio columns use a gross-sales-weighted average across the shown
+  // products; % of Total Returns is the SUM of each row's own
+  // already-correctly-scoped share (each computed against the true
+  // store-wide returns_total), not forced to equal 100%.
+  const totalGross = products.reduce((s, p) => s + (p.gross_sales || 0), 0);
+  const totalReturnValue = products.reduce((s, p) => s + (p.return_value || 0), 0);
+  function weightedReturnRatio(field) {
+    let num = 0, den = 0;
+    products.forEach(p => {
+      if (p[field] !== null && p[field] !== undefined && p.gross_sales) { num += p[field] * p.gross_sales; den += p.gross_sales; }
+    });
+    return den ? num / den : null;
+  }
+  const totalReturnRatioMonth = weightedReturnRatio('return_ratio_month');
+  const totalReturnRatioYtd = weightedReturnRatio('return_ratio_ytd');
+  let totalPctOfTotalReturns = null;
+  if (products.some(p => p.pct_of_total_returns !== null && p.pct_of_total_returns !== undefined)) {
+    totalPctOfTotalReturns = products.reduce((s, p) => s + (p.pct_of_total_returns || 0), 0);
+  }
+  const totalRow = products.length ? `<tr class="total-row">
+      <td>Total (products shown above)</td>
+      <td>${fmtVal(totalGross, 'currency-full')}</td>
+      <td>${fmtVal(totalReturnValue, 'currency-full')}</td>
+      <td>${totalReturnRatioMonth !== null ? fmtVal(totalReturnRatioMonth, 'percent') : '—'}</td>
+      <td>${totalReturnRatioYtd !== null ? fmtVal(totalReturnRatioYtd, 'percent') : '—'}</td>
+      <td>${totalPctOfTotalReturns !== null ? fmtVal(totalPctOfTotalReturns, 'percent') : '—'}</td>
+    </tr>` : '';
   document.getElementById('section-3').innerHTML = `<table class="dtable">
     <thead><tr><th style="text-align:left">Product</th><th>Gross Sales (${scopeLabel})</th><th>Return $ Value (${scopeLabel})</th><th>Return Ratio (${monthLabel})</th><th>Return Ratio (YTD)</th><th>% of Total Returns (${scopeLabel})</th></tr></thead>
-    <tbody>${rows}</tbody>
+    <tbody>${rows}${totalRow}</tbody>
   </table>
-  <div style="margin-top:10px;font-size:11px;color:var(--text-muted)">${monthData.top_returns_note || (isLive ? `Pulled live via the Sync button (real-time Shopify sales-reversals data, grouped by product, for the selected date range). Ranked by dollar return value for ${monthLabel} specifically — not year-to-date like the ND.COM embedded snapshot. Return Ratio (YTD) reflects Jan 1 through the end of ${monthLabel} for each product (same Shopify sales-reversals ÷ gross-sales calculation, just a longer window) — shows "—" only for a product with no matching year-to-date data, e.g. one first sold this period; % of Total Returns is this period's share of ${monthLabel}'s Shopify-reported Returns total (Section 1).` : `Pulled from Shopify analytics. Ranked by year-to-date (Jan 1 – today) dollar return value — Gross Sales, Return $ Value, Return Ratio (YTD), and % of Total Returns all reflect that same Jan 1–today window, so they're internally consistent with each other even though they don't match ${monthLabel}'s own totals. Return Ratio (${monthLabel}) additionally shows how each of these 15 products performed in just the currently-selected month, for a more recent read alongside the steadier YTD figure. Shopify\u2019s analytics query surface doesn\u2019t expose a units-returned dimension at the per-product level, so this table ranks by dollar return value rather than unit counts — the store-wide total of ${monthData.top_returns_units_total_ytd !== undefined ? monthData.top_returns_units_total_ytd.toLocaleString('en-US') : '—'} units returned year-to-date (${monthData.top_returns_units_total !== undefined ? monthData.top_returns_units_total.toLocaleString('en-US') : '—'} in ${monthLabel} alone) is shown in Section 1.`)}</div>`;
+  <div style="margin-top:10px;font-size:11px;color:var(--text-muted)">${monthData.top_returns_note || (isLive ? `Pulled live via the Sync button (real-time Shopify sales-reversals data, grouped by product, for the selected date range). Ranked by dollar return value for ${monthLabel} specifically — not year-to-date like the ND.COM embedded snapshot. Return Ratio (YTD) reflects Jan 1 through the end of ${monthLabel} for each product (same Shopify sales-reversals ÷ gross-sales calculation, just a longer window) — shows "—" only for a product with no matching year-to-date data, e.g. one first sold this period; % of Total Returns is this period's share of ${monthLabel}'s Shopify-reported Returns total (Section 1).` : `Pulled from Shopify analytics. Ranked by year-to-date (Jan 1 – today) dollar return value — Gross Sales, Return $ Value, Return Ratio (YTD), and % of Total Returns all reflect that same Jan 1–today window, so they're internally consistent with each other even though they don't match ${monthLabel}'s own totals. Return Ratio (${monthLabel}) additionally shows how each of these 15 products performed in just the currently-selected month, for a more recent read alongside the steadier YTD figure. Shopify\u2019s analytics query surface doesn\u2019t expose a units-returned dimension at the per-product level, so this table ranks by dollar return value rather than unit counts — the store-wide total of ${monthData.top_returns_units_total_ytd !== undefined ? monthData.top_returns_units_total_ytd.toLocaleString('en-US') : '—'} units returned year-to-date (${monthData.top_returns_units_total !== undefined ? monthData.top_returns_units_total.toLocaleString('en-US') : '—'} in ${monthLabel} alone) is shown in Section 1.`)} Samples are excluded from this list.</div>`;
 }
 
 // Filters out Shopify's catch-all bucket for orders with no resolvable
