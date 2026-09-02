@@ -702,6 +702,17 @@ function deriveRatioChange(entries, getNum, getDen, numIsCurrency, denIsCurrency
     const nk = getNum(kpisByLabel), dk = getDen(kpisByLabel);
     const nChange = nk[field], dChange = dk[field];
     if (nChange === null || nChange === undefined || dChange === null || dChange === undefined) return;
+    // Guard against a change of exactly -100% (1 + change === 0), which makes
+    // the implied-prior-value division (actual / (1 + change)) divide by
+    // zero -- actual/0 is Infinity, or NaN if actual is also 0 (the case
+    // that surfaced this: a not-yet-synced current month defaults to
+    // actual:0, yoy:-1 for Gross/Net Sales specifically, unlike every other
+    // KPI which correctly defaults to yoy:null for "no data"). Either way
+    // this entry can't be summed coherently, so skip it exactly like a
+    // missing change -- one bad month must not turn the whole combined
+    // total into NaN. Fixed 2026-09-02 after Tomer reported "YoY NaN%" on
+    // the Year to Date view.
+    if ((1 + nChange) === 0 || (1 + dChange) === 0) return;
     any = true;
     const nFx = numIsCurrency ? e.fx : 1, dFx = denIsCurrency ? e.fx : 1;
     const nPrior = nk.actual / (1 + nChange), dPrior = dk.actual / (1 + dChange);
@@ -840,11 +851,20 @@ function combineKPIsRaw(entries, isYTD) {
       actual += (k.actual || 0) * fx;
       if (k.goal !== null && k.goal !== undefined) { goalSum += k.goal * fx; goalHasValue = true; }
       if (!k.no_data) dataCount++;
-      if (k.yoy !== null && k.yoy !== undefined) {
+      // Guard against a change of exactly -100% (1 + change === 0): the
+      // implied-prior-value division below would divide by zero -- actual/0
+      // is Infinity, or NaN if actual is also 0. That NaN/Infinity case is
+      // exactly what surfaced as "YoY NaN%" on the Year to Date view (fixed
+      // 2026-09-02, reported by Tomer): a not-yet-synced current month
+      // defaults to actual:0, yoy:-1 for Gross/Net Sales specifically,
+      // unlike every other KPI, which correctly defaults to yoy:null for "no
+      // data". Skip the entry in that case, same as a missing change --
+      // one bad month must not corrupt the whole combined total.
+      if (k.yoy !== null && k.yoy !== undefined && (1 + k.yoy) !== 0) {
         const prior = k.actual / (1 + k.yoy);
         yoyActual += k.actual * fx; yoyPrior += prior * fx; yoyCount++;
       }
-      if (!isYTD && k.mom !== null && k.mom !== undefined) {
+      if (!isYTD && k.mom !== null && k.mom !== undefined && (1 + k.mom) !== 0) {
         const prior = k.actual / (1 + k.mom);
         momActual += k.actual * fx; momPrior += prior * fx; momCount++;
       }
@@ -852,8 +872,8 @@ function combineKPIsRaw(entries, isYTD) {
     rawByLabel[label] = {
       actual, goal: goalHasValue ? goalSum : null, fmt, higher_is_better,
       no_data: dataCount === 0, partial: dataCount > 0 && dataCount < entries.length,
-      yoy: yoyCount ? (yoyActual - yoyPrior) / yoyPrior : null,
-      mom: momCount ? (momActual - momPrior) / momPrior : null,
+      yoy: (yoyCount && yoyPrior) ? (yoyActual - yoyPrior) / yoyPrior : null,
+      mom: (momCount && momPrior) ? (momActual - momPrior) / momPrior : null,
     };
   });
   return { labels, rawByLabel };
