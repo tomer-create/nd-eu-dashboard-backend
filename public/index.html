@@ -131,6 +131,10 @@
   table.dtable tr:last-child td { border-bottom: none; }
   table.dtable tr.no-data-row td { color: var(--text-muted); font-style: italic; }
   table.dtable tr.total-row td { font-weight: 700; border-top: 1.5px solid var(--text-primary); border-bottom: none; background: var(--page-plane); }
+  table.dtable tr.show-more-row td { text-align: center; padding: 8px; background: var(--page-plane); }
+  .show-more-btn { border: 1px solid var(--border); background: var(--surface-1); color: var(--text-secondary);
+    border-radius: 8px; padding: 5px 14px; font-size: 11.5px; font-weight: 650; font-family: inherit; cursor: pointer; }
+  .show-more-btn:hover { background: var(--track); color: var(--text-primary); }
   .mini-pbar-wrap { display:flex; flex-direction:column; gap:2px; min-width:110px; }
   .mini-pbar-track { height: 5px; border-radius: 3px; background: var(--track); overflow:hidden; }
   .mini-pbar-fill { height:100%; border-radius:3px; }
@@ -297,6 +301,13 @@ const BACKEND_URL = '';
 const MONTH_INDEX = { Jan:0, Feb:1, Mar:2, Apr:3, May:4, Jun:5, Jul:6, Aug:7, Sep:8, Oct:9, Nov:10, Dec:11 };
 // cache of live pulls, keyed 'site|month' -> { data, fetchedAt }
 const liveCache = {};
+// Section 5 (Sales by Country) "show more" expand state, keyed the same way
+// as liveCache ('site|month') so expanding ND.EU's long country list doesn't
+// leak into a different site/month view that has few enough countries to
+// need no pagination at all. Added 2026-09-01 per Tomer's request to cap
+// the table at 15 rows with a "show more" toggle for the rest.
+const countryExpanded = {};
+function countryViewKey() { return state.site + '|' + state.month; }
 
 // Shows today's real-world date in the header ("Today: September 1, 2026"),
 // so it's obvious at a glance what date the "current month / MTD" figures
@@ -1449,26 +1460,96 @@ function renderReturns(monthData) {
 function isUnknownCountry(name) {
   return typeof name === 'string' && name.trim().toLowerCase().startsWith('unknown');
 }
+// Capped at COUNTRY_PAGE_SIZE rows with a "show more" toggle below, plus a
+// Total row (matching the Total-row convention already used in Sections 6
+// and 7) — added 2026-09-01 after Tomer flagged ND.EU's country list running
+// long (Europe naturally spans many more countries than ND.COM/ND.IL).
+const COUNTRY_PAGE_SIZE = 15;
 function renderCountry(monthData) {
   if (!monthData.by_country) { renderPlaceholder('section-5'); return; }
-  const countries = monthData.by_country.filter(c => !isUnknownCountry(c.country));
-  const visibleTotal = countries.reduce((s, c) => s + (c.gross_sales || 0), 0);
-  const rows = countries.map(c => `<tr>
+  // Sort defensively by gross sales descending — the backend/combine logic
+  // already sorts this way, but "top N + show more" only makes sense if
+  // we're guaranteed the first N really are the biggest, so don't just
+  // trust incoming order.
+  const countries = monthData.by_country
+    .filter(c => !isUnknownCountry(c.country))
+    .slice()
+    .sort((a, b) => (b.gross_sales || 0) - (a.gross_sales || 0));
+
+  // Grand total across ALL countries (not just the ones currently shown) —
+  // used both for the Total row and for each row's "% of Total", so that
+  // percentage doesn't shift depending on whether the list is expanded.
+  const grandTotalGross = countries.reduce((s, c) => s + (c.gross_sales || 0), 0);
+
+  const key = countryViewKey();
+  const expanded = !!countryExpanded[key];
+  const shown = expanded ? countries : countries.slice(0, COUNTRY_PAGE_SIZE);
+  const hiddenCount = countries.length - shown.length;
+
+  const rows = shown.map(c => `<tr>
       <td>${c.country}</td>
       <td>${c.orders.toLocaleString('en-US')}</td>
       <td>${fmtVal(c.gross_sales, 'currency-full')}</td>
       <td>${fmtVal(c.net_sales, 'currency-full')}</td>
       <td>${c.aov !== null ? fmtVal(c.aov, 'currency-full') : '—'}</td>
-      <td>${visibleTotal ? fmtVal(c.gross_sales / visibleTotal, 'percent') : '—'}</td>
+      <td>${grandTotalGross ? fmtVal(c.gross_sales / grandTotalGross, 'percent') : '—'}</td>
       <td>${(c.return_rate !== undefined && c.return_rate !== null) ? fmtVal(c.return_rate, 'percent') : '—'}</td>
       <td>${yoyCell(c.yoy)}</td>
       <td>${yoyCell(c.mom)}</td>
     </tr>`).join('');
+
+  const showMoreRow = hiddenCount > 0 || expanded
+    ? `<tr class="show-more-row"><td colspan="9">
+         <button type="button" class="show-more-btn" id="country-show-more-btn">${expanded ? 'Show less' : `Show ${hiddenCount} more`}</button>
+       </td></tr>`
+    : '';
+
+  // Total row — true total across all countries, not just the visible page.
+  // Return Rate is an orders-weighted average (same convention documented
+  // for the combined multi-site/YTD by-country view); YoY/MoM are derived
+  // by summing each country's implied prior-period value and recomputing
+  // the ratio from the summed totals, the same technique deriveRatioChange()
+  // uses elsewhere in this file for combined KPIs.
+  const totalOrders = countries.reduce((s, c) => s + (c.orders || 0), 0);
+  const totalNet = countries.reduce((s, c) => s + (c.net_sales || 0), 0);
+  const totalAov = totalOrders ? totalNet / totalOrders : null;
+  let rrNum = 0, rrDen = 0;
+  countries.forEach(c => {
+    if (c.return_rate !== undefined && c.return_rate !== null && c.orders) { rrNum += c.return_rate * c.orders; rrDen += c.orders; }
+  });
+  const totalReturnRate = rrDen ? rrNum / rrDen : null;
+  function totalChange(field) {
+    let curSum = 0, priorSum = 0, any = false;
+    countries.forEach(c => {
+      const v = c[field];
+      if (v === null || v === undefined || !c.gross_sales) return;
+      any = true;
+      curSum += c.gross_sales;
+      priorSum += c.gross_sales / (1 + v);
+    });
+    if (!any || !priorSum) return null;
+    return (curSum - priorSum) / priorSum;
+  }
+  const totalRow = `<tr class="total-row">
+      <td>Total${countries.length > COUNTRY_PAGE_SIZE ? ` (all ${countries.length} countries)` : ''}</td>
+      <td>${totalOrders.toLocaleString('en-US')}</td>
+      <td>${fmtVal(grandTotalGross, 'currency-full')}</td>
+      <td>${fmtVal(totalNet, 'currency-full')}</td>
+      <td>${totalAov !== null ? fmtVal(totalAov, 'currency-full') : '—'}</td>
+      <td>${fmtVal(1, 'percent')}</td>
+      <td>${totalReturnRate !== null ? fmtVal(totalReturnRate, 'percent') : '—'}</td>
+      <td>${yoyCell(totalChange('yoy'))}</td>
+      <td>${yoyCell(totalChange('mom'))}</td>
+    </tr>`;
+
   document.getElementById('section-5').innerHTML = `<table class="dtable">
     <thead><tr><th style="text-align:left">Country</th><th>Orders</th><th>Gross Sales</th><th>Net Sales</th><th>AOV</th><th>% of Total</th><th>Return Rate</th><th>YoY</th><th>MoM</th></tr></thead>
-    <tbody>${rows}</tbody>
+    <tbody>${rows}${showMoreRow}${totalRow}</tbody>
   </table>
   <div style="margin-top:10px;font-size:11px;color:var(--text-muted)">${monthData.by_country_note || 'Pulled live from Shopify analytics, grouped by shipping country where Shopify supports it for this query (falls back to billing country otherwise), exact calendar-month-to-date range.'}</div>`;
+
+  const btn = document.getElementById('country-show-more-btn');
+  if (btn) btn.addEventListener('click', () => { countryExpanded[key] = !expanded; renderCountry(monthData); });
 }
 
 function renderDiscounts(monthData) {
