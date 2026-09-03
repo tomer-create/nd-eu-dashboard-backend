@@ -630,7 +630,13 @@ function mergeLiveIntoMonthData(monthData, live) {
       // row for a channel the dashboard never showed at all before.
     }
     merged.channels = updatedChannels;
-    merged.channels_note = 'Spend and CV for Google Ads, TikTok Ads, Meta Ads, Microsoft Ads, impact.com, Criteo, Pinterest, Snapchat, and ChatGPT Ads are pulled live from Triple Whale (Pixel CV via Last-Click attribution, except Snapchat and impact.com which use Triple Whale\'s Channel CV). Spend/goal figures for every other channel still come from the P&L sheet.';
+    // Shop App added to this note 2026-09-03 alongside the matching
+    // src/triplewhale.js backend fix (Tomer reported "Microsoft Ads and Shop
+    // App and more are not pulling data") -- Shop App has real Pixel CV
+    // revenue in Triple Whale but, like impact.com, is never a paid channel,
+    // so it always shows $0/no spend and "—" ROAS by design, not as a sign
+    // it isn't syncing.
+    merged.channels_note = 'Spend and CV for Google Ads, TikTok Ads, Meta Ads, Microsoft Ads, impact.com, Criteo, Pinterest, Snapchat, ChatGPT Ads, and Shop App are pulled live from Triple Whale (Pixel CV via Last-Click attribution, except Snapchat and impact.com which use Triple Whale\'s Channel CV). Shop App, like impact.com, has no ad spend to report — its ROAS will always show "—". Spend/goal figures for every other channel still come from the P&L sheet.';
   }
 
   return merged;
