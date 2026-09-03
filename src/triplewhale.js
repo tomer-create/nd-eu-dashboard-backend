@@ -64,6 +64,31 @@
 //   absent, which the frontend renders as "No data" (same as it already
 //   does for IL's Microsoft Ads/Pinterest today).
 //
+// SHOP APP ADDED 2026-09-03 — Tomer reported "Microsoft Ads and Shop App
+// and more are not pulling data" for ND.COM's Section 4. Investigated both:
+//   - Shop App was simply never in CHANNEL_MAP at all — a real gap, not an
+//     intentional exclusion. Confirmed live via `pixel_joined_tvf` that
+//     Triple Whale's channel id for it is `shop_app` (Pixel CV: $63,400.17
+//     on ND.COM for Aug 2026, $4,773.01 for Sept 1-2 2026 — real, current
+//     revenue, just never being pulled). Like impact.com/Snapchat, this
+//     channel is Shopify's own on-platform "Shop" app/marketplace, not a
+//     paid ad platform — `spend` is always 0 for it in Triple Whale's data
+//     (no ad spend to report), so its ROAS will correctly show "—" (same
+//     formula/behavior as any other zero-spend channel) while Revenue and
+//     Revenue Ratio populate live. Added below using Pixel CV (`cv:
+//     'pixel'`), matching every other Triple-Whale-sourced channel except
+//     the two Tomer explicitly carved out (Snapchat, impact.com).
+//   - Microsoft Ads re-confirmed still correctly "No data" — re-ran the same
+//     query for Sept 2026 and `bing` is still $0 channel-reported spend
+//     (i.e. still an organic referral source, not a connected paid Bing/
+//     Microsoft Ads platform in Triple Whale). Did NOT map `bing` to
+//     Microsoft Ads, since that would misrepresent organic Bing search
+//     traffic as paid-ad performance — the existing `no_data: true` result
+//     for this channel is accurate, not a bug. If Tomer connects an actual
+//     Bing/Microsoft Ads account inside Triple Whale, this will start
+//     working automatically (see CHANNEL_MAP entry below), no code change
+//     needed.
+//
 // API DOCS: https://triplewhale.readme.io/reference/data-out-execute-custom-sql-query
 
 const TRIPLEWHALE_SQL_URL = 'https://api.triplewhale.com/api/v2/orcabase/api/sql';
@@ -97,6 +122,11 @@ const CHANNEL_MAP = [
   { ids: ['openai-ads'], label: 'ChatGPT Ads', cv: 'pixel' },
   { ids: ['impact'], label: 'impact.com', cv: 'channel' },
   { ids: ['snapchat-ads'], label: 'Snapchat', cv: 'channel' },
+  // Added 2026-09-03 — see the SHOP APP note in the file header above.
+  // Shopify's own on-platform "Shop" app/marketplace channel: real Pixel CV
+  // revenue, but never any ad spend (it's not a paid platform), so `spend`
+  // will consistently come back 0/absent for this id, same as impact.com.
+  { ids: ['shop_app'], label: 'Shop App', cv: 'pixel' },
 ];
 
 const ALL_CHANNEL_IDS = CHANNEL_MAP.flatMap((c) => c.ids);
