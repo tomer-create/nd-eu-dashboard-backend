@@ -97,24 +97,46 @@
 //   Sheet "Pinterest"                     -> "Pinterest" (unchanged — see note below)
 //   Sheet "TikTok Organic + Affiliates"   -> "TikTok Affiliates + Organic" (word order differs!)
 //   Sheet "Organic Revenue (P.N)"         -> "Organic"
-// Deliberately NOT pulled from the sheet: "Shop" (row 26 in the sheet) and
-// "Impact" (row 27) are already live-synced from Triple Whale as "Shop App"
-// and "impact.com" respectively — pulling them again from the sheet too
-// would let a stale sheet number silently overwrite a fresher Triple Whale
-// one. The merge logic below only ever fills in a channel the OTHER source
-// left as no_data, never overwrites one that already has real data, but
-// keeping Shop/Impact out of CHANNEL_ROWS entirely avoids the ambiguity of
-// two live sources for the same channel.
+// Deliberately NOT pulled from the sheet: "Shop" (row labeled "Shop" in the
+// sheet) and "Impact" (row labeled "Impact ") are already live-synced from
+// Triple Whale as "Shop App" and "impact.com" respectively — pulling them
+// again from the sheet too would let a stale sheet number silently
+// overwrite a fresher Triple Whale one. The merge logic below only ever
+// fills in a channel the OTHER source left as no_data, never overwrites one
+// that already has real data, but keeping Shop/Impact out of CHANNEL_ROWS
+// entirely avoids the ambiguity of two live sources for the same channel.
 //
-// BONUS FIX INCLUDED: Tomer's report didn't mention Pinterest, but it has
-// the exact same symptom as Microsoft Ads — it's in Triple Whale's
-// CHANNEL_MAP already, comes back `no_data: true` there (Pinterest isn't
-// run as a connected ad platform on ND.COM), and — just confirmed live —
-// the P&L sheet already tracks a real Pinterest revenue+cost figure the
-// same way it now tracks Microsoft Ads. Since the code path is identical,
-// it's included here rather than shipping a fix that would need a repeat
-// of this exact investigation the next time Tomer notices Pinterest is
-// blank too.
+// BONUS FIX INCLUDED (2026-09-03, same day as the original build): Tomer's
+// report didn't mention Pinterest, but it has the exact same symptom as
+// Microsoft Ads — it's in Triple Whale's CHANNEL_MAP already, comes back
+// `no_data: true` there (Pinterest isn't run as a connected ad platform on
+// ND.COM), and — just confirmed live — the P&L sheet already tracks a real
+// Pinterest revenue+cost figure the same way it now tracks Microsoft Ads.
+// Since the code path is identical, it's included here rather than shipping
+// a fix that would need a repeat of this exact investigation the next time
+// Tomer notices Pinterest is blank too.
+//
+// COLLABS ADDED 2026-09-03 (later same day) — Tomer reported "it doesn't
+// pull Collabs". Unlike Shop/Impact above, Collabs Affiliate has NO live
+// source at all: it's Shopify's Collabs app, which has no MCP/Shopify
+// Analytics equivalent (ShopifyQL's documented sources don't expose
+// Collabs-app data — same limitation the com-pnl-monthly-update-fast skill
+// documents for why it still reads the Collabs app's own dashboard via
+// browser rather than a connector) and Triple Whale's CHANNEL_MAP has no
+// entry for it either. So this was a real gap, not an intentional
+// exclusion like Shop/Impact — Section 4 was silently showing the
+// dashboard's stale embedded snapshot (0 for the current month) with no
+// "no data" indicator to flag it. Confirmed live via the Google Drive
+// connector (reading this exact spreadsheet directly, bypassing the CSV
+// export URL) that the sheet has a real "Collabs" row in both the Revenue
+// Breakdown and Cost sections — Sep-26 Actual showing $10,160 revenue /
+// $928 cost, non-zero and current. Row numbers for both have drifted AGAIN
+// since the original 2026-09-03 build (Revenue Breakdown's Collabs row
+// moved, and Cost's Collabs row is now ~66 instead of the ~62 last
+// recorded in the skill notes) — another live confirmation that the
+// dynamic anchor-scan approach below (not hardcoded row numbers) was the
+// right call. Dashboard label confirmed as "Collabs Affiliate" by grepping
+// dashboard_v2.html's embedded Section 4 data.
 
 const SPREADSHEET_ID =
   process.env.GOOGLE_SHEETS_SPREADSHEET_ID || '11D_QS9rFe8CdG88fNba-onG3arMrDfIxNq3Ta_QUQsQ';
@@ -141,6 +163,8 @@ const CHANNEL_ROWS = [
   { sheetLabel: 'Pinterest', dashboardLabel: 'Pinterest', hasCost: true },
   { sheetLabel: 'TikTok Organic + Affiliates', dashboardLabel: 'TikTok Affiliates + Organic', hasCost: false },
   { sheetLabel: 'Organic Revenue (P.N)', dashboardLabel: 'Organic', hasCost: false },
+  // Added 2026-09-03 — see the COLLABS ADDED note in the file header above.
+  { sheetLabel: 'Collabs', dashboardLabel: 'Collabs Affiliate', hasCost: true },
 ];
 
 const MONTH_ABBR = ['Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun', 'Jul', 'Aug', 'Sep', 'Oct', 'Nov', 'Dec'];
