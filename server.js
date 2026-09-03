@@ -5,7 +5,7 @@ const cors = require('cors');
 const { fetchOrders, fetchOrdersLight, fetchSalesReversals, fetchCostOfGoodsSold, fetchTopReturnsByProduct, fetchCountryBreakdown, fetchSalesSummary, fetchProductRetailPrices, getAuthorizeUrl, exchangeCodeForToken } = require('./src/shopify');
 const { aggregate } = require('./src/aggregate');
 const { fetchChannelPerformance } = require('./src/triplewhale');
-const { fetchPnlSheetChannels } = require('./src/googlesheets');
+const { fetchPnlSheetChannels, fetchPnlSheetOtherCosts } = require('./src/googlesheets');
 
 const app = express();
 const PORT = process.env.PORT || 3000;
@@ -301,7 +301,19 @@ async function buildDataResponse({ site, start, end, compare }) {
   // as channelPerformance above — a Sheets hiccup must never fail the rest
   // of the sync.
   //
-  // All 20 calls run in one Promise.all so none of this adds extra
+  // pnlSheetOtherCosts (added 2026-09-03, call 21) covers Section 7 (Other
+  // Costs) — Tomer: "fix the Profit and the profit margin... should be
+  // formula: net sales - Other Costs. also the other costs section doesn't
+  // pull from the spreadsheet." Unlike pnlSheetChannels above, this covers
+  // ALL 3 sites (each with its own curated line-item list — see
+  // OTHER_COST_ROWS in src/googlesheets.js), because Profit/Profit Margin
+  // need it to be live for all 3 sites too. Same public-CSV-export
+  // approach, same independent try/catch — a Sheets hiccup here must never
+  // fail the rest of the sync, and must never take down Section 4's own
+  // pnlSheetChannels call either (they're independent try/catches on
+  // independent calls).
+  //
+  // All 21 calls run in one Promise.all so none of this adds extra
   // wall-clock time on top of the orders fetches.
   const [
     orders,
@@ -324,6 +336,7 @@ async function buildDataResponse({ site, start, end, compare }) {
     retailPrices,
     channelPerformance,
     pnlSheetChannels,
+    pnlSheetOtherCosts,
   ] = await Promise.all([
     fetchOrders(site, start, end),
     wantYoy ? fetchOrdersLight(site, yoyRange.start, yoyRange.end) : Promise.resolve(null),
@@ -349,6 +362,10 @@ async function buildDataResponse({ site, start, end, compare }) {
     }),
     fetchPnlSheetChannels(site, start).catch((err) => {
       console.error(`fetchPnlSheetChannels threw for site=${site}:`, err.message);
+      return null;
+    }),
+    fetchPnlSheetOtherCosts(site, start).catch((err) => {
+      console.error(`fetchPnlSheetOtherCosts threw for site=${site}:`, err.message);
       return null;
     }),
   ]);
@@ -447,6 +464,23 @@ async function buildDataResponse({ site, start, end, compare }) {
   if (mergedChannels) {
     result.channels = mergedChannels;
   }
+
+  // Section 7 (Other Costs) live sync — P&L Google Sheet (added 2026-09-03,
+  // see fetchPnlSheetOtherCosts in src/googlesheets.js), all 3 sites. Unlike
+  // Section 4 above there's only one source here, so no merge step — just
+  // attach it when the sheet actually returned something (null when the
+  // sheet fetch failed or the site/month wasn't found; already logged in
+  // googlesheets.js). The frontend (mergeLiveIntoMonthData in
+  // dashboard_v2.html) is responsible for overriding the "Product Cost"
+  // line with the live Shopify COGS figure (see the COGS KPI added
+  // 2026-08-24) rather than trusting the sheet for that one line, and for
+  // recomputing the Profit/Profit Margin KPIs from Net Sales and this
+  // total — none of that happens here, this endpoint just hands over the
+  // raw sheet-sourced line items.
+  if (pnlSheetOtherCosts) {
+    result.other_costs = pnlSheetOtherCosts;
+  }
+
   return result;
 }
 
