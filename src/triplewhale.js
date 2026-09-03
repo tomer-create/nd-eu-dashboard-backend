@@ -89,6 +89,34 @@
 //     working automatically (see CHANNEL_MAP entry below), no code change
 //     needed.
 //
+// PIXEL CV INFLATION BUG FIXED 2026-09-03 — Tomer asked to double-check the
+// Triple Whale numbers. Cross-checked this file's SQL against Triple
+// Whale's own MCP connector (pixel-attribution tool + get-table-schemas +
+// verified SQL examples via find-sql-examples) for Sept 1-3 2026 on
+// ND.COM, and found every one of Triple Whale's own example queries calls
+// `pixel_joined_tvf()` BARE (no arguments) and does ALL date/model
+// filtering in the WHERE clause. This file instead called
+// `pixel_joined_tvf(startDate=..., endDate=..., model=...)` — passing the
+// same values as both TVF arguments AND a WHERE filter. That's not the
+// documented calling convention, and it silently fans out the pixel-to-
+// order join for channels with multiple ad touchpoints per converting
+// customer, inflating SUM(order_revenue) — confirmed by running both forms
+// side-by-side for Sept 1-3 2026 on ND.COM:
+//   channel        correct pixel_cv   buggy (old) pixel_cv   inflation
+//   google-ads     $10,198.15         $33,048.20              ~3.2x
+//   facebook-ads   $2,601.70          $11,378.77               ~4.4x
+//   criteo         $88.88             $3,615.03               ~40x
+//   tiktok-ads     $7,406.30          $7,598.53                ~2.6% (small but real)
+// `channel_reported_conversion_value` (Channel CV — used for impact.com and
+// Snapchat) was NOT affected either way — the fan-out only hits the
+// pixel/order join, not the ad platform's own reported number — so those
+// two channels' numbers were correct all along, as were Pinterest and Shop
+// App (low/no touchpoint overlap, no visible fan-out for this period).
+// Fix: call `pixel_joined_tvf()` with no arguments and do all filtering
+// (event_date range + model) in the WHERE clause, matching Triple Whale's
+// own documented pattern exactly. Re-verified after the fix: results match
+// Triple Whale's `pixel-attribution` MCP tool exactly for every channel.
+//
 // API DOCS: https://triplewhale.readme.io/reference/data-out-execute-custom-sql-query
 
 const TRIPLEWHALE_SQL_URL = 'https://api.triplewhale.com/api/v2/orcabase/api/sql';
@@ -149,14 +177,25 @@ async function fetchChannelPerformance(site, start, end) {
   // both CV variants come back in the same row so we don't need to guess
   // ahead of time which CV column a given channel wants; that's applied
   // when mapping rows below.
+  // NOTE: pixel_joined_tvf() is called bare, with NO arguments — all
+  // filtering (date range + attribution model) happens in the WHERE clause
+  // below. This matches Triple Whale's own documented/verified query
+  // pattern exactly. Passing startDate/endDate/model as TVF *arguments*
+  // (as this file used to) is not the documented calling convention and
+  // was found to silently inflate SUM(order_revenue) for channels with
+  // multiple ad touchpoints per order — see the file header note above
+  // dated 2026-09-03 for the full before/after numbers. Do not reintroduce
+  // TVF arguments here without re-validating against the MCP connector's
+  // pixel-attribution tool for a known date range first.
   const query = `
     SELECT
       channel,
       SUM(spend) AS spend,
       SUM(channel_reported_conversion_value) AS channel_cv,
       SUM(order_revenue) AS pixel_cv
-    FROM pixel_joined_tvf(startDate='${start}', endDate='${end}', model='Last Click')
+    FROM pixel_joined_tvf()
     WHERE event_date >= '${start}' AND event_date <= '${end}'
+      AND model = 'Last Click'
       AND channel IN (${ALL_CHANNEL_IDS.map((id) => `'${id}'`).join(',')})
     GROUP BY channel
   `.trim();
