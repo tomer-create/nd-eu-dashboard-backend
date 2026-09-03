@@ -5,6 +5,7 @@ const cors = require('cors');
 const { fetchOrders, fetchOrdersLight, fetchSalesReversals, fetchCostOfGoodsSold, fetchTopReturnsByProduct, fetchCountryBreakdown, fetchSalesSummary, fetchProductRetailPrices, getAuthorizeUrl, exchangeCodeForToken } = require('./src/shopify');
 const { aggregate } = require('./src/aggregate');
 const { fetchChannelPerformance } = require('./src/triplewhale');
+const { fetchPnlSheetChannels } = require('./src/googlesheets');
 
 const app = express();
 const PORT = process.env.PORT || 3000;
@@ -286,7 +287,21 @@ async function buildDataResponse({ site, start, end, compare }) {
   // is a second, redundant safety net since it runs inside the same
   // Promise.all as calls that ARE allowed to throw).
   //
-  // All 19 calls run in one Promise.all so none of this adds extra
+  // pnlSheetChannels (added 2026-09-03, call 20) covers the Section 4
+  // channels Triple Whale genuinely can't: Attentive's 4 channels,
+  // Microsoft Ads, Pinterest, Organic, and TikTok Affiliates + Organic —
+  // read live from the same "Marketing P&L 2026" Google Sheet the monthly
+  // P&L-update skill maintains, via the sheet's public CSV export (Tomer
+  // chose this 2026-09-03 over a Google Cloud service account specifically
+  // to avoid that setup — see src/googlesheets.js for the full rationale,
+  // the sheet's row/column layout, and the one-time "Anyone with the link"
+  // sharing change needed for this to return anything other than null,
+  // rather than a Google Cloud service account). Also wrapped in its own
+  // try/catch for the same reason
+  // as channelPerformance above — a Sheets hiccup must never fail the rest
+  // of the sync.
+  //
+  // All 20 calls run in one Promise.all so none of this adds extra
   // wall-clock time on top of the orders fetches.
   const [
     orders,
@@ -308,6 +323,7 @@ async function buildDataResponse({ site, start, end, compare }) {
     momSalesSummary,
     retailPrices,
     channelPerformance,
+    pnlSheetChannels,
   ] = await Promise.all([
     fetchOrders(site, start, end),
     wantYoy ? fetchOrdersLight(site, yoyRange.start, yoyRange.end) : Promise.resolve(null),
@@ -329,6 +345,10 @@ async function buildDataResponse({ site, start, end, compare }) {
     RETAIL_COGS_SITES[site] != null ? fetchProductRetailPrices(site) : Promise.resolve(null),
     fetchChannelPerformance(site, start, end).catch((err) => {
       console.error(`fetchChannelPerformance threw for site=${site}:`, err.message);
+      return null;
+    }),
+    fetchPnlSheetChannels(site, start).catch((err) => {
+      console.error(`fetchPnlSheetChannels threw for site=${site}:`, err.message);
       return null;
     }),
   ]);
@@ -412,17 +432,43 @@ async function buildDataResponse({ site, start, end, compare }) {
   // shipping-address data.
   result.by_country_grouped_by = currentCountryResult.groupedBy;
 
-  // Section 4 (Marketing & Sales Channel Performance) live sync — added
-  // 2026-08-31. `channelPerformance` is null when TRIPLEWHALE_API_KEY isn't
-  // configured yet, the store has no Triple Whale channel data for this
-  // range, or the request failed (already logged above) — in all of those
-  // cases we simply omit `channels` from the response and the frontend
-  // keeps showing the existing P&L-sheet snapshot for Section 4, same as
-  // before this feature existed.
-  if (channelPerformance) {
-    result.channels = channelPerformance;
+  // Section 4 (Marketing & Sales Channel Performance) live sync — Triple
+  // Whale (added 2026-08-31) plus the P&L Google Sheet (added 2026-09-03,
+  // see src/googlesheets.js) as a fallback for the channels Triple Whale
+  // can't cover at all. `channelPerformance`/`pnlSheetChannels` are each
+  // independently null when their credentials aren't configured yet, the
+  // relevant source has nothing for this range, or the request failed
+  // (already logged above) — mergeChannelSources handles any combination of
+  // both being present, either, or neither. When both end up null we omit
+  // `channels` entirely and the frontend keeps showing the existing
+  // P&L-sheet snapshot for Section 4, same as before either feature
+  // existed.
+  const mergedChannels = mergeChannelSources(channelPerformance, pnlSheetChannels);
+  if (mergedChannels) {
+    result.channels = mergedChannels;
   }
   return result;
+}
+
+// Combines Section 4 channel data from Triple Whale and the P&L Google
+// Sheet into one array, keyed by the dashboard-facing `label` both sources
+// already use (see CHANNEL_MAP in src/triplewhale.js and CHANNEL_ROWS in
+// src/googlesheets.js). Triple Whale wins whenever it actually has data for
+// a label — it's live for any date range, while the sheet is only as fresh
+// as the last manual/skill update — the sheet only fills in a label Triple
+// Whale left as `no_data: true` or never mentioned at all. Returns null
+// only when there's truly nothing from either source, so callers can keep
+// their existing "omit `channels` if falsy" behavior unchanged.
+function mergeChannelSources(twChannels, sheetChannels) {
+  if (!twChannels && !sheetChannels) return null;
+  const byLabel = new Map();
+  (twChannels || []).forEach((c) => byLabel.set(c.label, c));
+  (sheetChannels || []).forEach((c) => {
+    const existing = byLabel.get(c.label);
+    if (!existing || existing.no_data) byLabel.set(c.label, c);
+  });
+  const merged = Array.from(byLabel.values());
+  return merged.length ? merged : null;
 }
 
 // Added 2026-08-24 per Tomer's request ("Top 15 selling products, the YOY
@@ -448,102 +494,4 @@ function attachChangeByKey(currentRows, comparisonRows, key, field) {
   }));
 }
 
-// Overrides an aggregate() result's gross_sales/discounts_total/orders with
-// Shopify's own authoritative "FROM sales" ShopifyQL totals (see
-// fetchSalesSummary in src/shopify.js for the full rationale — this replaces
-// the earlier approach of reconstructing these 3 figures by including/
-// excluding individual orders via search-query filters, which produced a
-// wrong-direction fix twice in one day on 2026-08-25). net_sales is NOT
-// pulled directly here — it's still derived downstream by
-// applySalesReversals() from these corrected gross_sales/discounts_total
-// values plus the separately-sourced sales_reversals figure, so there's
-// exactly one source of truth per figure and the on-page arithmetic (Gross
-// Sales - Discounts - Returns = Net Sales) can never disagree with itself.
-//
-// Section 6's per-tag discount breakdown and its Total row denominator
-// (discounts_total_gross/discounts_total_abs, both read by the frontend) are
-// rescaled against the new authoritative discounts_total so Section 1's
-// Discounts tile and Section 6's own percentages stay consistent with each
-// other — otherwise Section 6's tag rows (still built from aggregate()'s
-// order-derived total) would sum to a slightly different total than what
-// Section 1 now shows.
-//
-// Deliberately NOT touched here: top_products, by_country (already
-// overridden separately by fetchCountryBreakdown), units_sold,
-// units_returned — `FROM sales` has no per-order/per-product dimension to
-// replace those with; they still come from the Orders API via aggregate().
-function applySalesSummary(aggResult, summary) {
-  const { kpis, discounts } = aggResult;
-  const newDiscountsTotal = summary.discounts_total;
-  const rescaledDiscounts = discounts.map((d) => ({
-    ...d,
-    pct_of_total_discounts: newDiscountsTotal ? d.discount_value / newDiscountsTotal : null,
-  }));
-  return {
-    ...aggResult,
-    kpis: {
-      ...kpis,
-      gross_sales: summary.gross_sales,
-      discounts_total: newDiscountsTotal,
-      orders: summary.orders,
-    },
-    discounts: rescaledDiscounts,
-    discounts_total_gross: summary.gross_sales,
-    discounts_total_abs: newDiscountsTotal,
-    discounts_total_orders: summary.orders,
-  };
-}
-
-// Overrides an aggregate() result's returns_total with Shopify's own
-// sales_reversals figure (see fetchSalesReversals in src/shopify.js), and
-// recomputes the two KPIs that are derived from it: net_sales and
-// average_order_value. units_returned is left as aggregate() computed it
-// (order-created-date based) — Tomer's request was specifically about the
-// Returns dollar figure, and Shopify's ShopifyQL sales_reversals metric
-// doesn't expose a units figure to replace it with.
-function applySalesReversals(aggResult, salesReversals) {
-  const { kpis } = aggResult;
-  const netSales = kpis.gross_sales - kpis.discounts_total - salesReversals;
-  const aov = kpis.orders ? netSales / kpis.orders : 0;
-  return {
-    ...aggResult,
-    kpis: {
-      ...kpis,
-      returns_total: salesReversals,
-      net_sales: netSales,
-      average_order_value: aov,
-    },
-  };
-}
-
-// GET /api/data?site=com&start=2026-08-01&end=2026-08-21&compare=yoy,mom
-app.get('/api/data', async (req, res) => {
-  const compare = String(req.query.compare || '')
-    .split(',')
-    .map((s) => s.trim())
-    .filter(Boolean);
-  try {
-    const result = await buildDataResponse({ ...req.query, compare });
-    res.json(result);
-  } catch (err) {
-    console.error(err);
-    res.status(err.status || 502).json({ error: err.message });
-  }
-});
-
-// POST /api/sync — same thing, POST-shaped for the dashboard's "Sync" button
-// (body: { site, start, end, compare: ["yoy","mom"] }).
-app.post('/api/sync', async (req, res) => {
-  const { site, start, end, compare = [] } = req.body || {};
-  try {
-    const result = await buildDataResponse({ site, start, end, compare });
-    res.json(result);
-  } catch (err) {
-    console.error(err);
-    res.status(err.status || 502).json({ error: err.message });
-  }
-});
-
-app.listen(PORT, () => {
-  console.log(`ND dashboard backend listening on port ${PORT}`);
-});
+// Overrides an aggregate() result's
