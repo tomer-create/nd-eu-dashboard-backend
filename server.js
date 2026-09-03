@@ -494,4 +494,102 @@ function attachChangeByKey(currentRows, comparisonRows, key, field) {
   }));
 }
 
-// Overrides an aggregate() result's
+// Overrides an aggregate() result's gross_sales/discounts_total/orders with
+// Shopify's own authoritative "FROM sales" ShopifyQL totals (see
+// fetchSalesSummary in src/shopify.js for the full rationale — this replaces
+// the earlier approach of reconstructing these 3 figures by including/
+// excluding individual orders via search-query filters, which produced a
+// wrong-direction fix twice in one day on 2026-08-25). net_sales is NOT
+// pulled directly here — it's still derived downstream by
+// applySalesReversals() from these corrected gross_sales/discounts_total
+// values plus the separately-sourced sales_reversals figure, so there's
+// exactly one source of truth per figure and the on-page arithmetic (Gross
+// Sales - Discounts - Returns = Net Sales) can never disagree with itself.
+//
+// Section 6's per-tag discount breakdown and its Total row denominator
+// (discounts_total_gross/discounts_total_abs, both read by the frontend) are
+// rescaled against the new authoritative discounts_total so Section 1's
+// Discounts tile and Section 6's own percentages stay consistent with each
+// other — otherwise Section 6's tag rows (still built from aggregate()'s
+// order-derived total) would sum to a slightly different total than what
+// Section 1 now shows.
+//
+// Deliberately NOT touched here: top_products, by_country (already
+// overridden separately by fetchCountryBreakdown), units_sold,
+// units_returned — `FROM sales` has no per-order/per-product dimension to
+// replace those with; they still come from the Orders API via aggregate().
+function applySalesSummary(aggResult, summary) {
+  const { kpis, discounts } = aggResult;
+  const newDiscountsTotal = summary.discounts_total;
+  const rescaledDiscounts = discounts.map((d) => ({
+    ...d,
+    pct_of_total_discounts: newDiscountsTotal ? d.discount_value / newDiscountsTotal : null,
+  }));
+  return {
+    ...aggResult,
+    kpis: {
+      ...kpis,
+      gross_sales: summary.gross_sales,
+      discounts_total: newDiscountsTotal,
+      orders: summary.orders,
+    },
+    discounts: rescaledDiscounts,
+    discounts_total_gross: summary.gross_sales,
+    discounts_total_abs: newDiscountsTotal,
+    discounts_total_orders: summary.orders,
+  };
+}
+
+// Overrides an aggregate() result's returns_total with Shopify's own
+// sales_reversals figure (see fetchSalesReversals in src/shopify.js), and
+// recomputes the two KPIs that are derived from it: net_sales and
+// average_order_value. units_returned is left as aggregate() computed it
+// (order-created-date based) — Tomer's request was specifically about the
+// Returns dollar figure, and Shopify's ShopifyQL sales_reversals metric
+// doesn't expose a units figure to replace it with.
+function applySalesReversals(aggResult, salesReversals) {
+  const { kpis } = aggResult;
+  const netSales = kpis.gross_sales - kpis.discounts_total - salesReversals;
+  const aov = kpis.orders ? netSales / kpis.orders : 0;
+  return {
+    ...aggResult,
+    kpis: {
+      ...kpis,
+      returns_total: salesReversals,
+      net_sales: netSales,
+      average_order_value: aov,
+    },
+  };
+}
+
+// GET /api/data?site=com&start=2026-08-01&end=2026-08-21&compare=yoy,mom
+app.get('/api/data', async (req, res) => {
+  const compare = String(req.query.compare || '')
+    .split(',')
+    .map((s) => s.trim())
+    .filter(Boolean);
+  try {
+    const result = await buildDataResponse({ ...req.query, compare });
+    res.json(result);
+  } catch (err) {
+    console.error(err);
+    res.status(err.status || 502).json({ error: err.message });
+  }
+});
+
+// POST /api/sync — same thing, POST-shaped for the dashboard's "Sync" button
+// (body: { site, start, end, compare: ["yoy","mom"] }).
+app.post('/api/sync', async (req, res) => {
+  const { site, start, end, compare = [] } = req.body || {};
+  try {
+    const result = await buildDataResponse({ site, start, end, compare });
+    res.json(result);
+  } catch (err) {
+    console.error(err);
+    res.status(err.status || 502).json({ error: err.message });
+  }
+});
+
+app.listen(PORT, () => {
+  console.log(`ND dashboard backend listening on port ${PORT}`);
+});
