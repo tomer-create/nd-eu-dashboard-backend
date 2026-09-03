@@ -385,7 +385,7 @@ const LIVE_KPI_MAP = {
 // live backend can't supply (top_returns, and anything about goals, which
 // live in the P&L Google Sheet, not Shopify) fall through to the embedded
 // values untouched.
-function mergeLiveIntoMonthData(monthData, live) {
+function mergeLiveIntoMonthData(monthData, live, site) {
   const merged = Object.assign({}, monthData);
 
   // % Discount Ratio and % Returns Ratio are DERIVED from Discounts/Returns
@@ -395,15 +395,23 @@ function mergeLiveIntoMonthData(monthData, live) {
   // the labels present in LIVE_KPI_MAP and left these two stale — after a
   // sync, Gross Sales/Discounts/Returns would update but their own ratio
   // tiles wouldn't move, which read as "Sync doesn't actually work".)
-  // Blended ROAS, Profit and Profit Margin still can't be synced this way —
-  // they need ad-spend data the backend doesn't have — so those three stay
-  // sourced from the P&L sheet even after a sync, same as Section 7. Section
-  // 4's per-channel spend/CV rows CAN now sync live (added 2026-08-31, see
-  // the live.channels block below and src/triplewhale.js in the backend) —
-  // only these 3 top-level KPI tiles and Section 7 remain P&L-sheet-only.
-  // COGS *is* now synced (added 2026-08-24, see LIVE_KPI_MAP above) via
+  // Blended ROAS still can't be synced this way — it needs ad-spend data
+  // the backend doesn't have — so it stays sourced from the P&L sheet even
+  // after a sync. Section 4's per-channel spend/CV rows CAN sync live
+  // (added 2026-08-31, see the live.channels block below and
+  // src/triplewhale.js in the backend), and as of 2026-09-03 Section 7
+  // (Other Costs) plus the Profit / Profit Margin KPIs sync live too (see
+  // the live.other_costs block below) — Profit/Profit Margin are computed
+  // as Net Sales − Other Costs total per Tomer's request ("should be
+  // formula: net sales - Other Costs"), not read directly from the sheet.
+  // Blended ROAS is now the only top-level KPI tile still P&L-sheet-only.
+  // COGS *is* synced (added 2026-08-24, see LIVE_KPI_MAP above) via
   // Shopify's own ShopifyQL cost_of_goods_sold metric, which the P&L-sheet
-  // figure this tile used to show could disagree with.
+  // figure this tile used to show could disagree with — and, added
+  // 2026-09-03, this same live COGS figure also overrides the "Product
+  // Cost" line in Section 7 (see the live.other_costs block below), for
+  // the same reason: sourcing Product Cost from the sheet would silently
+  // reintroduce the exact inaccuracy Tomer already flagged once.
   const derivedRatios = {
     '% Discount Ratio': live.kpis.gross_sales ? live.kpis.discounts_total / live.kpis.gross_sales : null,
     '% Returns Ratio': live.kpis.gross_sales ? live.kpis.returns_total / live.kpis.gross_sales : null,
@@ -652,6 +660,113 @@ function mergeLiveIntoMonthData(monthData, live) {
     merged.channels_note = 'Spend and CV for Google Ads, TikTok Ads, Meta Ads, Microsoft Ads, impact.com, Criteo, Pinterest, Snapchat, ChatGPT Ads, and Shop App are pulled live from Triple Whale (Pixel CV via Last-Click attribution, except Snapchat and impact.com which use Triple Whale\'s Channel CV). Shop App, like impact.com, has no ad spend to report — its ROAS will always show "—". Attentive\'s 4 channels, Microsoft Ads, Pinterest, Organic, and TikTok Affiliates + Organic are read directly from the P&L Google Sheet instead (Triple Whale can\'t supply these) — as current as the sheet\'s last update, not live-live like the channels above. Spend/goal figures for every other channel still come from the P&L sheet.';
   }
 
+  // Section 7 (Other Costs) live sync — added 2026-09-03 per Tomer: "fix
+  // the Profit and the profit margin... for all 3 sites... should be
+  // formula: net sales - Other Costs. also the other costs section
+  // doesn't pull from the spreadsheet." `live.other_costs` (see
+  // fetchPnlSheetOtherCosts in the backend's src/googlesheets.js) is a flat
+  // array of {label, actual, no_data} keyed by the SAME dashboardLabel the
+  // embedded snapshot's other_costs already uses, covering all 3 sites
+  // (unlike Section 4's channel-sheet pull, which stays ND.COM-only).
+  // Two things this deliberately does NOT take from the sheet:
+  //  - "Product Cost" always comes from live.kpis.cogs (Shopify's own
+  //    ShopifyQL cost_of_goods_sold, same source as the COGS KPI tile added
+  //    2026-08-24) instead of the sheet's own Product Cost figure — Tomer
+  //    already flagged the sheet's COGS number as wrong once, so sourcing
+  //    this line from the sheet would silently reintroduce that same bug
+  //    and could disagree with Section 1's own COGS tile.
+  //  - ND.COM's snapshot combines "PR Box Cost" and "Product Cost" into one
+  //    row, "PR Box Cost + Product Cost" (ND.EU has no PR Box Cost row at
+  //    all; ND.IL keeps the two as separate standalone rows). For COM only,
+  //    the sheet's raw "PR Box Cost" figure is added to live COGS and
+  //    written into that one combined row — never as a second row.
+  // Only EXISTING rows in the snapshot are updated by label match; this
+  // never adds a brand-new cost-category row Tomer hasn't already curated
+  // for that site (mirrors how Section 4 only fills gaps, not invents rows,
+  // for the sheet-sourced channels).
+  if (live.other_costs && live.other_costs.length) {
+    const byLabel = new Map(live.other_costs.map(o => [o.label, o]));
+    const cogs = live.kpis.cogs;
+    const updatedCosts = merged.other_costs.map(row => {
+      if (site === 'com' && row.label === 'PR Box Cost + Product Cost') {
+        const prBox = byLabel.get('PR Box Cost');
+        if (cogs === undefined || !prBox || prBox.no_data) return row;
+        return Object.assign({}, row, { actual: prBox.actual + cogs });
+      }
+      if (row.label === 'Product Cost') {
+        if (cogs === undefined) return row;
+        return Object.assign({}, row, { actual: cogs });
+      }
+      const liveRow = byLabel.get(row.label);
+      if (!liveRow || liveRow.no_data) return row;
+      return Object.assign({}, row, { actual: liveRow.actual });
+    });
+    const total = updatedCosts.reduce((sum, r) => sum + (r.actual || 0), 0);
+    merged.other_costs = updatedCosts.map(r => Object.assign({}, r, {
+      ratio_of_total: total ? r.actual / total : null,
+    }));
+    merged.total_other_costs_actual = total;
+    // total_other_costs_goal is left as whatever the embedded snapshot had
+    // — goal figures stay P&L-sheet-only across this whole dashboard, same
+    // as every other goal (Section 4's spend_goal/revenue_goal, every KPI
+    // tile's goal).
+  } else if (live.kpis.cogs !== undefined) {
+    // The sheet pull itself failed/wasn't configured for this sync, but
+    // Shopify's live COGS is still available — still worth overriding just
+    // the Product Cost line(s) so Section 7 isn't left showing a COGS
+    // figure Tomer already flagged as wrong, even though the rest of the
+    // sheet-sourced rows stay at their frozen snapshot values this time.
+    const cogs = live.kpis.cogs;
+    const updatedCosts = merged.other_costs.map(row => {
+      if (site === 'com' && row.label === 'PR Box Cost + Product Cost') {
+        // Can't isolate the PR-Box-only portion of this combined row
+        // without the sheet pull — leave it untouched rather than guessing.
+        return row;
+      }
+      if (row.label === 'Product Cost') {
+        return Object.assign({}, row, { actual: cogs });
+      }
+      return row;
+    });
+    const total = updatedCosts.reduce((sum, r) => sum + (r.actual || 0), 0);
+    merged.other_costs = updatedCosts.map(r => Object.assign({}, r, {
+      ratio_of_total: total ? r.actual / total : null,
+    }));
+    merged.total_other_costs_actual = total;
+  }
+
+  // Profit / Profit Margin — added 2026-09-03, now computed live as Net
+  // Sales − Other Costs total (Tomer's exact formula) instead of staying
+  // frozen at the embedded P&L-sheet snapshot, for all 3 sites. Uses this
+  // sync's live Net Sales when available (see LIVE_KPI_MAP above), else
+  // falls back to whatever Net Sales this monthData already has after the
+  // merge above — same "best available" fallback already used for %
+  // Discount/Returns Ratio earlier in this function. Blended ROAS is
+  // intentionally NOT touched here — see the comment near the top of this
+  // function.
+  {
+    const netSalesKpi = merged.kpis.find(k => k.label === 'Net Sales');
+    const netSales = live.kpis.net_sales !== undefined ? live.kpis.net_sales : (netSalesKpi ? netSalesKpi.actual : undefined);
+    const otherCostsTotal = merged.total_other_costs_actual;
+    if (netSales !== undefined && otherCostsTotal !== undefined && otherCostsTotal !== null) {
+      const profit = netSales - otherCostsTotal;
+      const margin = netSales ? profit / netSales : null;
+      merged.kpis = merged.kpis.map(k => {
+        if (k.label === 'Profit') {
+          const goal = k.goal;
+          const pct_of_goal = (goal !== null && goal !== undefined && goal !== 0) ? profit / goal : null;
+          return Object.assign({}, k, { actual: profit, pct_of_goal, no_data: false });
+        }
+        if (k.label === 'Profit Margin') {
+          const goal = k.goal;
+          const pct_of_goal = (goal !== null && goal !== undefined && goal !== 0 && margin !== null) ? margin / goal : null;
+          return Object.assign({}, k, { actual: margin, pct_of_goal, no_data: margin === null });
+        }
+        return k;
+      });
+    }
+  }
+
   return merged;
 }
 
@@ -661,7 +776,7 @@ function mergeLiveIntoMonthData(monthData, live) {
 function getSingleSiteMonthData(site, month) {
   const base = DATA.sites[site].months[month];
   const cached = liveCache[site + '|' + month];
-  return cached ? mergeLiveIntoMonthData(base, cached.data) : base;
+  return cached ? mergeLiveIntoMonthData(base, cached.data, site) : base;
 }
 
 /* ==================================================================
