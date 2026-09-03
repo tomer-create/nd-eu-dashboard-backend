@@ -137,19 +137,79 @@
 // dynamic anchor-scan approach below (not hardcoded row numbers) was the
 // right call. Dashboard label confirmed as "Collabs Affiliate" by grepping
 // dashboard_v2.html's embedded Section 4 data.
+//
+// SECTION 7 (OTHER COSTS) + LIVE PROFIT/PROFIT MARGIN ADDED 2026-09-03
+// (later still) — Tomer: "fix the Profit and the profit margin" ->
+// clarified "for all 3 sites... should be formula: net sales - Other
+// Costs. also the other costs section doesn't pull from the spreadsheet."
+// Section 7 (Other Costs) was, until now, exactly like Profit/Profit
+// Margin/Blended ROAS: 100% embedded-snapshot, never touched by a Sync
+// (confirmed by grepping server.js — no `other_costs` field anywhere in
+// its response). Since Profit needs a live Other Costs total to be a live
+// number itself, this fetches Section 7's own line items from the sheet
+// the same way CHANNEL_ROWS does for Section 4 — dynamic anchor-scan of
+// each site's own "Cost" section, no hardcoded rows.
+//
+// THIS PART COVERS ALL 3 SITES, unlike CHANNEL_ROWS above (still COM-only)
+// — Tomer explicitly asked for all 3, and Section 7 already has its own
+// curated, DIFFERENT list of line items per site (EU/IL P&L tab row
+// layouts inspected live 2026-09-03 via WebFetch against the sheet's own
+// CSV export, following its redirect to
+// doc-*.googleusercontent.com/export — docs.google.com/.../export
+// sometimes 401s through WebFetch directly even once public; the redirect
+// URL it hands back always works). EU tab gid confirmed 464121371, IL tab
+// gid confirmed 1903859495 (both from the eu-pnl-monthly-update-fast /
+// il-pnl-monthly-update-fast skill files, cross-checked live).
+//
+// PER-SITE OTHER-COSTS SCOPE DIFFERS ON PURPOSE: each site's Section 7
+// list (OTHER_COST_ROWS below) was already curated in an earlier session to
+// exclude exactly the cost rows that ARE tracked in that site's Section 4
+// (to avoid double-counting) — and Section 4's live coverage differs by
+// site (COM now covers Attentive/Microsoft Ads/Collabs/Pinterest via the
+// sheet as of earlier today; EU/IL's Section 4 does not, so EU/IL's
+// Section 7 still legitimately includes Impact Affiliate fees, Collabs,
+// SMS/Email costs that COM's Section 7 excludes). This fetch respects
+// whatever list each site's embedded other_costs already has — it does not
+// change which line items appear, only makes their values live.
+//
+// PRODUCT COST / COGS: deliberately NOT read from the sheet for any site.
+// Section 1's "COGS" KPI tile already pulls live from Shopify's own
+// ShopifyQL cost_of_goods_sold metric (added 2026-08-24, specifically
+// because Tomer said the sheet's own COGS number "isn't correct"). Section
+// 7's "Product Cost" line item is the same concept — sourcing it from the
+// sheet here would silently reintroduce the exact inaccuracy that fix
+// already solved, AND could disagree with Section 1's own tile on the same
+// dashboard. So OTHER_COST_ROWS never maps a "Product Cost" entry — the
+// frontend merge (dashboard_v2.html) fills the "Product Cost" line, and
+// COM's combined "PR Box Cost + Product Cost" line, directly from
+// live.kpis.cogs instead. COM and IL's sheets both have their own separate
+// "PR Box cost" row (returned here as a generic 'PR Box Cost' line item);
+// COM's dashboard combines it with COGS into one tile ("per dashboard
+// spec"), IL's keeps it as its own standalone tile — that combining
+// decision lives in the frontend merge, not here.
 
 const SPREADSHEET_ID =
   process.env.GOOGLE_SHEETS_SPREADSHEET_ID || '11D_QS9rFe8CdG88fNba-onG3arMrDfIxNq3Ta_QUQsQ';
-// gid of the "COM P&L 2026" tab specifically (confirmed live 2026-09-03 —
-// each tab in a Google Sheet has its own stable gid, visible in the tab's
-// URL as `#gid=...`). Overridable in case the tab is ever recreated (which
-// changes its gid) without needing a code change.
-const COM_TAB_GID = process.env.GOOGLE_SHEETS_COM_GID || '1318706996';
+// gid per site's own P&L tab (confirmed live 2026-09-03 — each tab in a
+// Google Sheet has its own stable gid, visible in the tab's URL as
+// `#gid=...`). Overridable in case a tab is ever recreated (which changes
+// its gid) without needing a code change.
+const TAB_GID = {
+  com: process.env.GOOGLE_SHEETS_COM_GID || '1318706996',
+  eu: process.env.GOOGLE_SHEETS_EU_GID || '464121371',
+  il: process.env.GOOGLE_SHEETS_IL_GID || '1903859495',
+};
 
-const CSV_EXPORT_URL = `https://docs.google.com/spreadsheets/d/${SPREADSHEET_ID}/export?format=csv&gid=${COM_TAB_GID}`;
+function csvExportUrl(site) {
+  const gid = TAB_GID[site];
+  if (!gid) return null;
+  return `https://docs.google.com/spreadsheets/d/${SPREADSHEET_ID}/export?format=csv&gid=${gid}`;
+}
 
 // Sheet label -> dashboard label, plus whether a matching Cost-section row
-// exists for it. See the LABEL MAPPING note above.
+// exists for it. See the LABEL MAPPING note above. COM only (see SCOPE note
+// above) — Section 4's live P&L-sheet channel pull hasn't been extended to
+// EU/IL yet.
 const CHANNEL_ROWS = [
   { sheetLabel: 'SMS Jurney', dashboardLabel: 'Attentive - SMS Journey', hasCost: true },
   { sheetLabel: 'SMS Campaign', dashboardLabel: 'Attentive - SMS Campaign', hasCost: true },
@@ -166,6 +226,79 @@ const CHANNEL_ROWS = [
   // Added 2026-09-03 — see the COLLABS ADDED note in the file header above.
   { sheetLabel: 'Collabs', dashboardLabel: 'Collabs Affiliate', hasCost: true },
 ];
+
+// Section 7 (Other Costs) sheet label -> dashboard label, one list per site
+// (each verified live against that site's own "COM/EU/IL P&L 2026" tab
+// 2026-09-03 — see the SECTION 7 note above). 'PR Box Cost' is returned as
+// a plain generic line item here for both COM and IL; the frontend decides
+// whether to combine it with live COGS (COM) or show it standalone (IL).
+const OTHER_COST_ROWS = {
+  com: [
+    { sheetLabel: 'Boxes', dashboardLabel: 'Boxes' },
+    { sheetLabel: 'US - Shipping cost', dashboardLabel: 'US - Shipping Cost' },
+    { sheetLabel: 'LATAM / Canada - Shipping cost', dashboardLabel: 'Swap (Global) Shipping Cost' },
+    { sheetLabel: 'Pick & Pack', dashboardLabel: 'Pick & Pack Fee' },
+    { sheetLabel: 'PPC Agency Fee', dashboardLabel: 'PPC Agency Fee' },
+    { sheetLabel: 'Triple Whale - BI Tool', dashboardLabel: 'Triple Whale - BI Tool' },
+    { sheetLabel: 'Talent Pop - Cstomer Service', dashboardLabel: 'Talent Pop - Customer Service' }, // sheet has this typo
+    { sheetLabel: 'Reach Panel', dashboardLabel: 'Reach Panel' },
+    { sheetLabel: 'SEO', dashboardLabel: 'SEO' },
+    { sheetLabel: 'Shopify + Apps', dashboardLabel: 'Shopify + Apps' },
+    { sheetLabel: 'Impact TBU', dashboardLabel: 'Impact TBU' },
+    { sheetLabel: 'Quiz Fees', dashboardLabel: 'Quiz Fees' },
+    { sheetLabel: 'Tolstoy Fee', dashboardLabel: 'Tolstoy Fee' },
+    { sheetLabel: 'Development', dashboardLabel: 'Development' },
+    { sheetLabel: 'Yotpo Loyalty Program', dashboardLabel: 'Yotpo Loyalty Program' },
+    { sheetLabel: 'Yotpo Reviews', dashboardLabel: 'Yotpo Reviews' },
+    { sheetLabel: 'Gratis', dashboardLabel: 'Gratis' },
+    { sheetLabel: 'Commision', dashboardLabel: 'Commission (TikTok Affiliate)' }, // sheet has this typo
+    { sheetLabel: 'TikTok Gifting', dashboardLabel: 'TikTok Gifting' },
+    { sheetLabel: 'PR Box cost', dashboardLabel: 'PR Box Cost' }, // combined with live COGS client-side, see note above
+  ],
+  eu: [
+    { sheetLabel: 'Boxes', dashboardLabel: 'Boxes' },
+    { sheetLabel: 'Europe & ROW - Shipping cost', dashboardLabel: 'Europe & ROW - Shipping Cost' },
+    { sheetLabel: 'Netherlands - Shipping cost', dashboardLabel: 'Netherlands - Shipping Cost' },
+    { sheetLabel: 'Pick & Pack', dashboardLabel: 'Pick & Pack Fee' },
+    { sheetLabel: 'PPC Agency Fee', dashboardLabel: 'PPC Agency Fee' },
+    { sheetLabel: 'Triple Whale - BI Tool', dashboardLabel: 'Triple Whale - BI Tool' },
+    { sheetLabel: 'Talent Pop - Customer Service', dashboardLabel: 'Talent Pop - Customer Service' },
+    { sheetLabel: 'Reach Panel', dashboardLabel: 'Reach Panel' },
+    { sheetLabel: 'SEO', dashboardLabel: 'SEO' },
+    { sheetLabel: 'Shopify + Apps', dashboardLabel: 'Shopify + Apps' },
+    { sheetLabel: 'Impact TBU', dashboardLabel: 'Impact TBU' },
+    { sheetLabel: 'Impact Affiliate fees', dashboardLabel: 'Impact Affiliate fees' },
+    { sheetLabel: 'Collabs', dashboardLabel: 'Collabs' },
+    { sheetLabel: 'Quiz Fees', dashboardLabel: 'Quiz Fees' },
+    { sheetLabel: 'Tolstoy Fee', dashboardLabel: 'Tolstoy Fee' },
+    { sheetLabel: 'Development', dashboardLabel: 'Development' },
+    { sheetLabel: 'SMS Jurney', dashboardLabel: 'SMS Jurney' },
+    { sheetLabel: 'SMS Campaign', dashboardLabel: 'SMS Campaign' },
+    { sheetLabel: 'Email Jurney', dashboardLabel: 'Email Jurney' },
+    { sheetLabel: 'Email Campaign - Newsletter', dashboardLabel: 'Email Campaign - Newsletter' },
+    { sheetLabel: 'Yotpo Loyalty Program', dashboardLabel: 'Yotpo Loyalty Program' },
+    { sheetLabel: 'Yotpo Reviews', dashboardLabel: 'Yotpo Reviews' },
+  ],
+  il: [
+    { sheetLabel: 'Boxes', dashboardLabel: 'Boxes' },
+    { sheetLabel: 'IL - Shipping cost', dashboardLabel: 'IL - Shipping Cost' },
+    { sheetLabel: 'Pick & Pack', dashboardLabel: 'Pick & Pack' },
+    { sheetLabel: 'PPC Agency Fee', dashboardLabel: 'PPC Agency Fee' },
+    { sheetLabel: 'Triple Whale - BI Tool', dashboardLabel: 'Triple Whale - BI Tool' },
+    { sheetLabel: 'Reach Panel', dashboardLabel: 'Reach Panel' },
+    { sheetLabel: 'Shopify + Apps', dashboardLabel: 'Shopify + Apps' },
+    { sheetLabel: 'Collabs', dashboardLabel: 'Collabs' },
+    { sheetLabel: 'Quiz Fees', dashboardLabel: 'Quiz Fees' },
+    { sheetLabel: 'Tolstoy Fee', dashboardLabel: 'Tolstoy Fee' },
+    { sheetLabel: 'Development', dashboardLabel: 'Development' },
+    { sheetLabel: 'SMS Campaign', dashboardLabel: 'SMS Campaign' },
+    { sheetLabel: 'Email Jurney', dashboardLabel: 'Email Jurney' },
+    { sheetLabel: 'Email Campaign - Newsletter', dashboardLabel: 'Email Campaign - Newsletter' },
+    { sheetLabel: 'Yotpo Loyalty Program', dashboardLabel: 'Yotpo Loyalty Program' },
+    { sheetLabel: 'Yotpo Reviews', dashboardLabel: 'Yotpo Reviews' },
+    { sheetLabel: 'PR Box cost', dashboardLabel: 'PR Box Cost' }, // standalone on IL, not combined with COGS
+  ],
+};
 
 const MONTH_ABBR = ['Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun', 'Jul', 'Aug', 'Sep', 'Oct', 'Nov', 'Dec'];
 
@@ -280,6 +413,52 @@ function parseNum(v) {
   return Number.isFinite(n) ? n : null;
 }
 
+// Fetches + parses one site's P&L tab as a 2D array of strings, or null on
+// any failure (not shared publicly, HTML instead of CSV, network error,
+// too-short response) — always logged, never thrown. Shared by both
+// fetchPnlSheetChannels and fetchPnlSheetOtherCosts below so the
+// fetch/parse/error-handling logic exists exactly once.
+async function fetchSheetRows(site) {
+  const url = csvExportUrl(site);
+  if (!url) return null;
+
+  try {
+    const res = await fetch(url);
+    if (!res.ok) {
+      console.error(`googlesheets: CSV export request failed for site=${site} (${res.status}) — is the sheet shared as "Anyone with the link"?`);
+      return null;
+    }
+    const text = await res.text();
+    if (!looksLikeCsv(text)) {
+      console.error(`googlesheets: got an HTML page instead of CSV for site=${site} — the sheet is probably not shared as "Anyone with the link" (viewer) yet`);
+      return null;
+    }
+
+    const rows = parseCsv(text);
+    if (rows.length < 3) return null;
+    return rows;
+  } catch (err) {
+    console.error(`googlesheets: CSV fetch/parse threw for site=${site}:`, err.message);
+    return null;
+  }
+}
+
+// Locates the Actual column for `start`'s calendar month in an already-
+// fetched sheet (`rows`), per the "Goal, Sales %, Actual, G vs A" 4-column
+// block convention documented above. Returns the 0-based column index, or
+// -1 if that month's column couldn't be found (logged by the caller).
+function findActualColIdx(rows, start, site) {
+  const targetLabel = monthLabelFor(start);
+  const headerRow = rows[1] || []; // row 2 (0-indexed row 1)
+  const colIdx = headerRow.findIndex((v) => (v || '').trim() === targetLabel);
+  if (colIdx === -1) {
+    console.error(`googlesheets: could not find column for month "${targetLabel}" in the ${site} CSV's row 2`);
+    return -1;
+  }
+  // Each month block is Goal, Sales %, Actual, G vs A in that order.
+  return colIdx + 2;
+}
+
 // Fetches this month's revenue (and cost, where the sheet tracks it) for
 // the channels listed in CHANNEL_ROWS. `start` is the sync's start date
 // (YYYY-MM-DD) — the calendar month it falls in is the month read from the
@@ -292,67 +471,86 @@ function parseNum(v) {
 // month/rows couldn't be located, or the request failed (logged, never
 // thrown).
 async function fetchPnlSheetChannels(site, start) {
-  if (site !== 'com') return null; // EU/IL tabs not verified yet -- see file header
+  if (site !== 'com') return null; // EU/IL tabs not extended to Section 4 yet -- see SCOPE note above
   if (!start) return null;
 
-  try {
-    const res = await fetch(CSV_EXPORT_URL);
-    if (!res.ok) {
-      console.error(`googlesheets: CSV export request failed (${res.status}) — is the sheet shared as "Anyone with the link"?`);
-      return null;
-    }
-    const text = await res.text();
-    if (!looksLikeCsv(text)) {
-      console.error('googlesheets: got an HTML page instead of CSV — the sheet is probably not shared as "Anyone with the link" (viewer) yet');
-      return null;
-    }
+  const rows = await fetchSheetRows(site);
+  if (!rows) return null;
 
-    const rows = parseCsv(text);
-    if (rows.length < 3) return null;
+  const actualColIdx = findActualColIdx(rows, start, site);
+  if (actualColIdx === -1) return null;
 
-    const targetLabel = monthLabelFor(start);
-    const headerRow = rows[1] || []; // row 2 (0-indexed row 1)
-    const colIdx = headerRow.findIndex((v) => (v || '').trim() === targetLabel);
-    if (colIdx === -1) {
-      console.error(`googlesheets: could not find column for month "${targetLabel}" in the CSV's row 2`);
-      return null;
-    }
-    // Each month block is Goal, Sales %, Actual, G vs A in that order.
-    const actualColIdx = colIdx + 2;
-
-    const { revenueRows, costRows } = findRevenueAndCostRows(rows);
-    if (revenueRows.size === 0) {
-      console.error('googlesheets: could not locate the "Revenue Breakdown" section in the CSV');
-      return null;
-    }
-
-    const cellAt = (rowIdx) => (rows[rowIdx] ? rows[rowIdx][actualColIdx] : undefined);
-
-    return CHANNEL_ROWS.map((entry) => {
-      const rIdx = revenueRows.get(entry.sheetLabel);
-      if (rIdx === undefined) return { label: entry.dashboardLabel, no_data: true };
-      const revenue = parseNum(cellAt(rIdx));
-      if (revenue === null) return { label: entry.dashboardLabel, no_data: true };
-
-      let spend = 0;
-      if (entry.hasCost) {
-        const cIdx = costRows.get(entry.sheetLabel);
-        const parsedSpend = cIdx !== undefined ? parseNum(cellAt(cIdx)) : null;
-        spend = parsedSpend === null ? 0 : parsedSpend;
-      }
-
-      return {
-        label: entry.dashboardLabel,
-        no_data: false,
-        spend_actual: spend,
-        revenue_actual: revenue,
-        source: 'pnl_sheet',
-      };
-    });
-  } catch (err) {
-    console.error(`fetchPnlSheetChannels threw for site=${site}:`, err.message);
+  const { revenueRows, costRows } = findRevenueAndCostRows(rows);
+  if (revenueRows.size === 0) {
+    console.error(`googlesheets: could not locate the "Revenue Breakdown" section in the ${site} CSV`);
     return null;
   }
+
+  const cellAt = (rowIdx) => (rows[rowIdx] ? rows[rowIdx][actualColIdx] : undefined);
+
+  return CHANNEL_ROWS.map((entry) => {
+    const rIdx = revenueRows.get(entry.sheetLabel);
+    if (rIdx === undefined) return { label: entry.dashboardLabel, no_data: true };
+    const revenue = parseNum(cellAt(rIdx));
+    if (revenue === null) return { label: entry.dashboardLabel, no_data: true };
+
+    let spend = 0;
+    if (entry.hasCost) {
+      const cIdx = costRows.get(entry.sheetLabel);
+      const parsedSpend = cIdx !== undefined ? parseNum(cellAt(cIdx)) : null;
+      spend = parsedSpend === null ? 0 : parsedSpend;
+    }
+
+    return {
+      label: entry.dashboardLabel,
+      no_data: false,
+      spend_actual: spend,
+      revenue_actual: revenue,
+      source: 'pnl_sheet',
+    };
+  });
 }
 
-module.exports = { fetchPnlSheetChannels, CHANNEL_ROWS, parseCsv };
+// Fetches this month's Section 7 (Other Costs) line items for `site` — see
+// the SECTION 7 note above for full rationale. All 3 sites supported.
+// Returns an array of { label, no_data } / { label, no_data: false,
+// actual, source: 'pnl_sheet' } — one entry per OTHER_COST_ROWS[site] item
+// — or null if this site has no mapping, the sheet isn't shared yet, the
+// month/rows couldn't be located, or the request failed (logged, never
+// thrown). Deliberately does NOT include a "Product Cost" entry for any
+// site — see the PRODUCT COST / COGS note above; the frontend sources that
+// line item from live Shopify COGS instead.
+async function fetchPnlSheetOtherCosts(site, start) {
+  const mapping = OTHER_COST_ROWS[site];
+  if (!mapping || !start) return null;
+
+  const rows = await fetchSheetRows(site);
+  if (!rows) return null;
+
+  const actualColIdx = findActualColIdx(rows, start, site);
+  if (actualColIdx === -1) return null;
+
+  const { costRows } = findRevenueAndCostRows(rows);
+  if (costRows.size === 0) {
+    console.error(`googlesheets: could not locate the "Cost" section in the ${site} CSV`);
+    return null;
+  }
+
+  const cellAt = (rowIdx) => (rows[rowIdx] ? rows[rowIdx][actualColIdx] : undefined);
+
+  return mapping.map((entry) => {
+    const rIdx = costRows.get(entry.sheetLabel);
+    if (rIdx === undefined) return { label: entry.dashboardLabel, no_data: true };
+    const actual = parseNum(cellAt(rIdx));
+    if (actual === null) return { label: entry.dashboardLabel, no_data: true };
+    return { label: entry.dashboardLabel, no_data: false, actual, source: 'pnl_sheet' };
+  });
+}
+
+module.exports = {
+  fetchPnlSheetChannels,
+  fetchPnlSheetOtherCosts,
+  CHANNEL_ROWS,
+  OTHER_COST_ROWS,
+  parseCsv,
+};
