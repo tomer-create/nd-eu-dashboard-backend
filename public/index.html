@@ -813,6 +813,36 @@ function monthLabelText() {
 }
 function isCombinedView() { return state.month === 'YTD' || state.site === 'all'; }
 
+// Added 2026-09-03 per Tomer: "when i will press the sync button i will
+// sync the data for all together ND.COM, ND.EU, ND.IL, ALL sites (USD) and
+// also when i am on ALL sites (USD) give the option to sync data." Sync
+// itself always pulls ALL 3 individual sites together now (see
+// performSync below) regardless of which tab is active, and the "All
+// Sites (USD)" tab is just a client-side combination of those same 3
+// per-site live caches (see getMonthData/combineMonthDatas) — so the only
+// view where Sync genuinely can't do anything is Year-to-Date, which spans
+// 12 months and has no single date range to fetch. Deliberately NOT tied
+// to isCombinedView() above (that one still also covers `site === 'all'`,
+// which now DOES support Sync — it's used for footer-text/UI purposes
+// unrelated to sync-ability, not this).
+function canSync() { return state.month !== 'YTD'; }
+
+// Reports how "in sync" a given month is across all 3 sites' live caches —
+// used by updateSyncStatus() to describe the shared, all-sites Sync state
+// rather than a single site's own cache entry (there's no longer a
+// meaningful "is THIS site synced" question on its own, since one Sync
+// click always covers every site together).
+function monthSyncStatus(month) {
+  const sites = Object.keys(DATA.sites);
+  const cachedSites = sites.filter(s => liveCache[s + '|' + month]);
+  if (!cachedSites.length) return null;
+  const fetchedAt = cachedSites.reduce((max, s) => {
+    const t = liveCache[s + '|' + month].fetchedAt;
+    return (!max || t > max) ? t : max;
+  }, null);
+  return { cachedSites, total: sites.length, fetchedAt };
+}
+
 // Recomputes a ratio-style KPI's YoY (or MoM — see `field` below) from its
 // numerator/denominator KPIs' own YoY/MoM figures (implied prior value =
 // actual / (1+change)), using only the entries where BOTH have that
@@ -1226,7 +1256,15 @@ function combineMonthDatas(entries, opts) {
     discounts: dd.list, discounts_total_gross: discTotalGross, discounts_total_abs: discTotalAbs, discounts_total_orders: discTotalOrders,
     discounts_note: dd.list ? ('Combined for ' + label + '.' + combinedTail + (dd.partial ? ' Only ' + dd.sourcesCount + ' of ' + dd.totalSources + ' site/period combination(s) had discount-level data to merge.' : '')) : undefined,
     combined_label: label,
-    combined_footer_note: 'Section 1 goals/actuals, Section 4 channels, and Section 7 other costs are true sums across ' + label + (entries.length > 1 && entries.some(e => e.fx !== 1) ? ', converted to USD. ' + FX_NOTE : '.') + combinedTail + partialTail + ' Sync isn’t available on this combined view — switch to one site and one month to pull live Shopify numbers.',
+    combined_footer_note: 'Section 1 goals/actuals, Section 4 channels, and Section 7 other costs are true sums across ' + label + (entries.length > 1 && entries.some(e => e.fx !== 1) ? ', converted to USD. ' + FX_NOTE : '.') + combinedTail + partialTail + (isYTD
+      // Sync fetches one month's date range per site, so it genuinely can't
+      // do anything for a 12-month Year-to-Date combine.
+      ? ' Sync isn’t available on Year-to-Date views — switch to a specific month to pull live Shopify numbers.'
+      // Added 2026-09-03 — Sync now works from this tab too (see canSync()/
+      // performSync() above): it pulls ND.COM, ND.EU, and ND.IL together in
+      // one click, and this combined view updates automatically since it's
+      // just those 3 sites' live caches summed client-side.
+      : ' Click Sync above to pull live Shopify numbers for ND.COM, ND.EU, and ND.IL together — this combined view updates automatically once they\'re synced.'),
   };
 }
 
@@ -1260,28 +1298,55 @@ function getMonthData() {
   return combineMonthDatas(entries, { label, isYTD });
 }
 
+// Rewritten 2026-09-03 per Tomer's request (see canSync()/monthSyncStatus()
+// above): one Sync click now always fetches ALL 3 individual sites for the
+// currently selected month, in parallel, regardless of which tab is active
+// when you click it — clicking Sync while on "All Sites (USD)" populates
+// ND.COM/ND.EU/ND.IL's live caches exactly the same way clicking it from
+// any single-site tab does, and switching tabs afterward needs no second
+// Sync. Uses Promise.allSettled (not Promise.all) so one site's failure
+// (e.g. that site's Shopify connection hiccups) doesn't wipe out the other
+// two sites' successful results — each site is cached independently as
+// soon as its own fetch resolves.
 async function performSync() {
-  if (isCombinedView()) return; // guarded by the disabled button too
+  if (!canSync()) return; // guarded by the disabled button too
   const btn = document.getElementById('sync-btn');
   const statusEl = document.getElementById('sync-status');
-  const site = state.site, month = state.month;
-  const isCurrent = DATA.sites[site].months[month].is_current;
+  const month = state.month;
+  const sites = Object.keys(DATA.sites);
   btn.disabled = true;
   btn.classList.add('syncing');
   statusEl.className = 'sync-status';
-  statusEl.textContent = 'Syncing with Shopify… (can take up to a minute or so, especially the first sync after a while)';
+  statusEl.textContent = 'Syncing ' + sites.map(s => siteMeta(s).name).join(', ') + ' with Shopify… (can take up to a minute or so, especially the first sync after a while)';
   try {
-    const data = await fetchLiveData(site, month, isCurrent);
-    liveCache[site + '|' + month] = { data, fetchedAt: new Date() };
-    statusEl.className = 'sync-status ok';
-    statusEl.textContent = 'Synced ' + liveCache[site + '|' + month].fetchedAt.toLocaleTimeString('en-US', { hour: 'numeric', minute: '2-digit' });
+    const results = await Promise.allSettled(sites.map(site => {
+      const isCurrent = DATA.sites[site].months[month].is_current;
+      return fetchLiveData(site, month, isCurrent);
+    }));
+    const succeeded = [];
+    const failed = [];
+    results.forEach((r, i) => {
+      const site = sites[i];
+      if (r.status === 'fulfilled') {
+        liveCache[site + '|' + month] = { data: r.value, fetchedAt: new Date() };
+        succeeded.push(site);
+      } else {
+        const err = r.reason;
+        const msg = (err && err.name === 'AbortError') ? 'timed out' : (err.message || String(err));
+        failed.push(siteMeta(site).name + ' (' + msg + ')');
+      }
+    });
+    if (!failed.length) {
+      statusEl.className = 'sync-status ok';
+      statusEl.textContent = 'Synced ' + succeeded.map(s => siteMeta(s).name).join(', ') + ' at ' + new Date().toLocaleTimeString('en-US', { hour: 'numeric', minute: '2-digit' });
+    } else if (!succeeded.length) {
+      statusEl.className = 'sync-status err';
+      statusEl.textContent = 'Sync failed for all sites — ' + failed.join('; ') + '. Showing snapshot data.';
+    } else {
+      statusEl.className = 'sync-status err';
+      statusEl.textContent = 'Synced ' + succeeded.map(s => siteMeta(s).name).join(', ') + '. Failed: ' + failed.join('; ') + '.';
+    }
     render();
-  } catch (err) {
-    statusEl.className = 'sync-status err';
-    const msg = (err && err.name === 'AbortError')
-      ? 'Sync timed out — the server may still be waking up. Click Sync again in a few seconds.'
-      : ('Sync failed: ' + (err.message || err) + ' — showing snapshot data.');
-    statusEl.textContent = msg;
   } finally {
     btn.disabled = false;
     btn.classList.remove('syncing');
@@ -1291,20 +1356,23 @@ async function performSync() {
 function updateSyncStatus() {
   const btn = document.getElementById('sync-btn');
   const statusEl = document.getElementById('sync-status');
-  if (isCombinedView()) {
+  if (!canSync()) {
     btn.disabled = true;
     statusEl.className = 'sync-status';
-    statusEl.textContent = 'Sync isn’t available on combined views — pick one site and one month';
+    statusEl.textContent = 'Sync isn’t available on Year-to-Date — pick a specific month';
     return;
   }
   btn.disabled = false;
-  const cached = liveCache[state.site + '|' + state.month];
-  if (cached) {
-    statusEl.className = 'sync-status ok';
-    statusEl.textContent = 'Synced ' + cached.fetchedAt.toLocaleTimeString('en-US', { hour: 'numeric', minute: '2-digit' });
-  } else {
+  const status = monthSyncStatus(state.month);
+  if (!status) {
     statusEl.className = 'sync-status';
-    statusEl.textContent = 'Showing snapshot data — click Sync for live numbers';
+    statusEl.textContent = 'Showing snapshot data — click Sync for live numbers (all sites)';
+  } else if (status.cachedSites.length === status.total) {
+    statusEl.className = 'sync-status ok';
+    statusEl.textContent = 'Synced all sites ' + status.fetchedAt.toLocaleTimeString('en-US', { hour: 'numeric', minute: '2-digit' });
+  } else {
+    statusEl.className = 'sync-status ok';
+    statusEl.textContent = 'Synced ' + status.cachedSites.map(s => siteMeta(s).name).join(', ') + ' ' + status.fetchedAt.toLocaleTimeString('en-US', { hour: 'numeric', minute: '2-digit' }) + ' — click Sync to refresh the rest';
   }
 }
 
