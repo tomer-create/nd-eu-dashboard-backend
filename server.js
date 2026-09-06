@@ -838,7 +838,32 @@ app.get('/admin/yotpo/inspect', async (req, res) => {
       samples[t.tier_at_event === null ? '__NULL__' : t.tier_at_event] = sampleRes.rows;
     }
 
-    res.json({ site, start, end, event_type: eventType, distinct_tier_at_event_values: tiers, samples });
+    // Optional: also look up specific email(s) directly in yotpo_customers —
+    // added alongside this endpoint to answer the exact next question once
+    // tier_at_event=null turned out to be the whole story: is the customer
+    // simply ABSENT from yotpo_customers (never matched during the Customers
+    // CSV import at all — tierByEmail.get() returns undefined), or present
+    // with a null/blank current_tier (matched, but the CSV's own tier column
+    // was empty for them)? Those are different root causes needing different
+    // fixes. Comma-separated, case-insensitively matched (same normalization
+    // importYotpoHistory uses: email.toLowerCase().trim()).
+    let customerLookup = null;
+    if (req.query.lookup_email) {
+      const emails = String(req.query.lookup_email)
+        .split(',')
+        .map((e) => e.trim().toLowerCase())
+        .filter(Boolean);
+      const lookupRes = await pool.query(
+        `SELECT email, current_tier, first_seen_at, updated_at
+         FROM yotpo_customers
+         WHERE site = $1 AND email = ANY($2::text[])`,
+        [site, emails]
+      );
+      const foundByEmail = new Map(lookupRes.rows.map((r) => [r.email, r]));
+      customerLookup = emails.map((e) => foundByEmail.get(e) || { email: e, found: false });
+    }
+
+    res.json({ site, start, end, event_type: eventType, distinct_tier_at_event_values: tiers, samples, customer_lookup: customerLookup });
   } catch (err) {
     console.error(err);
     res.status(500).json({ error: err.message });
