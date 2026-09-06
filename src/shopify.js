@@ -662,6 +662,77 @@ async function fetchSalesSummary(site, startISO, endISOExclusive) {
   };
 }
 
+// New vs. returning customers (Section 1 Goal Tracker "New Users"/"Returning
+// Users" tiles) — added 2026-09-06 per Tomer's request.
+//
+// Deliberately does NOT reuse the Orders API / customer.email approach the
+// Net Sales-by-tier feature needed (see fetchOrdersForTierRevenue above,
+// which requires the new read_customers scope and a pending re-
+// authorization on all 3 stores). ShopifyQL's `sales` schema already exposes
+// exactly this as an aggregate, first-class metric — `new_customers` ("the
+// number of customers whose order in your results was their first
+// purchase") and `customers` ("counts each customer one time ... even if the
+// customer placed more than one order") — confirmed via shopify.dev docs
+// search 2026-09-06. This needs NO new OAuth scope at all: it's the same
+// `sales` schema/`read_reports` scope already used by fetchSalesReversals/
+// fetchCostOfGoodsSold/fetchSalesSummary above, and it never exposes any
+// individual customer's email or identity — purely an aggregate count.
+//
+// Returning = customers - new_customers (every customer who ordered in the
+// period is either new or not; ShopifyQL doesn't need a separate
+// "returning_customers" metric for this, it's exact, not an estimate).
+//
+// Note: `new_customers` classifies a customer as new based on whether THIS
+// order was their first EVER purchase (accurate at query time, for any
+// historical period) — unlike a customer.numberOfOrders-based approach,
+// this doesn't get retroactively wrong if they order again after the
+// period ends. Same UNTIL-is-inclusive conversion as the other
+// shopifyqlQuery helpers in this file.
+async function fetchCustomerAcquisition(site, startISO, endISOExclusive) {
+  const untilDate = new Date(endISOExclusive + 'T00:00:00Z');
+  untilDate.setUTCDate(untilDate.getUTCDate() - 1);
+  const untilISO = untilDate.toISOString().slice(0, 10);
+
+  const shopifyqlQueryString = `FROM sales SHOW customers, new_customers SINCE ${startISO} UNTIL ${untilISO}`;
+  const gqlQuery = `
+    query CustomerAcquisition($q: String!) {
+      shopifyqlQuery(query: $q) {
+        parseErrors
+        tableData {
+          columns { name }
+          rows
+        }
+      }
+    }
+  `;
+
+  const data = await graphql(site, gqlQuery, { q: shopifyqlQueryString });
+  const result = data.shopifyqlQuery;
+  if (result.parseErrors && result.parseErrors.length) {
+    throw new Error(
+      `ShopifyQL parse error for "${site}" (query: ${shopifyqlQueryString}): ${result.parseErrors.join('; ')}`
+    );
+  }
+
+  // Same row-shape caveat as every other multi-column shopifyqlQuery helper
+  // in this file: rows come back as an array of ROW OBJECTS, read via the
+  // `columns` list rather than a hardcoded key/positional assumption.
+  const colNames = (result.tableData.columns || []).map((c) => c.name);
+  const rows = result.tableData.rows || [];
+  if (!rows.length) return { customers: 0, new_customers: 0, returning_customers: 0 };
+  const row = rows[0];
+  const values = Array.isArray(row) ? row : colNames.map((name) => row[name]);
+  const obj = {};
+  colNames.forEach((name, i) => { obj[name] = values[i]; });
+  const customers = Number(obj.customers) || 0;
+  const newCustomers = Number(obj.new_customers) || 0;
+  return {
+    customers,
+    new_customers: newCustomers,
+    returning_customers: Math.max(0, customers - newCustomers),
+  };
+}
+
 // Per-country breakdown (Section 5 "Sales by Country" on the dashboard), live
 // via ShopifyQL — added 2026-08-24 after Tomer reported that on ND.EU this
 // section "show[s] the country by name and not by country code, also shows
@@ -843,6 +914,7 @@ module.exports = {
   fetchOrders,
   fetchOrdersLight,
   fetchOrdersForTierRevenue,
+  fetchCustomerAcquisition,
   fetchSalesReversals,
   fetchCostOfGoodsSold,
   fetchTopReturnsByProduct,
