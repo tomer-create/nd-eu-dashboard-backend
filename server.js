@@ -773,6 +773,78 @@ app.get('/api/yotpo/summary', async (req, res) => {
   }
 });
 
+// GET /admin/yotpo/inspect?site=com&start=2025-01-01&end=2025-02-01&token=<ADMIN_SETUP_TOKEN>[&event_type=redemption][&sample=3]
+//
+// Temporary diagnostic endpoint — added 2026-09-06 to investigate why
+// ND.COM's BACKFILLED (historical CSV import) redemption events show ~0%
+// Glow/Glam for all of 2025 despite the loyalty program running since 2023
+// (Tomer confirmed 2026-09-06 this isn't organic growth — the low/zero
+// Glow/Glam count for 2025 is unexpected). Live/webhook data since ~Sept
+// 2026 correctly shows a real Bronze/Glow/Glam mix, so this is specific to
+// the historical import's tier approximation (see parseRedemptionsCsv /
+// importYotpoHistory in src/yotpo-import.js — backfilled redemptions are
+// tagged with each customer's CURRENT tier as of the Customers CSV export,
+// not their tier at the time of the historical redemption).
+//
+// Read-only, doesn't touch or fix any data. Returns the DISTINCT raw
+// tier_at_event values actually stored for the requested window (with
+// counts) plus a few raw_payload samples per distinct value — the
+// raw_payload is the exact original CSV row for a backfilled event, so this
+// shows precisely what the historical export recorded (a real tier name, an
+// unrecognized raw ID, blank/null, etc.) without needing direct Postgres
+// access. Safe to delete once the mismatch is diagnosed.
+app.get('/admin/yotpo/inspect', async (req, res) => {
+  const token = req.query.token;
+  const adminToken = process.env.ADMIN_SETUP_TOKEN;
+  if (!adminToken || token !== adminToken) {
+    return res.status(403).send('Invalid or missing token.');
+  }
+  const { site, start, end } = req.query;
+  const eventType = req.query.event_type || 'redemption';
+  const sampleSize = Math.min(Number(req.query.sample) || 3, 10);
+  if (!YOTPO_VALID_SITES.includes(site)) {
+    return res.status(400).json({ error: `Unknown or missing site "${site}"` });
+  }
+  if (!start || !end) {
+    return res.status(400).json({ error: 'start and end query params are required (YYYY-MM-DD)' });
+  }
+  const pool = getYotpoPool();
+  if (!pool) return res.status(503).json({ error: 'DATABASE_URL not configured' });
+  try {
+    const distinctRes = await pool.query(
+      `SELECT tier_at_event, COUNT(*) AS n
+       FROM yotpo_events
+       WHERE site = $1 AND event_type = $2 AND received_at >= $3 AND received_at < $4
+       GROUP BY tier_at_event
+       ORDER BY n DESC`,
+      [site, eventType, start, end]
+    );
+    const tiers = distinctRes.rows.map((r) => ({ tier_at_event: r.tier_at_event, count: Number(r.n) }));
+
+    // One small sample per distinct value, including raw_payload (the
+    // original CSV row for a backfilled event, or the original webhook body
+    // for a live event) — this is what actually pins down the root cause.
+    const samples = {};
+    for (const t of tiers) {
+      const sampleRes = await pool.query(
+        `SELECT email, tier_at_event, points, received_at, topic, raw_payload
+         FROM yotpo_events
+         WHERE site = $1 AND event_type = $2 AND received_at >= $3 AND received_at < $4
+           AND tier_at_event IS NOT DISTINCT FROM $5
+         ORDER BY received_at ASC
+         LIMIT $6`,
+        [site, eventType, start, end, t.tier_at_event, sampleSize]
+      );
+      samples[t.tier_at_event === null ? '__NULL__' : t.tier_at_event] = sampleRes.rows;
+    }
+
+    res.json({ site, start, end, event_type: eventType, distinct_tier_at_event_values: tiers, samples });
+  } catch (err) {
+    console.error(err);
+    res.status(500).json({ error: err.message });
+  }
+});
+
 // GET /admin/yotpo/register-webhooks?site=com&token=<ADMIN_SETUP_TOKEN>
 //
 // One-time-per-site setup — visit this URL once in a browser (same
