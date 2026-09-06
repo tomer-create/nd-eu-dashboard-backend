@@ -25,7 +25,19 @@ const API_VERSION = process.env.SHOPIFY_API_VERSION || '2026-07';
 // new token carrying this scope; the old tokens only have the first three.
 // shopifyqlQuery also requires Shopify's separate Level 2 protected customer
 // data approval on the app itself — see README.md.
-const SCOPES = 'read_orders,read_products,read_inventory,read_reports';
+//
+// read_customers added 2026-09-06 for fetchOrdersForTierRevenue() (Section
+// 8's Net Sales-by-tier column) — the Order.customer.email field is
+// ACCESS_DENIED without it. Same deal as read_reports above: every store's
+// token predates this scope, so all 3 (com/eu/il) need re-authorizing again
+// (visit /auth/<site>, approve, paste the new token into Render) before this
+// feature can work — tokens minted before this change will get ACCESS_DENIED
+// on the `customer` field specifically, not a hard failure of the whole
+// query. customer.email also counts as Shopify's protected customer data
+// (same category as read_reports/ShopifyQL needed) — if the already-granted
+// Level 2 approval on the app doesn't cover this field, Shopify's OAuth
+// consent screen or a later API response will say so explicitly.
+const SCOPES = 'read_orders,read_products,read_inventory,read_reports,read_customers';
 
 function getSiteConfig(site) {
   const key = site.toUpperCase();
@@ -227,6 +239,66 @@ async function fetchOrders(site, startISO, endISO) {
 
   while (hasNextPage) {
     const data = await graphql(site, ORDERS_QUERY, { cursor, searchQuery });
+    const { edges, pageInfo } = data.orders;
+    for (const edge of edges) orders.push(edge.node);
+    hasNextPage = pageInfo.hasNextPage;
+    cursor = pageInfo.endCursor;
+  }
+
+  return orders;
+}
+
+// Minimal per-order query for Section 8's Net Sales-by-tier column (added
+// 2026-09-06) — needs exactly 3 things per order: the customer's email (to
+// join against yotpo_customers.current_tier — see getYotpoCustomerTierMap in
+// src/yotpo.js), lineItems' originalTotalSet (summed = gross sales, same
+// definition aggregate() uses), and totalDiscountsSet (net = gross -
+// discounts, again matching aggregate()'s definition exactly so this
+// column's numbers mean the same thing as the rest of the dashboard's Net
+// Sales). Deliberately excludes everything ORDERS_QUERY/ORDERS_QUERY_LIGHT
+// fetch that isn't needed here (tags, refunds, shippingAddress, product
+// titles/quantities) — this is a separate, isolated query so this new
+// feature can't regress the existing (already carefully tuned, rate-limit-
+// sensitive) order-fetching paths above.
+//
+// REQUIRES the read_customers scope (added to SCOPES above alongside this
+// feature) — a store whose access token predates that scope will get
+// ACCESS_DENIED specifically on the `customer` field. See the SCOPES comment
+// above for the re-authorization steps needed per store.
+const ORDERS_QUERY_TIER_REVENUE = `
+  query OrdersForTierRevenue($cursor: String, $searchQuery: String!) {
+    orders(first: 100, after: $cursor, query: $searchQuery, sortKey: CREATED_AT) {
+      pageInfo { hasNextPage endCursor }
+      edges {
+        node {
+          customer { email }
+          totalDiscountsSet { shopMoney { amount } }
+          lineItems(first: 100) {
+            edges {
+              node {
+                originalTotalSet { shopMoney { amount } }
+              }
+            }
+          }
+        }
+      }
+    }
+  }
+`;
+
+// Same date-range/pagination/voided-order filtering as fetchOrders above
+// (see that function's long comment for why -financial_status:voided is the
+// right exclusion) — kept as a separate function rather than a parameter on
+// fetchOrders so callers of the existing function are never at risk of
+// picking up this query's shape by accident.
+async function fetchOrdersForTierRevenue(site, startISO, endISO) {
+  const searchQuery = `created_at:>=${startISO} created_at:<${endISO} -financial_status:voided`;
+  const orders = [];
+  let cursor = null;
+  let hasNextPage = true;
+
+  while (hasNextPage) {
+    const data = await graphql(site, ORDERS_QUERY_TIER_REVENUE, { cursor, searchQuery });
     const { edges, pageInfo } = data.orders;
     for (const edge of edges) orders.push(edge.node);
     hasNextPage = pageInfo.hasNextPage;
@@ -770,6 +842,7 @@ module.exports = {
   graphql,
   fetchOrders,
   fetchOrdersLight,
+  fetchOrdersForTierRevenue,
   fetchSalesReversals,
   fetchCostOfGoodsSold,
   fetchTopReturnsByProduct,
