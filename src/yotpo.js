@@ -265,23 +265,48 @@ async function getYotpoSummary(site, start, end) {
     [site, start, end]
   );
 
+  // IL-specific tier-ID normalization — added 2026-09-06 after Tomer's first
+  // real IL Customers/Redemptions CSV import surfaced raw internal Yotpo
+  // tier IDs ("23667", "23668") in the tier field instead of a name string
+  // like COM/EU's account returns (BRONZE/GLOW/GLAM). ND.IL only has 2 real
+  // tiers (Bronze, Glam — per Tomer, no Glow there), so this maps those 2 IDs
+  // to their names. THE ID-TO-NAME DIRECTION BELOW IS AN INFERENCE, NOT
+  // CONFIRMED: guessed from the same pattern COM/EU show (Bronze always has
+  // far higher redemption volume than Glam) — IL's "23668" had ~2x the
+  // redemptions and ~4x the points of "23667" in the CSV Tomer imported, so
+  // 23668 is mapped to BRONZE and 23667 to GLAM. Verify against Yotpo's own
+  // Loyalty admin (Program Settings → tier list usually shows each tier's ID
+  // next to its name) and tell me if this needs flipping — it's a one-line
+  // fix here if so. Applied generically (not just to backfilled rows) so a
+  // future live webhook event for IL is normalized the same way, in case
+  // IL's account also reports tier as a raw ID rather than a name there.
+  const IL_TIER_ID_BRONZE = '23668';
+  const IL_TIER_ID_GLAM = '23667';
+
   // Per Tomer's request (2026-09-06): any redemption whose tier couldn't be
   // resolved (no match in the imported Customers CSV, or a live event for a
   // customer we've never recorded a tier for — see COALESCE below) is folded
   // into BRONZE rather than shown as its own "Unknown" bucket. This is a
   // GROUP BY on the CASE expression itself, so a redemption that already had
   // a real BRONZE tier and one that fell back from "Unknown" land in the
-  // exact same summed row, not two rows that happen to share a label.
+  // exact same summed row, not two rows that happen to share a label. The IL
+  // tier-ID CASE arms run first so an ID gets normalized to a name BEFORE
+  // the Unknown-vs-BRONZE check below ever sees it.
   const redemptionsRes = await p.query(
     `SELECT
-       CASE WHEN COALESCE(tier_at_event, 'Unknown') = 'Unknown' THEN 'BRONZE' ELSE tier_at_event END AS tier,
+       CASE
+         WHEN $1 = 'il' AND tier_at_event = $4 THEN $5
+         WHEN $1 = 'il' AND tier_at_event = $6 THEN $7
+         WHEN COALESCE(tier_at_event, 'Unknown') = 'Unknown' THEN 'BRONZE'
+         ELSE tier_at_event
+       END AS tier,
        COUNT(*) AS redemptions,
        COALESCE(SUM(points), 0) AS points_used
      FROM yotpo_events
      WHERE site = $1 AND event_type = 'redemption' AND received_at >= $2 AND received_at < $3
      GROUP BY tier
      ORDER BY points_used DESC`,
-    [site, start, end]
+    [site, start, end, IL_TIER_ID_BRONZE, 'BRONZE', IL_TIER_ID_GLAM, 'GLAM']
   );
 
   const movementRes = await p.query(
