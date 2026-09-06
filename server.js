@@ -2,7 +2,7 @@ require('dotenv').config();
 const path = require('path');
 const express = require('express');
 const cors = require('cors');
-const { fetchOrders, fetchOrdersLight, fetchOrdersForTierRevenue, fetchSalesReversals, fetchCostOfGoodsSold, fetchTopReturnsByProduct, fetchCountryBreakdown, fetchSalesSummary, fetchProductRetailPrices, getAuthorizeUrl, exchangeCodeForToken } = require('./src/shopify');
+const { fetchOrders, fetchOrdersLight, fetchOrdersForTierRevenue, fetchSalesReversals, fetchCostOfGoodsSold, fetchTopReturnsByProduct, fetchCountryBreakdown, fetchSalesSummary, fetchCustomerAcquisition, fetchProductRetailPrices, getAuthorizeUrl, exchangeCodeForToken } = require('./src/shopify');
 const { aggregate } = require('./src/aggregate');
 const { fetchChannelPerformance } = require('./src/triplewhale');
 const { fetchPnlSheetChannels, fetchPnlSheetOtherCosts } = require('./src/googlesheets');
@@ -348,6 +348,9 @@ async function buildDataResponse({ site, start, end, compare }) {
     currentSalesSummary,
     yoySalesSummary,
     momSalesSummary,
+    currentAcquisition,
+    yoyAcquisition,
+    momAcquisition,
     retailPrices,
     channelPerformance,
     pnlSheetChannels,
@@ -370,6 +373,14 @@ async function buildDataResponse({ site, start, end, compare }) {
     fetchSalesSummary(site, start, end),
     wantYoy ? fetchSalesSummary(site, yoyRange.start, yoyRange.end) : Promise.resolve(null),
     wantMom ? fetchSalesSummary(site, momRange.start, momRange.end) : Promise.resolve(null),
+    // New vs. returning customers (added 2026-09-06) — see
+    // fetchCustomerAcquisition in src/shopify.js for why this is a plain
+    // ShopifyQL aggregate call (same cheap shape as salesSummary/reversals/
+    // COGS above) needing no new OAuth scope, unlike the Net Sales-by-tier
+    // feature's Shopify order fetch.
+    fetchCustomerAcquisition(site, start, end),
+    wantYoy ? fetchCustomerAcquisition(site, yoyRange.start, yoyRange.end) : Promise.resolve(null),
+    wantMom ? fetchCustomerAcquisition(site, momRange.start, momRange.end) : Promise.resolve(null),
     RETAIL_COGS_SITES[site] != null ? fetchProductRetailPrices(site) : Promise.resolve(null),
     fetchChannelPerformance(site, start, end).catch((err) => {
       console.error(`fetchChannelPerformance threw for site=${site}:`, err.message);
@@ -397,6 +408,11 @@ async function buildDataResponse({ site, start, end, compare }) {
 
   const current = applySalesReversals(applySalesSummary(aggregate(orders), currentSalesSummary), currentReversals);
   current.kpis.cogs = resolveCogs(site, current.top_products, retailPrices, currentCogs);
+  // New vs. returning customers (added 2026-09-06) — see fetchCustomerAcquisition
+  // in src/shopify.js. Attached the same way COGS is above: a plain field on
+  // kpis, read by the frontend's LIVE_KPI_MAP ('New Users'/'Returning Users').
+  current.kpis.new_customers = currentAcquisition.new_customers;
+  current.kpis.returning_customers = currentAcquisition.returning_customers;
   const result = { site, start, end, ...current };
 
   // Attach each period-ranked product's YTD return ratio by matching on
@@ -436,6 +452,8 @@ async function buildDataResponse({ site, start, end, compare }) {
       net_sales_change: pctChange(current.kpis.net_sales, yoyAgg.kpis.net_sales),
       orders_change: pctChange(current.kpis.orders, yoyAgg.kpis.orders),
       cogs_change: pctChange(current.kpis.cogs, yoyCogsFinal),
+      new_customers_change: pctChange(current.kpis.new_customers, yoyAcquisition.new_customers),
+      returning_customers_change: pctChange(current.kpis.returning_customers, yoyAcquisition.returning_customers),
     };
     topProducts = attachChangeByKey(topProducts, yoyAgg.top_products, 'title', 'gross_sales_yoy_change');
     byCountry = attachChangeByKey(byCountry, yoyCountry, 'country', 'gross_sales_yoy_change');
@@ -450,6 +468,8 @@ async function buildDataResponse({ site, start, end, compare }) {
       net_sales_change: pctChange(current.kpis.net_sales, momAgg.kpis.net_sales),
       orders_change: pctChange(current.kpis.orders, momAgg.kpis.orders),
       cogs_change: pctChange(current.kpis.cogs, momCogsFinal),
+      new_customers_change: pctChange(current.kpis.new_customers, momAcquisition.new_customers),
+      returning_customers_change: pctChange(current.kpis.returning_customers, momAcquisition.returning_customers),
     };
     topProducts = attachChangeByKey(topProducts, momAgg.top_products, 'title', 'gross_sales_mom_change');
     byCountry = attachChangeByKey(byCountry, momCountry, 'country', 'gross_sales_mom_change');
