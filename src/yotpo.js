@@ -122,6 +122,20 @@ function ensureYotpoSchema() {
 
 const VALID_SITES = ['com', 'eu', 'il'];
 
+// Points-to-currency conversion — added 2026-09-06 per Tomer's redemption
+// tiers: US $15/$20/$25/$30 = 150/200/250/300 pts; EU same point costs for
+// €15/€20/€25/€30; IL ₪25/₪30/₪40/₪45/₪50 = 250/300/400/450/500 pts. Every
+// one of those reduces to the exact same ratio — 10 points = 1 unit of the
+// site's own local currency — so this single constant covers all 3
+// sites/currencies; no per-site conversion table is needed. getYotpoSummary
+// returns this value in whatever currency the site itself uses (USD for
+// com, EUR for eu, ILS for il) — the frontend already knows each site's
+// currency (DATA.sites[site].meta.currency) and converts to USD itself for
+// the combined "All Sites (USD)" tab, the same way it does for every other
+// monetary figure (see FX_TO_USD in dashboard_v2.html). If Yotpo ever adds
+// a reward tier that breaks this 10:1 ratio, this is the one place to fix.
+const POINTS_PER_CURRENCY_UNIT = 10;
+
 // Classifies a webhook's topic string into one of our 4 buckets. Substring
 // matching, not exact equality — see the file header for why.
 function classifyTopic(topic) {
@@ -251,8 +265,18 @@ async function getYotpoSummary(site, start, end) {
     [site, start, end]
   );
 
+  // Per Tomer's request (2026-09-06): any redemption whose tier couldn't be
+  // resolved (no match in the imported Customers CSV, or a live event for a
+  // customer we've never recorded a tier for — see COALESCE below) is folded
+  // into BRONZE rather than shown as its own "Unknown" bucket. This is a
+  // GROUP BY on the CASE expression itself, so a redemption that already had
+  // a real BRONZE tier and one that fell back from "Unknown" land in the
+  // exact same summed row, not two rows that happen to share a label.
   const redemptionsRes = await p.query(
-    `SELECT COALESCE(tier_at_event, 'Unknown') AS tier, COUNT(*) AS redemptions, COALESCE(SUM(points), 0) AS points_used
+    `SELECT
+       CASE WHEN COALESCE(tier_at_event, 'Unknown') = 'Unknown' THEN 'BRONZE' ELSE tier_at_event END AS tier,
+       COUNT(*) AS redemptions,
+       COALESCE(SUM(points), 0) AS points_used
      FROM yotpo_events
      WHERE site = $1 AND event_type = 'redemption' AND received_at >= $2 AND received_at < $3
      GROUP BY tier
@@ -281,6 +305,7 @@ async function getYotpoSummary(site, start, end) {
       tier: r.tier,
       redemptions: Number(r.redemptions),
       points_used: Number(r.points_used),
+      points_value: Number(r.points_used) / POINTS_PER_CURRENCY_UNIT,
     })),
     tier_movement: movementRes.rows.map((r) => ({
       from: r.tier_from,
