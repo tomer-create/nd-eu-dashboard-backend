@@ -310,6 +310,18 @@ async function getYotpoSummary(site, start, end) {
   // while guaranteeing only the 3 canonical named tiers ever appear for
   // ND.COM, including for any future raw ID Yotpo might report that we
   // haven't mapped. Scoped to site='com' only — EU and IL are unaffected.
+  //
+  // "redemptions" = DISTINCT redeeming customers, not total redemption
+  // transactions — changed 2026-09-06 per Tomer, who checked ND.COM against
+  // Yotpo's own admin (Bronze 131, Glow 52, Glam 88 redeemers) and found our
+  // number many times larger, because this used to be `COUNT(*)` — every
+  // redemption EVENT, so one customer who redeemed 50 times counted as 50.
+  // Yotpo's own "redeemers" metric counts each customer once regardless of
+  // how many times they redeemed. `COUNT(DISTINCT email)` matches that.
+  // Applied to every site, not just COM, since this is a metric-definition
+  // fix, not a COM-specific data issue — EU/IL should mean the same thing.
+  // `points_used` (SUM(points)) is unchanged — that's a real total, not a
+  // per-customer count, so it wasn't wrong before and isn't touched here.
   const redemptionsRes = await p.query(
     `SELECT
        CASE
@@ -322,7 +334,7 @@ async function getYotpoSummary(site, start, end) {
          WHEN $1 = 'com' AND UPPER(tier_at_event) NOT IN ('BRONZE', 'GLOW', 'GLAM') THEN 'BRONZE'
          ELSE tier_at_event
        END AS tier,
-       COUNT(*) AS redemptions,
+       COUNT(DISTINCT email) AS redemptions,
        COALESCE(SUM(points), 0) AS points_used
      FROM yotpo_events
      WHERE site = $1 AND event_type = 'redemption' AND received_at >= $2 AND received_at < $3
