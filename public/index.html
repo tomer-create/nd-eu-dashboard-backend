@@ -213,21 +213,21 @@
   </div>
 
   <div class="card">
-    <div class="section-title"><span class="section-num">6</span>Discounts Breakdown</div>
+    <div class="section-title"><span class="section-num">6</span>Yotpo Loyalty</div>
+    <div class="section-sub">New members, points redeemed by tier, and movement between tiers — from Yotpo webhook events</div>
+    <div id="section-8"></div>
+  </div>
+
+  <div class="card">
+    <div class="section-title"><span class="section-num">7</span>Discounts Breakdown</div>
     <div class="section-sub">Discount $ by program (storefront orders only), identified by order tag — from Shopify</div>
     <div id="section-6"></div>
   </div>
 
   <div class="card">
-    <div class="section-title"><span class="section-num">7</span>Other Costs<span id="mtd-flag-7"></span></div>
+    <div class="section-title"><span class="section-num">8</span>Other Costs<span id="mtd-flag-7"></span></div>
     <div class="section-sub">Monthly goal vs. actual by cost line item, and each item's share of total other costs</div>
     <div id="section-7"></div>
-  </div>
-
-  <div class="card">
-    <div class="section-title"><span class="section-num">8</span>Yotpo Loyalty</div>
-    <div class="section-sub">New members, points redeemed by tier, and movement between tiers — from Yotpo webhook events</div>
-    <div id="section-8"></div>
   </div>
 
   <footer class="dash-footer" id="footer-note"></footer>
@@ -1589,7 +1589,17 @@ function renderOtherCosts(monthData) {
   <div style="margin-top:10px;font-size:11px;color:var(--text-muted)">Total includes "PR Box Cost + Product Cost", which intentionally repeats Product Cost per the dashboard spec (so Product Cost is counted twice in this total, by design). Ad-platform spend (Google, Meta, TikTok, Criteo, etc.) is tracked in Section 4, not here.</div>`;
 }
 
-/* ---------------- Section 8: Yotpo Loyalty ----------------
+/* ---------------- Section 8 (DOM id) / displayed as Section 6: Yotpo Loyalty ----------------
+   Moved 2026-09-06 (later same day) per Tomer, to sit right after Sales by
+   Country — it's now the 2nd card on the page and shows "6" in its title,
+   but the underlying element id (section-8), function names, and cache
+   keys below all still say "8"/"yotpo" — that's just the original internal
+   naming kept as-is to avoid touching every reference; it has no effect on
+   what the user sees. If you're looking for the display-order source of
+   truth, that's the card markup near the top of the file (search
+   "Yotpo Loyalty" in the HTML), not this comment or any number in this
+   script block.
+
    Added 2026-09-06 per Tomer: "add Yotpo Loyalty MCP connection to show
    the redeem and use of points by tier + new users and movement between
    the Tiers." See src/yotpo.js's file header (backend) for the full
