@@ -6,9 +6,21 @@ const { fetchOrders, fetchOrdersLight, fetchSalesReversals, fetchCostOfGoodsSold
 const { aggregate } = require('./src/aggregate');
 const { fetchChannelPerformance } = require('./src/triplewhale');
 const { fetchPnlSheetChannels, fetchPnlSheetOtherCosts } = require('./src/googlesheets');
+const { VALID_SITES: YOTPO_VALID_SITES, ensureYotpoSchema, recordYotpoEvent, getYotpoSummary } = require('./src/yotpo');
+const { registerYotpoWebhooksForSite } = require('./src/yotpo-setup');
 
 const app = express();
 const PORT = process.env.PORT || 3000;
+
+// Section 8 (Yotpo Loyalty) — added 2026-09-06. Runs once at boot; harmless
+// no-op if DATABASE_URL isn't configured yet (ensureYotpoSchema/getPool
+// both degrade gracefully — see src/yotpo.js's file header for the full
+// architecture rationale, including why this needs its own database at
+// all instead of a live query like every other section).
+ensureYotpoSchema().then((ok) => {
+  if (ok) console.log('yotpo: schema ready');
+  else console.log('yotpo: DATABASE_URL not configured yet — Section 8 will report no_data until it is');
+});
 
 // Render sits behind a proxy — trust its X-Forwarded-Proto so req.protocol
 // reports "https" (needed to build a correct OAuth redirect_uri below).
@@ -621,6 +633,103 @@ app.post('/api/sync', async (req, res) => {
   } catch (err) {
     console.error(err);
     res.status(err.status || 502).json({ error: err.message });
+  }
+});
+
+// --- Section 8 (Yotpo Loyalty) — added 2026-09-06 ---
+//
+// See src/yotpo.js's file header for the full architecture rationale.
+// Short version: Yotpo has no bulk reporting API, so instead Yotpo pushes
+// us webhook events in real time and we accumulate them in our own
+// Postgres database — these 2 routes are the receiving end (Yotpo calling
+// us) and the reading end (the dashboard calling us), same request/response
+// shape conventions as every other route in this file.
+//
+// POST /api/yotpo/webhook/:site?token=<YOTPO_WEBHOOK_SECRET>
+//
+// The `token` query param is NOT part of Yotpo's own auth — it's a shared
+// secret WE chose (set as YOTPO_WEBHOOK_SECRET in Render's env vars) and
+// baked into the callback URL when the webhook target is registered (see
+// scripts/register-yotpo-webhooks.js), so a stranger who finds this URL
+// can't feed garbage into the database. Always return 200 quickly (Yotpo
+// will retry/disable a target that errors or times out repeatedly) even
+// when the event couldn't be fully parsed — recordYotpoEvent() itself
+// already never throws for a recognition miss, only for a genuine
+// infrastructure problem (e.g. the database being unreachable), which is
+// the one case worth surfacing as a real error.
+app.post('/api/yotpo/webhook/:site', async (req, res) => {
+  const site = req.params.site;
+  if (!YOTPO_VALID_SITES.includes(site)) {
+    return res.status(404).json({ error: `Unknown site "${site}"` });
+  }
+  const expected = process.env.YOTPO_WEBHOOK_SECRET;
+  if (expected && req.query.token !== expected) {
+    return res.status(403).json({ error: 'Invalid or missing token' });
+  }
+  try {
+    const topic = req.body && req.body.topic;
+    await recordYotpoEvent(site, topic, req.body || {});
+    res.json({ ok: true });
+  } catch (err) {
+    console.error(`yotpo webhook (site=${site}) failed:`, err.message);
+    // Still 200 — an infra hiccup on our end shouldn't make Yotpo think
+    // this endpoint is broken and back off retries/disable the target;
+    // the error is logged for us to catch, the event is just not saved
+    // this one time.
+    res.status(200).json({ ok: false, error: err.message });
+  }
+});
+
+// GET /api/yotpo/summary?site=com&start=2026-09-01&end=2026-09-06
+app.get('/api/yotpo/summary', async (req, res) => {
+  const { site, start, end } = req.query;
+  if (!YOTPO_VALID_SITES.includes(site)) {
+    return res.status(400).json({ error: `Unknown or missing site "${site}"` });
+  }
+  try {
+    const summary = await getYotpoSummary(site, start, end);
+    res.json(summary || { site, start, end, no_data: true });
+  } catch (err) {
+    console.error(err);
+    res.status(err.status || 502).json({ error: err.message });
+  }
+});
+
+// GET /admin/yotpo/register-webhooks?site=com&token=<ADMIN_SETUP_TOKEN>
+//
+// One-time-per-site setup — visit this URL once in a browser (same
+// convention as the existing /auth/:route Shopify setup flow above) after
+// YOTPO_STORE_ID_<SITE>/YOTPO_SECRET_<SITE>/YOTPO_WEBHOOK_SECRET are set in
+// Render. `token` here must match ADMIN_SETUP_TOKEN (a separate secret you
+// choose) — this route can create real subscriptions on your live Yotpo
+// account, so it's gated the same way the webhook receiver above is,
+// just with its own token rather than reusing YOTPO_WEBHOOK_SECRET.
+// Re-running it for a site that's already registered will surface Yotpo's
+// own 409 "already exists" error, which is expected and harmless — see
+// src/yotpo-setup.js's file header for the full picture, including why
+// this step specifically is the most likely one to need a manual tweak.
+app.get('/admin/yotpo/register-webhooks', async (req, res) => {
+  const { site } = req.query;
+  const adminToken = process.env.ADMIN_SETUP_TOKEN;
+  if (!adminToken || req.query.token !== adminToken) {
+    return res.status(403).json({ error: 'Invalid or missing token' });
+  }
+  if (!YOTPO_VALID_SITES.includes(site)) {
+    return res.status(400).json({ error: `Unknown or missing site "${site}"` });
+  }
+  const upper = site.toUpperCase();
+  const base = process.env.BACKEND_PUBLIC_URL || `${req.protocol}://${req.get('host')}`;
+  const callbackUrl = `${base}/api/yotpo/webhook/${site}?token=${encodeURIComponent(process.env.YOTPO_WEBHOOK_SECRET || '')}`;
+  try {
+    const result = await registerYotpoWebhooksForSite(site, {
+      storeId: process.env[`YOTPO_STORE_ID_${upper}`],
+      secret: process.env[`YOTPO_SECRET_${upper}`],
+      callbackUrl,
+    });
+    res.json({ ok: true, site, ...result });
+  } catch (err) {
+    console.error(`yotpo webhook registration (site=${site}) failed:`, err.message);
+    res.status(err.status || 502).json({ ok: false, error: err.message, body: err.body });
   }
 });
 
