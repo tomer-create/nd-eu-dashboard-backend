@@ -1,364 +1,327 @@
-// src/yotpo.js
+// src/yotpo-import.js
 //
-// Section 8 (Yotpo Loyalty) — added 2026-09-06 per Tomer: "add Yotpo Loyalty
-// MCP connection to show the redeem and use of points by tier + new users
-// and movement between the Tiers."
+// One-time (repeatable) historical backfill for Section 8 (Yotpo Loyalty) —
+// added 2026-09-06, later same day as the live webhook build in
+// src/yotpo.js. Read that file's header first for the overall
+// architecture; this file exists because of the constraint documented
+// there: Yotpo's webhooks only start delivering events from whenever
+// registration went live (Sept 6, 2026) — anything before that has to
+// come from somewhere else, and Yotpo has no bulk/date-ranged API to pull
+// it from. The "somewhere else" is Yotpo's own manual CSV exports
+// (Loyalty & Referrals admin → Analytics → Reports), which Tomer downloads
+// and uploads here through a simple admin page.
 //
 // ============================================================================
-// READ THIS BEFORE TOUCHING ANYTHING IN THIS FILE
+// WHAT CAN AND CAN'T BE BACKFILLED (confirmed against Yotpo's docs, not a
+// live account — the CSV column names below are the best-documented guess;
+// if Tomer's actual export uses different headers, the parser below will
+// name the exact columns it found vs. expected, rather than fail silently)
 // ============================================================================
+// - New members: fully accurate. The Customers export includes a signup/
+//   opt-in date, so this is a real historical count, not an approximation.
+// - Redemptions: accurate at the transaction level (date, points, reward,
+//   customer) — Yotpo's Redemptions History export has all of that. What
+//   it does NOT have is which VIP tier the customer was on *at the time*
+//   of that historical redemption — Yotpo doesn't export tier-change
+//   history at all, only a customer's CURRENT tier (from the Customers
+//   export). Per Tomer's decision (2026-09-06), backfilled redemptions are
+//   grouped by each customer's CURRENT tier as an approximation — this is
+//   flagged explicitly in the imported row's topic ('backfill:...') so it's
+//   distinguishable from a real webhook-observed tier, and anyone who
+//   changed tiers since a historical redemption will show under their
+//   tier today, not the tier they actually held then.
+// - Tier movement: NOT backfillable at all, by design constraint, not an
+//   oversight. Movement between tiers only exists from real webhook events
+//   forward (Sept 6, 2026 on) — there is no Yotpo export of historical
+//   tier-change events to reconstruct it from.
 //
-// There is NO Yotpo Loyalty MCP connector — checked the connector registry,
-// nothing installed, nothing available to add. And unlike Shopify/Triple
-// Whale/the P&L Google Sheet (every other data source on this dashboard),
-// Yotpo's own Loyalty REST API (loyaltyapi.yotpo.com) has no bulk,
-// date-ranged endpoint at all — it's customer-lookup-oriented (fetch ONE
-// customer's own balance/history, or fetch the tier definitions), not a
-// reporting API. There is no "give me every redemption across all
-// customers this month" call to make.
+// ============================================================================
+// IDEMPOTENCY
+// ============================================================================
+// Every backfilled row is tagged with a topic starting 'backfill:' (never
+// used by the live webhook path, which always uses real 'swell/...'
+// topics) specifically so a re-import is safe: each run first deletes any
+// previously-imported 'backfill:*' rows for that site, then inserts the
+// freshly parsed ones. Re-uploading a corrected or extended CSV export
+// REPLACES the prior backfill for that site rather than piling up
+// duplicates. Real webhook-observed events are never touched by this.
 //
-// The only way to get real, cross-customer, date-ranged numbers is to
-// receive Yotpo's own webhook events as they happen and accumulate them
-// ourselves in a database — which is what this file does. Tomer confirmed
-// this approach on 2026-09-06 (via AskUserQuestion) over the alternative
-// (a manual periodic CSV export from Yotpo's own admin Reports page,
-// closer to how the P&L sheet works today).
-//
-// CONSEQUENCE — Section 8 has NO historical backfill. It only knows about
-// events from the moment the webhook registration (see
-// scripts/register-yotpo-webhooks.js) actually goes live and Yotpo starts
-// delivering. A month before that date shows "no data", not zero — the
-// frontend must not silently render zeroes for a period we simply weren't
-// listening yet.
-//
-// TOPIC STRINGS — VERIFY AGAINST REALITY. The event topic strings below
-// (see the classifyTopic() patterns) are the best match found in Yotpo's
-// own documentation (loyaltyapi.yotpo.com + core-api.yotpo.com's topics
-// list) as of this writing — but Yotpo's docs are spread across several
-// subdomains inconsistently, and none of this was verified against a real
-// delivered webhook (no test account was available while building this).
-// Parsing is deliberately DEFENSIVE — pattern-matched on topic substrings
-// ('tier', 'redemption'/'coupon', 'account' + 'created') rather than exact
-// string equality — and the full raw payload is ALWAYS stored in
-// `raw_payload` regardless of whether the field-level parsing below
-// recognizes it. So if Yotpo's real topic strings or payload shapes differ
-// even slightly, nothing is silently dropped — check Render's logs for the
-// first few real webhook deliveries after go-live, and re-parse
-// `raw_payload` retroactively if any field mapping needs correcting.
-//
-// WHY A LOOKUP TABLE FOR "tier_from": Yotpo's tier-change webhook payload
-// (confirmed from docs) carries the customer's CURRENT/new tier
-// (`customer.vip_tier_name`) but no "previous tier" field at all. The only
-// way to know what tier a customer is moving FROM is to remember what tier
-// we last saw for them — that's what the yotpo_customers table is for.
-// The very first tier event ever seen for a customer has no prior record,
-// so tier_from is null for it — that's an initial classification, not a
-// movement, and the aggregation query below excludes null-tier_from rows
-// from the "movement between tiers" breakdown accordingly.
+// Importing the Customers CSV also seeds/updates yotpo_customers.
+// current_tier for every customer in the file — a useful side effect
+// beyond the historical display: it means the very first REAL webhook
+// tier-change event for an existing customer, after go-live, will compute
+// a correct tier_from from this imported baseline instead of defaulting to
+// null (the "no prior record" case that ordinarily excludes a customer's
+// first-ever tier event from the movement stats).
 
-const { Pool } = require('pg');
+const { parse } = require('csv-parse/sync');
 
-let pool = null;
-function getPool() {
-  if (!process.env.DATABASE_URL) return null;
-  if (!pool) {
-    pool = new Pool({
-      connectionString: process.env.DATABASE_URL,
-      // Render's managed Postgres requires SSL for external/internal
-      // connections alike on most plans; rejectUnauthorized: false because
-      // Render's own certs aren't in Node's default trust store the way a
-      // public CA's would be — same pattern every Render Postgres quOKstart
-      // example uses.
-      ssl: { rejectUnauthorized: false },
-    });
-  }
-  return pool;
-}
-
-let schemaReady = null;
-// Idempotent — safe to call on every server startup. Returns a promise so
-// callers can await it once; subsequent calls reuse the same promise rather
-// than re-running the DDL.
-function ensureYotpoSchema() {
-  const p = getPool();
-  if (!p) return Promise.resolve(false);
-  if (!schemaReady) {
-    schemaReady = p
-      .query(`
-        CREATE TABLE IF NOT EXISTS yotpo_customers (
-          site TEXT NOT NULL,
-          email TEXT NOT NULL,
-          current_tier TEXT,
-          first_seen_at TIMESTAMPTZ NOT NULL DEFAULT now(),
-          updated_at TIMESTAMPTZ NOT NULL DEFAULT now(),
-          PRIMARY KEY (site, email)
-        );
-        CREATE TABLE IF NOT EXISTS yotpo_events (
-          id BIGSERIAL PRIMARY KEY,
-          site TEXT NOT NULL,
-          topic TEXT NOT NULL,
-          event_type TEXT NOT NULL,
-          email TEXT,
-          tier_from TEXT,
-          tier_to TEXT,
-          tier_at_event TEXT,
-          points NUMERIC,
-          reward_name TEXT,
-          received_at TIMESTAMPTZ NOT NULL DEFAULT now(),
-          raw_payload JSONB NOT NULL
-        );
-        CREATE INDEX IF NOT EXISTS idx_yotpo_events_lookup
-          ON yotpo_events (site, event_type, received_at);
-      `)
-      .then(() => true)
-      .catch((err) => {
-        console.error('yotpo: schema migration failed:', err.message);
-        schemaReady = null; // allow a retry on the next call rather than wedging forever
-        return false;
-      });
-  }
-  return schemaReady;
-}
-
-const VALID_SITES = ['com', 'eu', 'il'];
-
-// Points-to-currency conversion — added 2026-09-06 per Tomer's redemption
-// tiers: US $15/$20/$25/$30 = 150/200/250/300 pts; EU same point costs for
-// €15/€20/€25/€30; IL ₪25/₪30/₪40/₪45/₪50 = 250/300/400/450/500 pts. Every
-// one of those reduces to the exact same ratio — 10 points = 1 unit of the
-// site's own local currency — so this single constant covers all 3
-// sites/currencies; no per-site conversion table is needed. getYotpoSummary
-// returns this value in whatever currency the site itself uses (USD for
-// com, EUR for eu, ILS for il) — the frontend already knows each site's
-// currency (DATA.sites[site].meta.currency) and converts to USD itself for
-// the combined "All Sites (USD)" tab, the same way it does for every other
-// monetary figure (see FX_TO_USD in dashboard_v2.html). If Yotpo ever adds
-// a reward tier that breaks this 10:1 ratio, this is the one place to fix.
-const POINTS_PER_CURRENCY_UNIT = 10;
-
-// Classifies a webhook's topic string into one of our 4 buckets. Substring
-// matching, not exact equality — see the file header for why.
-function classifyTopic(topic) {
-  const t = (topic || '').toLowerCase();
-  if (t.includes('tier')) return 'tier_change';
-  if (t.includes('redemption') || t.includes('coupon') || t.includes('reward')) return 'redemption';
-  if (t.includes('account') && t.includes('creat')) return 'new_member';
-  return 'other';
-}
-
-// Best-effort extraction — Yotpo's payload nests customer fields
-// differently across event types (sometimes top-level `email`, sometimes
-// under a `customer` object). Try both rather than assuming one shape.
-function extractEmail(payload) {
-  return (
-    payload.email ||
-    (payload.customer && payload.customer.email) ||
-    null
-  );
-}
-function extractTierName(payload) {
-  return (
-    (payload.customer && payload.customer.vip_tier_name) ||
-    payload.vip_tier_name ||
-    payload.tier_name ||
-    null
-  );
-}
-function extractPoints(payload) {
-  // Redemption events: the redemption_option's point cost ("amount") is
-  // what was actually spent this transaction — prefer that over
-  // points_balance (a running total, not a delta) or points_earned (a
-  // lifetime figure, also not this transaction's delta).
-  const opt = payload.redemption_option || {};
-  const amount = opt.amount !== undefined ? opt.amount : payload.amount;
-  return amount !== undefined && amount !== null ? Number(amount) : null;
-}
-function extractRewardName(payload) {
-  const opt = payload.redemption_option || {};
-  return opt.name || payload.reward_text || payload.name || null;
-}
-
-// Records one incoming webhook delivery. Never throws for a
-// recognition/parsing miss — the raw payload is always saved, so a shape
-// we don't fully understand yet still leaves a durable trail to fix later
-// rather than silently vanishing.
-async function recordYotpoEvent(site, topic, payload) {
-  const p = getPool();
-  if (!p) throw new Error('DATABASE_URL not configured — cannot record Yotpo event');
-  await ensureYotpoSchema();
-
-  const eventType = classifyTopic(topic);
-  const email = extractEmail(payload || {});
-  let tierFrom = null;
-  let tierTo = null;
-  let tierAtEvent = null;
-  let points = null;
-  let rewardName = null;
-
-  // Look up (and, for tier events, update) this customer's last-known tier
-  // — this is the whole reason yotpo_customers exists (see file header).
-  let priorTier = null;
-  if (email) {
-    const { rows } = await p.query(
-      'SELECT current_tier FROM yotpo_customers WHERE site = $1 AND email = $2',
-      [site, email]
+// Lenient date parsing — Yotpo's exact CSV date format wasn't verified
+// against a live export. JS's Date constructor handles ISO 8601
+// ("2026-01-15T10:23:00Z" / "2026-01-15 10:23:00") and most common
+// "MM/DD/YYYY" style strings; anything it can't parse throws a specific,
+// named error (which row/column, what the raw value was) rather than
+// silently skipping or miscounting a row.
+function parseDate(raw, rowNum, columnName) {
+  if (!raw || !String(raw).trim()) return null;
+  const d = new Date(String(raw).trim());
+  if (Number.isNaN(d.getTime())) {
+    throw new Error(
+      `Row ${rowNum}: couldn't parse "${columnName}" value "${raw}" as a date. ` +
+        `If your export uses a different date format, tell Claude the exact ` +
+        `format so this parser can be adjusted.`
     );
-    priorTier = rows.length ? rows[0].current_tier : null;
   }
-
-  if (eventType === 'tier_change') {
-    tierTo = extractTierName(payload || {});
-    tierFrom = priorTier; // null on this customer's very first tier event — an initial classification, not a movement
-    tierAtEvent = tierTo;
-    if (email && tierTo) {
-      await p.query(
-        `INSERT INTO yotpo_customers (site, email, current_tier, updated_at)
-         VALUES ($1, $2, $3, now())
-         ON CONFLICT (site, email) DO UPDATE SET current_tier = $3, updated_at = now()`,
-        [site, email, tierTo]
-      );
-    }
-  } else if (eventType === 'redemption') {
-    points = extractPoints(payload || {});
-    rewardName = extractRewardName(payload || {});
-    tierAtEvent = priorTier; // whatever tier they were standing at when they redeemed
-  } else if (eventType === 'new_member') {
-    tierAtEvent = extractTierName(payload || {}); // some programs assign a starting tier on enrollment
-    if (email) {
-      await p.query(
-        `INSERT INTO yotpo_customers (site, email, current_tier, first_seen_at, updated_at)
-         VALUES ($1, $2, $3, now(), now())
-         ON CONFLICT (site, email) DO NOTHING`,
-        [site, email, tierAtEvent]
-      );
-    }
-  }
-
-  await p.query(
-    `INSERT INTO yotpo_events (site, topic, event_type, email, tier_from, tier_to, tier_at_event, points, reward_name, raw_payload)
-     VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)`,
-    [site, topic || 'unknown', eventType, email, tierFrom, tierTo, tierAtEvent, points, rewardName, JSON.stringify(payload || {})]
-  );
+  return d;
 }
 
-// Returns Section 8's summary for one site over [start, end) (ISO date
-// strings, end-exclusive — same convention as every other date-ranged call
-// in this backend). `earliest_event_at` tells the frontend whether this
-// range is even covered by webhook collection yet — see the "no
-// backfill" note in the file header; the frontend must show "no data
-// collected yet" rather than a misleading all-zero summary for a period
-// before go-live.
-async function getYotpoSummary(site, start, end) {
-  const p = getPool();
-  if (!p) return null;
-  await ensureYotpoSchema();
+// Tries several plausible header spellings for the same column — exports
+// change slightly across Yotpo plan tiers/versions, and this avoids a hard
+// failure over e.g. "vip_tier" vs "tier" vs "current_tier".
+function pick(row, candidates) {
+  for (const name of candidates) {
+    if (row[name] !== undefined && row[name] !== '') return row[name];
+  }
+  return null;
+}
 
-  const earliestRes = await p.query('SELECT MIN(received_at) AS earliest FROM yotpo_events WHERE site = $1', [site]);
-  const earliestEventAt = earliestRes.rows[0].earliest;
-  if (!earliestEventAt) {
-    return { site, start, end, collecting_since: null, new_members: 0, redemptions_by_tier: [], tier_movement: [], no_data: true };
+function parseCsvBuffer(buffer, label) {
+  let rows;
+  try {
+    rows = parse(buffer, { columns: true, skip_empty_lines: true, trim: true, bom: true });
+  } catch (err) {
+    throw new Error(`Couldn't parse the ${label} CSV: ${err.message}`);
+  }
+  if (!rows.length) {
+    throw new Error(`The ${label} CSV has no data rows (just a header, or empty file).`);
+  }
+  return rows;
+}
+
+// Parses the Customers export. Returns { customers, newMemberEvents } —
+// customers is used to seed yotpo_customers (current tier lookup, used
+// both for the redemption-tier approximation below AND for real future
+// webhook tier_from lookups); newMemberEvents is one row per customer who
+// has a real signup/opt-in date, ready to insert into yotpo_events.
+function parseCustomersCsv(buffer) {
+  const rows = parseCsvBuffer(buffer, 'Customers');
+  const customers = [];
+  const newMemberEvents = [];
+  rows.forEach((row, i) => {
+    const rowNum = i + 2; // +1 for header row, +1 for 1-indexing
+    const email = pick(row, ['email', 'Email', 'customer_email']);
+    if (!email) return; // skip rows with no email — nothing to key on
+    const tier = pick(row, ['vip_tier', 'tier', 'current_tier', 'VIP Tier']);
+    customers.push({ email: email.toLowerCase().trim(), tier });
+
+    const signupRaw = pick(row, ['created_at', 'opt_in_date', 'Created At', 'Opt In Date']);
+    const isMember = pick(row, ['loyalty_member', 'Loyalty Member']);
+    if (signupRaw && (isMember === null || String(isMember).toLowerCase() !== 'false')) {
+      const signupDate = parseDate(signupRaw, rowNum, 'created_at/opt_in_date');
+      if (signupDate) {
+        newMemberEvents.push({
+          email: email.toLowerCase().trim(),
+          receivedAt: signupDate,
+          tierAtEvent: tier,
+          rawRow: row,
+        });
+      }
+    }
+  });
+  return { customers, newMemberEvents };
+}
+
+// Parses the Redemptions History export. tierByEmail (from
+// parseCustomersCsv, or a fresh DB lookup) supplies the "current tier"
+// approximation for each row, per Tomer's confirmed decision.
+function parseRedemptionsCsv(buffer, tierByEmail) {
+  const rows = parseCsvBuffer(buffer, 'Redemptions History');
+  const events = [];
+  rows.forEach((row, i) => {
+    const rowNum = i + 2;
+    const email = pick(row, ['email', 'Email', 'customer_email']);
+    if (!email) return;
+    const dateRaw = pick(row, ['date', 'date_completed', 'Date']);
+    const receivedAt = parseDate(dateRaw, rowNum, 'date');
+    if (!receivedAt) return; // no date at all — can't place it in a period, skip
+    const pointsRaw = pick(row, ['points', 'Points']);
+    const points = pointsRaw !== null ? Math.abs(Number(pointsRaw)) || 0 : 0;
+    const rewardName = pick(row, ['description', 'Description', 'redemption_option']);
+    const key = email.toLowerCase().trim();
+    events.push({
+      email: key,
+      receivedAt,
+      points,
+      rewardName,
+      tierAtEvent: tierByEmail.get(key) || null,
+      rawRow: row,
+    });
+  });
+  return events;
+}
+
+// ============================================================================
+// 2026-09-06 fix — ND.COM's import was hitting a 502 Bad Gateway
+// ============================================================================
+// ND.COM's export is far larger than EU's or IL's (~48,500 new members +
+// ~17,500 redemptions ≈ 66,000 rows total, vs. EU's ~16,700 and IL's
+// ~5,065). Two separate bugs, both scaling with row count, only showed up
+// at that size:
+//
+// 1. This function used to insert one row at a time (a separate `await
+//    client.query(...)` per customer / per event) inside a single DB
+//    transaction. For ~66,000 sequential round trips that's slow enough to
+//    blow past Render's own gateway timeout — the browser sees a bare "502
+//    Bad Gateway" from Render's edge, even though the Node process is still
+//    working and (per the server logs) hadn't crashed. Fixed by batching
+//    every insert into multi-row VALUES statements (BATCH_SIZE rows per
+//    query — see chunkArray/insertBatch below) — this turns ~66,000 round
+//    trips into ~130, which finishes comfortably inside any reasonable
+//    request timeout.
+// 2. After the transaction committed, the summary step used
+//    `Math.min(...allDates)` / `Math.max(...allDates)` to find the earliest/
+//    latest imported date. Spreading a large array as call arguments hits a
+//    hard V8 limit (documented behavior, not a bug in this specific data —
+//    it throws "RangeError: Maximum call stack size exceeded" once the
+//    array gets large enough, and ND.COM's ~66,000 combined dates crossed
+//    that threshold). Confirmed in Render's logs: "yotpo history import
+//    (site=com) failed: Maximum call stack size exceeded" — this fired
+//    AFTER the real data had already committed successfully, so the import
+//    itself was fine; only the summary calculation crashed, taking the
+//    success response down with it. Fixed with a plain loop (minMaxDates
+//    below) that has no size limit.
+//
+// Both fixes are pure performance/robustness changes — the data written and
+// the summary numbers returned are identical to before, just computed in a
+// way that scales to ND.COM's larger export.
+
+const BATCH_SIZE = 500;
+
+function chunkArray(arr, size) {
+  const out = [];
+  for (let i = 0; i < arr.length; i += size) out.push(arr.slice(i, i + size));
+  return out;
+}
+
+// Batch-inserts `rows` into `table(columns...)` in chunks of BATCH_SIZE,
+// sharing a single `$1` placeholder for `site` across every row in a batch
+// (it's the same value every time — Postgres allows reusing a numbered
+// parameter across multiple VALUES tuples in one query) and building the
+// rest of each row's placeholders from `rowValues(row)`, which must return
+// an array of values in the same order as `columns` (excluding site, and
+// excluding any literal columns already baked into `literalColumns`).
+async function insertBatch(client, table, columns, literalColumns, rows, site, rowValues) {
+  for (const batch of chunkArray(rows, BATCH_SIZE)) {
+    const valueTuples = [];
+    const params = [site];
+    for (const row of batch) {
+      const vals = rowValues(row);
+      const base = params.length;
+      params.push(...vals);
+      const placeholders = vals.map((_, i) => `$${base + i + 1}`);
+      valueTuples.push(`($1, ${literalColumns.map((l) => `'${l}'`).join(', ')}${placeholders.length ? ', ' : ''}${placeholders.join(', ')})`);
+    }
+    await client.query(
+      `INSERT INTO ${table} (${columns.join(', ')}) VALUES ${valueTuples.join(', ')}`,
+      params
+    );
+  }
+}
+
+// Replacement for `Math.min(...dates)` / `Math.max(...dates)` — see fix #2
+// above. A plain loop has no argument-count ceiling, unlike spreading an
+// array as call arguments.
+function minMaxDates(dates) {
+  if (!dates.length) return { min: null, max: null };
+  let min = dates[0];
+  let max = dates[0];
+  for (let i = 1; i < dates.length; i++) {
+    if (dates[i] < min) min = dates[i];
+    if (dates[i] > max) max = dates[i];
+  }
+  return { min, max };
+}
+
+// Runs the full import for one site: seeds yotpo_customers from the
+// Customers CSV, then inserts backfilled new_member and redemption events
+// (replacing any prior backfill for this site first — see file header on
+// idempotency). Returns a small summary for the admin page to display.
+async function importYotpoHistory(pool, site, { customersBuffer, redemptionsBuffer }) {
+  const { customers, newMemberEvents } = parseCustomersCsv(customersBuffer);
+  const tierByEmail = new Map(customers.map((c) => [c.email, c.tier]));
+  const redemptionEvents = parseRedemptionsCsv(redemptionsBuffer, tierByEmail);
+  const customersWithTier = customers.filter((c) => c.tier); // nothing useful to seed without a tier value
+
+  const client = await pool.connect();
+  try {
+    await client.query('BEGIN');
+
+    // Replace any prior backfill for this site — see "IDEMPOTENCY" above.
+    await client.query(
+      `DELETE FROM yotpo_events WHERE site = $1 AND topic IN ('backfill:customers_csv', 'backfill:redemptions_csv')`,
+      [site]
+    );
+
+    // Seed/update yotpo_customers from the Customers export — this is what
+    // both the redemption-tier approximation and future real webhook
+    // tier_from lookups read from. Batched (see file header, fix #1).
+    for (const batch of chunkArray(customersWithTier, BATCH_SIZE)) {
+      const valueTuples = [];
+      const params = [site];
+      for (const c of batch) {
+        const base = params.length;
+        params.push(c.email, c.tier);
+        valueTuples.push(`($1, $${base + 1}, $${base + 2}, now())`);
+      }
+      await client.query(
+        `INSERT INTO yotpo_customers (site, email, current_tier, updated_at)
+         VALUES ${valueTuples.join(', ')}
+         ON CONFLICT (site, email) DO UPDATE SET current_tier = EXCLUDED.current_tier, updated_at = now()`,
+        params
+      );
+    }
+
+    await insertBatch(
+      client,
+      'yotpo_events',
+      ['site', 'topic', 'event_type', 'email', 'tier_at_event', 'received_at', 'raw_payload'],
+      ['backfill:customers_csv', 'new_member'],
+      newMemberEvents,
+      site,
+      (e) => [e.email, e.tierAtEvent, e.receivedAt.toISOString(), JSON.stringify(e.rawRow)]
+    );
+
+    await insertBatch(
+      client,
+      'yotpo_events',
+      ['site', 'topic', 'event_type', 'email', 'tier_at_event', 'points', 'reward_name', 'received_at', 'raw_payload'],
+      ['backfill:redemptions_csv', 'redemption'],
+      redemptionEvents,
+      site,
+      (e) => [e.email, e.tierAtEvent, e.points, e.rewardName, e.receivedAt.toISOString(), JSON.stringify(e.rawRow)]
+    );
+
+    await client.query('COMMIT');
+  } catch (err) {
+    await client.query('ROLLBACK');
+    throw err;
+  } finally {
+    client.release();
   }
 
-  const newMembersRes = await p.query(
-    `SELECT COUNT(*) AS n FROM yotpo_events
-     WHERE site = $1 AND event_type = 'new_member' AND received_at >= $2 AND received_at < $3`,
-    [site, start, end]
-  );
-
-  // IL-specific tier-ID normalization — added 2026-09-06 after Tomer's first
-  // real IL Customers/Redemptions CSV import surfaced raw internal Yotpo
-  // tier IDs ("23667", "23668") in the tier field instead of a name string
-  // like COM/EU's account returns (BRONZE/GLOW/GLAM). ND.IL only has 2 real
-  // tiers (Bronze, Glam — per Tomer, no Glow there), so this maps those 2 IDs
-  // to their names. THE ID-TO-NAME DIRECTION BELOW IS AN INFERENCE, NOT
-  // CONFIRMED: guessed from the same pattern COM/EU show (Bronze always has
-  // far higher redemption volume than Glam) — IL's "23668" had ~2x the
-  // redemptions and ~4x the points of "23667" in the CSV Tomer imported, so
-  // 23668 is mapped to BRONZE and 23667 to GLAM. Verify against Yotpo's own
-  // Loyalty admin (Program Settings → tier list usually shows each tier's ID
-  // next to its name) and tell me if this needs flipping — it's a one-line
-  // fix here if so. Applied generically (not just to backfilled rows) so a
-  // future live webhook event for IL is normalized the same way, in case
-  // IL's account also reports tier as a raw ID rather than a name there.
-  const IL_TIER_ID_BRONZE = '23668';
-  const IL_TIER_ID_GLAM = '23667';
-
-  // Per Tomer's request (2026-09-06): any redemption whose tier couldn't be
-  // resolved (no match in the imported Customers CSV, or a live event for a
-  // customer we've never recorded a tier for — see COALESCE below) is folded
-  // into BRONZE rather than shown as its own "Unknown" bucket. This is a
-  // GROUP BY on the CASE expression itself, so a redemption that already had
-  // a real BRONZE tier and one that fell back from "Unknown" land in the
-  // exact same summed row, not two rows that happen to share a label. The IL
-  // tier-ID CASE arms run first so an ID gets normalized to a name BEFORE
-  // the Unknown-vs-BRONZE check below ever sees it.
-  //
-  // ND.COM-only fallback (added 2026-09-06): a live check of the dashboard
-  // turned up several raw numeric tier IDs (e.g. "19820", "19819", "19818")
-  // showing as their own unnamed rows for ND.COM — the same class of issue
-  // as IL's raw tier IDs above, but without a confirmed ID→name mapping from
-  // Tomer this time. Per his instruction ("don't show extra numeric tier
-  // values, only Bronze/Glow/Glam on ND.COM"), any ND.COM tier value that
-  // isn't literally BRONZE/GLOW/GLAM (case-insensitive) is folded into
-  // BRONZE rather than dropped outright — this keeps redemption/points
-  // totals accurate (nothing silently disappears from the Total row) while
-  // guaranteeing only the 3 canonical named tiers ever appear for ND.COM,
-  // including for any future raw ID Yotpo might report that we haven't seen
-  // yet. Scoped to site='com' only — EU and IL are unaffected.
-  const redemptionsRes = await p.query(
-    `SELECT
-       CASE
-         WHEN $1 = 'il' AND tier_at_event = $4 THEN $5
-         WHEN $1 = 'il' AND tier_at_event = $6 THEN $7
-         WHEN COALESCE(tier_at_event, 'Unknown') = 'Unknown' THEN 'BRONZE'
-         WHEN $1 = 'com' AND UPPER(tier_at_event) NOT IN ('BRONZE', 'GLOW', 'GLAM') THEN 'BRONZE'
-         ELSE tier_at_event
-       END AS tier,
-       COUNT(*) AS redemptions,
-       COALESCE(SUM(points), 0) AS points_used
-     FROM yotpo_events
-     WHERE site = $1 AND event_type = 'redemption' AND received_at >= $2 AND received_at < $3
-     GROUP BY tier
-     ORDER BY points_used DESC`,
-    [site, start, end, IL_TIER_ID_BRONZE, 'BRONZE', IL_TIER_ID_GLAM, 'GLAM']
-  );
-
-  const movementRes = await p.query(
-    `SELECT tier_from, tier_to, COUNT(*) AS n
-     FROM yotpo_events
-     WHERE site = $1 AND event_type = 'tier_change' AND tier_from IS NOT NULL AND tier_from <> tier_to
-       AND received_at >= $2 AND received_at < $3
-     GROUP BY tier_from, tier_to
-     ORDER BY n DESC`,
-    [site, start, end]
-  );
+  const { min: earliest, max: latest } = minMaxDates([
+    ...newMemberEvents.map((e) => e.receivedAt),
+    ...redemptionEvents.map((e) => e.receivedAt),
+  ]);
 
   return {
     site,
-    start,
-    end,
-    collecting_since: earliestEventAt,
-    no_data: false,
-    new_members: Number(newMembersRes.rows[0].n),
-    redemptions_by_tier: redemptionsRes.rows.map((r) => ({
-      tier: r.tier,
-      redemptions: Number(r.redemptions),
-      points_used: Number(r.points_used),
-      points_value: Number(r.points_used) / POINTS_PER_CURRENCY_UNIT,
-    })),
-    tier_movement: movementRes.rows.map((r) => ({
-      from: r.tier_from,
-      to: r.tier_to,
-      count: Number(r.n),
-    })),
+    customers_seeded: customersWithTier.length,
+    new_members_imported: newMemberEvents.length,
+    redemptions_imported: redemptionEvents.length,
+    earliest_date: earliest ? earliest.toISOString().slice(0, 10) : null,
+    latest_date: latest ? latest.toISOString().slice(0, 10) : null,
   };
 }
 
-module.exports = {
-  VALID_SITES,
-  getPool,
-  ensureYotpoSchema,
-  recordYotpoEvent,
-  getYotpoSummary,
-  classifyTopic, // exported for the test harness
-};
+module.exports = { importYotpoHistory, parseCustomersCsv, parseRedemptionsCsv };
