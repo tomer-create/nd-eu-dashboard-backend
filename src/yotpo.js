@@ -292,12 +292,26 @@ async function getYotpoSummary(site, start, end) {
   // exact same summed row, not two rows that happen to share a label. The IL
   // tier-ID CASE arms run first so an ID gets normalized to a name BEFORE
   // the Unknown-vs-BRONZE check below ever sees it.
+  //
+  // ND.COM-only fallback (added 2026-09-06): a live check of the dashboard
+  // turned up several raw numeric tier IDs (e.g. "19820", "19819", "19818")
+  // showing as their own unnamed rows for ND.COM — the same class of issue
+  // as IL's raw tier IDs above, but without a confirmed ID→name mapping from
+  // Tomer this time. Per his instruction ("don't show extra numeric tier
+  // values, only Bronze/Glow/Glam on ND.COM"), any ND.COM tier value that
+  // isn't literally BRONZE/GLOW/GLAM (case-insensitive) is folded into
+  // BRONZE rather than dropped outright — this keeps redemption/points
+  // totals accurate (nothing silently disappears from the Total row) while
+  // guaranteeing only the 3 canonical named tiers ever appear for ND.COM,
+  // including for any future raw ID Yotpo might report that we haven't seen
+  // yet. Scoped to site='com' only — EU and IL are unaffected.
   const redemptionsRes = await p.query(
     `SELECT
        CASE
          WHEN $1 = 'il' AND tier_at_event = $4 THEN $5
          WHEN $1 = 'il' AND tier_at_event = $6 THEN $7
          WHEN COALESCE(tier_at_event, 'Unknown') = 'Unknown' THEN 'BRONZE'
+         WHEN $1 = 'com' AND UPPER(tier_at_event) NOT IN ('BRONZE', 'GLOW', 'GLAM') THEN 'BRONZE'
          ELSE tier_at_event
        END AS tier,
        COUNT(*) AS redemptions,
