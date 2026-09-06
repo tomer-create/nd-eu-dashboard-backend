@@ -6,8 +6,11 @@ const { fetchOrders, fetchOrdersLight, fetchSalesReversals, fetchCostOfGoodsSold
 const { aggregate } = require('./src/aggregate');
 const { fetchChannelPerformance } = require('./src/triplewhale');
 const { fetchPnlSheetChannels, fetchPnlSheetOtherCosts } = require('./src/googlesheets');
-const { VALID_SITES: YOTPO_VALID_SITES, ensureYotpoSchema, recordYotpoEvent, getYotpoSummary } = require('./src/yotpo');
+const { VALID_SITES: YOTPO_VALID_SITES, ensureYotpoSchema, recordYotpoEvent, getYotpoSummary, getPool: getYotpoPool } = require('./src/yotpo');
 const { registerYotpoWebhooksForSite } = require('./src/yotpo-setup');
+const { importYotpoHistory } = require('./src/yotpo-import');
+const multer = require('multer');
+const yotpoUpload = multer({ storage: multer.memoryStorage(), limits: { fileSize: 25 * 1024 * 1024 } });
 
 const app = express();
 const PORT = process.env.PORT || 3000;
@@ -730,6 +733,105 @@ app.get('/admin/yotpo/register-webhooks', async (req, res) => {
   } catch (err) {
     console.error(`yotpo webhook registration (site=${site}) failed:`, err.message);
     res.status(err.status || 502).json({ ok: false, error: err.message, body: err.body });
+  }
+});
+
+// GET /admin/yotpo/import?site=com&token=<ADMIN_SETUP_TOKEN>
+// POST /admin/yotpo/import?token=<ADMIN_SETUP_TOKEN>  (multipart: site, customers_csv, redemptions_csv)
+//
+// One-time-per-site historical backfill for Section 8 — added 2026-09-06.
+// See src/yotpo-import.js's file header for the full picture: what can and
+// can't be backfilled, the tier-approximation decision, and why re-running
+// this is safe (it replaces the prior backfill for the site, never
+// duplicates). This exists because Yotpo's webhooks only cover events from
+// whenever registration went live — everything before that has to come
+// from Yotpo's own manual CSV exports (Loyalty & Referrals admin →
+// Analytics → Reports → Customers / Redemptions History), which Tomer
+// downloads there and uploads here. Gated by the same ADMIN_SETUP_TOKEN as
+// the webhook-registration route above, since this writes real historical
+// data into the database.
+app.get('/admin/yotpo/import', (req, res) => {
+  const { site, token } = req.query;
+  const adminToken = process.env.ADMIN_SETUP_TOKEN;
+  if (!adminToken || token !== adminToken) {
+    return res.status(403).send('Invalid or missing token.');
+  }
+  if (!YOTPO_VALID_SITES.includes(site)) {
+    return res
+      .status(400)
+      .send(`Unknown or missing site "${site}" — use ?site=com, ?site=eu, or ?site=il.`);
+  }
+  res.send(`<!DOCTYPE html>
+<html>
+<head><meta charset="utf-8"><title>Yotpo history import — ${site}</title>
+<style>
+  body { font-family: -apple-system, sans-serif; max-width: 640px; margin: 40px auto; padding: 0 20px; color: #222; }
+  h1 { font-size: 20px; }
+  label { display: block; margin: 18px 0 6px; font-weight: 600; }
+  input[type=file] { display: block; }
+  button { margin-top: 24px; padding: 10px 20px; font-size: 15px; cursor: pointer; }
+  p.note { color: #555; font-size: 14px; }
+</style>
+</head>
+<body>
+  <h1>Import historical Yotpo Loyalty data — site: ${site}</h1>
+  <p class="note">Export these two reports from Yotpo's Loyalty &amp; Referrals admin (Analytics → Reports) for the <strong>${site}</strong> account, then upload both CSV files here. New members and redemptions will be backfilled; tier movement can't be backfilled (Yotpo doesn't export tier-change history) — see the message on the result page for details.</p>
+  <form method="POST" action="/admin/yotpo/import?token=${encodeURIComponent(token)}" enctype="multipart/form-data">
+    <input type="hidden" name="site" value="${site}">
+    <label for="customers_csv">Customers report (CSV)</label>
+    <input type="file" id="customers_csv" name="customers_csv" accept=".csv" required>
+    <label for="redemptions_csv">Redemptions History report (CSV)</label>
+    <input type="file" id="redemptions_csv" name="redemptions_csv" accept=".csv" required>
+    <button type="submit">Import</button>
+  </form>
+</body>
+</html>`);
+});
+
+app.post('/admin/yotpo/import', yotpoUpload.fields([{ name: 'customers_csv', maxCount: 1 }, { name: 'redemptions_csv', maxCount: 1 }]), async (req, res) => {
+  const adminToken = process.env.ADMIN_SETUP_TOKEN;
+  if (!adminToken || req.query.token !== adminToken) {
+    return res.status(403).send('Invalid or missing token.');
+  }
+  const site = req.body && req.body.site;
+  if (!YOTPO_VALID_SITES.includes(site)) {
+    return res.status(400).send(`Unknown or missing site "${site}".`);
+  }
+  const customersFile = req.files && req.files.customers_csv && req.files.customers_csv[0];
+  const redemptionsFile = req.files && req.files.redemptions_csv && req.files.redemptions_csv[0];
+  if (!customersFile || !redemptionsFile) {
+    return res.status(400).send('Both the Customers CSV and Redemptions History CSV are required.');
+  }
+  const pool = getYotpoPool();
+  if (!pool) {
+    return res.status(503).send('DATABASE_URL is not configured yet — nothing to import into.');
+  }
+  try {
+    await ensureYotpoSchema();
+    const summary = await importYotpoHistory(pool, site, {
+      customersBuffer: customersFile.buffer,
+      redemptionsBuffer: redemptionsFile.buffer,
+    });
+    res.send(`<!DOCTYPE html>
+<html>
+<head><meta charset="utf-8"><title>Import complete — ${site}</title>
+<style>body { font-family: -apple-system, sans-serif; max-width: 640px; margin: 40px auto; padding: 0 20px; color: #222; } li { margin: 6px 0; } .warn { background: #fff8e1; border: 1px solid #f0d878; padding: 12px 16px; border-radius: 6px; margin-top: 20px; }</style>
+</head>
+<body>
+  <h1>Import complete — ${site}</h1>
+  <ul>
+    <li>Customers with a known tier seeded: <strong>${summary.customers_seeded}</strong></li>
+    <li>Historical new members imported: <strong>${summary.new_members_imported}</strong></li>
+    <li>Historical redemptions imported: <strong>${summary.redemptions_imported}</strong></li>
+    <li>Date range covered: <strong>${summary.earliest_date || 'n/a'}</strong> to <strong>${summary.latest_date || 'n/a'}</strong></li>
+  </ul>
+  <div class="warn">Redemptions above are grouped by each customer's <em>current</em> Yotpo tier (Yotpo doesn't export what tier they were on historically). Tier movement itself still can't be backfilled — Section 6 will only show real tier-change history from when the live webhook went live forward.</div>
+  <p><a href="/admin/yotpo/import?site=${site}&token=${encodeURIComponent(req.query.token)}">Import again for ${site}</a> (replaces this import, doesn't duplicate) &nbsp;|&nbsp; <a href="/">Back to dashboard</a></p>
+</body>
+</html>`);
+  } catch (err) {
+    console.error(`yotpo history import (site=${site}) failed:`, err.message);
+    res.status(500).send(`<pre>Import failed: ${String(err.message).replace(/</g, '&lt;')}</pre><p><a href="javascript:history.back()">Go back and try again</a></p>`);
   }
 });
 
