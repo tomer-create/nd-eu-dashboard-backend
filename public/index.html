@@ -1634,6 +1634,44 @@ function yotpoDateRange(month) {
   return monthDateRange(month, isCurrent);
 }
 
+// Each site's real Yotpo VIP tier structure, in the fixed display order
+// Tomer wants — added 2026-09-06: ND.COM and ND.EU both run a 3-tier
+// program (Bronze/Glow/Glam); ND.IL only has 2 tiers (no Glow). Rows for
+// these tiers are always shown in this order, even at zero, and any OTHER
+// tier value that turns up in the data (e.g. a stray "None"/unassigned
+// bucket) is still shown — never silently dropped — just appended after the
+// canonical rows, ordered by points used like before. "All Sites" uses the
+// superset (Bronze/Glow/Glam) since it's combining sites that may each have
+// a different real tier set.
+const YOTPO_TIERS = {
+  com: ['BRONZE', 'GLOW', 'GLAM'],
+  eu: ['BRONZE', 'GLOW', 'GLAM'],
+  il: ['BRONZE', 'GLAM'],
+};
+function yotpoCanonicalTiers() {
+  return YOTPO_TIERS[state.site] || ['BRONZE', 'GLOW', 'GLAM'];
+}
+
+// Mirrors server.js's shiftDateRange (same UTC calendar-shift logic) — Yotpo
+// isn't wired through the Sync/live-cache system (see the file header
+// above), so YoY/MoM here (added 2026-09-06 per Tomer) need their own
+// date-shifted fetches rather than reading a pre-computed yoy/mom field off
+// monthData the way every other section does.
+function yotpoShiftDateRange(startISO, endISO, { years = 0, months = 0 } = {}) {
+  const start = new Date(startISO + 'T00:00:00Z');
+  const end = new Date(endISO + 'T00:00:00Z');
+  start.setUTCFullYear(start.getUTCFullYear() - years);
+  end.setUTCFullYear(end.getUTCFullYear() - years);
+  start.setUTCMonth(start.getUTCMonth() - months);
+  end.setUTCMonth(end.getUTCMonth() - months);
+  const fmt = (d) => d.toISOString().slice(0, 10);
+  return { start: fmt(start), end: fmt(end) };
+}
+function yotpoPctChange(curr, prev) {
+  if (!prev) return null;
+  return (curr - prev) / Math.abs(prev);
+}
+
 async function fetchYotpoSummaryForSite(site, start, end) {
   const url = `${BACKEND_URL}/api/yotpo/summary?site=${encodeURIComponent(site)}&start=${start}&end=${end}`;
   const res = await fetch(url);
@@ -1702,66 +1740,107 @@ function combineYotpoSummaries(perSite) {
 
 async function renderYotpoLoyalty() {
   const el = document.getElementById('section-8');
+
   if (state.site === 'all') {
     const { start, end } = yotpoDateRange(state.month);
+    const yoyRange = yotpoShiftDateRange(start, end, { years: 1 });
+    const momRange = yotpoShiftDateRange(start, end, { months: 1 });
     const sites = Object.keys(DATA.sites);
     const keys = sites.map((s) => s + '|' + state.month);
+    const yoyKeys = keys.map((k) => k + '|yoy');
+    const momKeys = keys.map((k) => k + '|mom');
     const requestedMonth = state.month;
+
     // Tags each cached summary with which site it came from (`_site`) so
-    // combineYotpoSummaries can look up the right FX_TO_USD rate for the new
-    // points_value column below — the cache itself is keyed by "site|month"
+    // combineYotpoSummaries can look up the right FX_TO_USD rate for the
+    // points_value column — the cache itself is keyed by "site|month[|yoy|mom]"
     // and stores the raw backend response, which has no site field of its
     // own (see fetchYotpoSummaryForSite).
-    const taggedEntries = () => keys.map((k, i) => {
+    const taggedEntries = (ks) => ks.map((k, i) => {
       const v = yotpoCache[k];
-      return v && v !== 'error' ? { ...v, _site: sites[i] } : null;
+      return v && v !== 'error' && v !== 'loading' ? { ...v, _site: sites[i] } : null;
     });
-    if (keys.every((k) => yotpoCache[k] && yotpoCache[k] !== 'loading')) {
-      renderYotpoSection(el, combineYotpoSummaries(taggedEntries()), true);
+    const fetchAllFor = (ks, range) => Promise.all(sites.map(async (s, i) => {
+      const key = ks[i];
+      if (yotpoCache[key] && yotpoCache[key] !== 'loading') return;
+      yotpoCache[key] = 'loading';
+      try {
+        yotpoCache[key] = await fetchYotpoSummaryForSite(s, range.start, range.end);
+      } catch (err) {
+        console.error('yotpo summary fetch failed for', s, err);
+        yotpoCache[key] = 'error';
+      }
+    }));
+    const paintAll = () => renderYotpoSection(
+      el,
+      combineYotpoSummaries(taggedEntries(keys)),
+      combineYotpoSummaries(taggedEntries(yoyKeys)),
+      combineYotpoSummaries(taggedEntries(momKeys)),
+      true
+    );
+
+    if (keys.concat(yoyKeys, momKeys).every((k) => yotpoCache[k] && yotpoCache[k] !== 'loading')) {
+      paintAll();
     } else {
       el.innerHTML = '<div class="placeholder">Loading Yotpo Loyalty data…</div>';
-      await Promise.all(sites.map(async (s, i) => {
-        const key = keys[i];
-        if (yotpoCache[key] && yotpoCache[key] !== 'loading') return;
-        yotpoCache[key] = 'loading';
-        try {
-          yotpoCache[key] = await fetchYotpoSummaryForSite(s, start, end);
-        } catch (err) {
-          console.error('yotpo summary fetch failed for', s, err);
-          yotpoCache[key] = 'error';
-        }
-      }));
+      await Promise.all([
+        fetchAllFor(keys, { start, end }),
+        fetchAllFor(yoyKeys, yoyRange),
+        fetchAllFor(momKeys, momRange),
+      ]);
       // Only repaint if the user hasn't since navigated away from "All
       // Sites" or switched months while this was in flight.
-      if (state.site === 'all' && state.month === requestedMonth) {
-        renderYotpoSection(el, combineYotpoSummaries(taggedEntries()), true);
-      }
+      if (state.site === 'all' && state.month === requestedMonth) paintAll();
     }
     return;
   }
 
   const key = state.site + '|' + state.month;
-  const cached = yotpoCache[key];
-  if (cached && cached !== 'loading') {
-    renderYotpoSection(el, cached === 'error' ? { no_data: true, fetch_error: true } : cached, false);
+  const yoyKey = key + '|yoy';
+  const momKey = key + '|mom';
+  const readComparison = (k) => (yotpoCache[k] && yotpoCache[k] !== 'error' && yotpoCache[k] !== 'loading') ? yotpoCache[k] : null;
+
+  if (yotpoCache[key] && yotpoCache[key] !== 'loading' && yotpoCache[yoyKey] !== 'loading' && yotpoCache[momKey] !== 'loading') {
+    renderYotpoSection(
+      el,
+      yotpoCache[key] === 'error' ? { no_data: true, fetch_error: true } : yotpoCache[key],
+      readComparison(yoyKey),
+      readComparison(momKey),
+      false
+    );
     return;
   }
   el.innerHTML = '<div class="placeholder">Loading Yotpo Loyalty data…</div>';
   yotpoCache[key] = 'loading';
+  yotpoCache[yoyKey] = 'loading';
+  yotpoCache[momKey] = 'loading';
   const { start, end } = yotpoDateRange(state.month);
+  const yoyRange = yotpoShiftDateRange(start, end, { years: 1 });
+  const momRange = yotpoShiftDateRange(start, end, { months: 1 });
   const requestedSite = state.site, requestedMonth = state.month;
-  try {
-    const data = await fetchYotpoSummaryForSite(state.site, start, end);
-    yotpoCache[key] = data;
-    if (state.site === requestedSite && state.month === requestedMonth) renderYotpoSection(el, data, false);
-  } catch (err) {
-    console.error('yotpo summary fetch failed:', err);
-    yotpoCache[key] = 'error';
-    if (state.site === requestedSite && state.month === requestedMonth) renderYotpoSection(el, { no_data: true, fetch_error: true }, false);
+  await Promise.all([
+    fetchYotpoSummaryForSite(state.site, start, end)
+      .then((d) => { yotpoCache[key] = d; })
+      .catch((err) => { console.error('yotpo summary fetch failed:', err); yotpoCache[key] = 'error'; }),
+    fetchYotpoSummaryForSite(state.site, yoyRange.start, yoyRange.end)
+      .then((d) => { yotpoCache[yoyKey] = d; })
+      .catch((err) => { console.error('yotpo YoY summary fetch failed:', err); yotpoCache[yoyKey] = 'error'; }),
+    fetchYotpoSummaryForSite(state.site, momRange.start, momRange.end)
+      .then((d) => { yotpoCache[momKey] = d; })
+      .catch((err) => { console.error('yotpo MoM summary fetch failed:', err); yotpoCache[momKey] = 'error'; }),
+  ]);
+  if (state.site === requestedSite && state.month === requestedMonth) {
+    renderYotpoSection(
+      el,
+      yotpoCache[key] === 'error' ? { no_data: true, fetch_error: true } : yotpoCache[key],
+      readComparison(yoyKey),
+      readComparison(momKey),
+      false
+    );
   }
 }
 
-function renderYotpoSection(el, data, combined) {
+function renderYotpoSection(el, data, yoyData, momData, combined) {
   if (!data || data.no_data) {
     el.innerHTML = `<div class="placeholder">
       <div class="ph-title">${data && data.fetch_error ? 'Couldn’t reach the Yotpo data endpoint' : 'No Yotpo data collected yet for this period'}</div>
@@ -1771,25 +1850,109 @@ function renderYotpoSection(el, data, combined) {
     </div>`;
     return;
   }
-  // Value column — added 2026-09-06 per Tomer: 10 Yotpo points = 1 unit of
+
+  // Fixed tier rows + order — added 2026-09-06 per Tomer: ND.COM/ND.EU both
+  // show Bronze, Glow, Glam in that order; ND.IL only has Bronze and Glam
+  // (no Glow tier at all there). These always render, even at zero, rather
+  // than only appearing once a period happens to have activity in them — see
+  // YOTPO_TIERS/yotpoCanonicalTiers above. "All Sites" uses the 3-tier
+  // superset since it's combining sites that may each have a different real
+  // tier set. Any OTHER tier value the data actually contains (e.g. a stray
+  // "None"/unassigned bucket) is still shown, never silently dropped — just
+  // appended after the canonical rows, ordered by points used like before.
+  const canonicalTiers = combined ? ['BRONZE', 'GLOW', 'GLAM'] : yotpoCanonicalTiers();
+  const curMap = new Map((data.redemptions_by_tier || []).map(r => [r.tier, r]));
+  const yoyMap = new Map(((yoyData && yoyData.redemptions_by_tier) || []).map(r => [r.tier, r]));
+  const momMap = new Map(((momData && momData.redemptions_by_tier) || []).map(r => [r.tier, r]));
+  const extraTiers = Array.from(curMap.keys())
+    .filter(t => !canonicalTiers.includes(t))
+    .sort((a, b) => (curMap.get(b).points_used || 0) - (curMap.get(a).points_used || 0));
+  const allTiers = canonicalTiers.concat(extraTiers);
+
+  // Value column (added 2026-09-06 per Tomer): 10 Yotpo points = 1 unit of
   // local currency across all 3 sites (US $15=150pts…$30=300pts; EU same
   // point costs in €; IL ₪25=250pts…₪50=500pts all reduce to the same 10:1
   // ratio — see POINTS_PER_CURRENCY_UNIT in src/yotpo.js). The backend
   // already returns points_value in the site's own local currency for a
-  // single-site tab; for "All Sites (USD)" combineYotpoSummaries above
-  // converts each site's value to USD first (same FX_TO_USD rates as every
-  // other dollar figure on this dashboard), so sym() here is always the
-  // right symbol for whatever's actually in points_value.
-  const tierRows = (data.redemptions_by_tier || []).map(r => `<tr>
+  // single-site tab; for "All Sites (USD)" combineYotpoSummaries converts
+  // each site's value to USD first (same FX_TO_USD rates as every other
+  // dollar figure on this dashboard), so sym() here is always the right
+  // symbol for whatever's actually in points_value.
+  //
+  // YoY/MoM columns (added 2026-09-06 per Tomer) compare this period's
+  // points redeemed against the same date range one year/one month earlier
+  // (yotpoShiftDateRange), fetched separately since Yotpo isn't wired
+  // through the Sync/live-cache system every other section uses. Computed
+  // on points_used rather than points_value because they're the exact same
+  // percentage either way (points_value is just points_used ÷ 10) — no need
+  // to compute it twice. A tier missing from the comparison period (brand
+  // new this period, or the comparison fetch itself failed/had no data)
+  // shows "—" rather than a misleading ±100%/undefined.
+  const rows = allTiers.map(tier => {
+    const cur = curMap.get(tier) || { redemptions: 0, points_used: 0, points_value: 0 };
+    const yoyRow = yoyMap.get(tier);
+    const momRow = momMap.get(tier);
+    return {
+      tier,
+      redemptions: cur.redemptions || 0,
+      points_used: cur.points_used || 0,
+      points_value: cur.points_value || 0,
+      yoy: yoyRow ? yotpoPctChange(cur.points_used || 0, yoyRow.points_used) : null,
+      mom: momRow ? yotpoPctChange(cur.points_used || 0, momRow.points_used) : null,
+    };
+  });
+  const tierRows = rows.map(r => `<tr>
       <td>${r.tier}</td>
       <td>${r.redemptions.toLocaleString('en-US')}</td>
       <td>${r.points_used.toLocaleString('en-US')}</td>
-      <td>${sym()}${(r.points_value || 0).toLocaleString('en-US', { maximumFractionDigits: 0 })}</td>
-    </tr>`).join('') || '<tr><td colspan="4" style="color:var(--text-muted)">No redemptions in this period</td></tr>';
-  const movementRows = (data.tier_movement || []).map(m => `<tr>
+      <td>${sym()}${r.points_value.toLocaleString('en-US', { maximumFractionDigits: 0 })}</td>
+      <td>${yoyCell(r.yoy)}</td>
+      <td>${yoyCell(r.mom)}</td>
+    </tr>`).join('');
+
+  // Total row — true total across every row shown above (canonical tiers
+  // plus any extra ones). YoY/MoM here use the comparison period's OWN full
+  // total (every tier it had, even one that doesn't appear in the current
+  // period's table at all) rather than summing each row's already-computed
+  // % change, so a tier that existed only in the prior period still counts
+  // against the total correctly.
+  const totalRedemptions = rows.reduce((s, r) => s + r.redemptions, 0);
+  const totalPoints = rows.reduce((s, r) => s + r.points_used, 0);
+  const totalValue = rows.reduce((s, r) => s + r.points_value, 0);
+  const yoyTotalPoints = (yoyData && yoyData.redemptions_by_tier)
+    ? yoyData.redemptions_by_tier.reduce((s, r) => s + (r.points_used || 0), 0)
+    : null;
+  const momTotalPoints = (momData && momData.redemptions_by_tier)
+    ? momData.redemptions_by_tier.reduce((s, r) => s + (r.points_used || 0), 0)
+    : null;
+  const totalYoy = (yoyData && !yoyData.no_data) ? yotpoPctChange(totalPoints, yoyTotalPoints) : null;
+  const totalMom = (momData && !momData.no_data) ? yotpoPctChange(totalPoints, momTotalPoints) : null;
+  const totalRow = `<tr class="total-row">
+      <td>Total</td>
+      <td>${totalRedemptions.toLocaleString('en-US')}</td>
+      <td>${totalPoints.toLocaleString('en-US')}</td>
+      <td>${sym()}${totalValue.toLocaleString('en-US', { maximumFractionDigits: 0 })}</td>
+      <td>${yoyCell(totalYoy)}</td>
+      <td>${yoyCell(totalMom)}</td>
+    </tr>`;
+
+  // Movement between tiers — hidden entirely (not just an empty-state row)
+  // when there's nothing to show, per Tomer (2026-09-06). This table can
+  // only ever reflect real webhook tier-change events (never backfilled —
+  // see src/yotpo-import.js), and a real tier upgrade/downgrade is a much
+  // rarer event than a signup or redemption, so an empty period here is
+  // expected and common, not a sign of something broken.
+  const movementSection = (data.tier_movement && data.tier_movement.length)
+    ? `<div style="font-size:12.5px;font-weight:600;margin:16px 0 6px">Movement between tiers</div>
+    <table class="dtable">
+      <thead><tr><th style="text-align:left">Tier change</th><th>Customers</th></tr></thead>
+      <tbody>${data.tier_movement.map(m => `<tr>
       <td>${m.from} → ${m.to}</td>
       <td>${m.count.toLocaleString('en-US')}</td>
-    </tr>`).join('') || '<tr><td colspan="2" style="color:var(--text-muted)">No tier movement in this period</td></tr>';
+    </tr>`).join('')}</tbody>
+    </table>`
+    : '';
+
   const partialNote = combined && data.partial
     ? ` Only ${data.covered_sites} of ${data.total_sites} sites have collected Yotpo data for this period yet — the rest show “not collected yet.”`
     : '';
@@ -1799,15 +1962,11 @@ function renderYotpoSection(el, data, combined) {
     </div>
     <div style="font-size:12.5px;font-weight:600;margin:4px 0 6px">Points redeemed by tier</div>
     <table class="dtable">
-      <thead><tr><th style="text-align:left">Tier</th><th>Redemptions</th><th>Points used</th><th>Value (${sym()})</th></tr></thead>
-      <tbody>${tierRows}</tbody>
+      <thead><tr><th style="text-align:left">Tier</th><th>Redemptions</th><th>Points used</th><th>Value (${sym()})</th><th>YoY</th><th>MoM</th></tr></thead>
+      <tbody>${tierRows}${totalRow}</tbody>
     </table>
-    <div style="font-size:12.5px;font-weight:600;margin:16px 0 6px">Movement between tiers</div>
-    <table class="dtable">
-      <thead><tr><th style="text-align:left">Tier change</th><th>Customers</th></tr></thead>
-      <tbody>${movementRows}</tbody>
-    </table>
-    <div style="margin-top:10px;font-size:11px;color:var(--text-muted)">From Yotpo webhook events accumulated since ${data.collecting_since ? new Date(data.collecting_since).toLocaleDateString('en-US') : '—'} — no historical backfill is possible, so periods before that aren’t shown here. Redemptions with no resolvable tier are grouped under BRONZE. "Movement between tiers" only reflects real tier-change webhook events (not backfilled) — an empty table here means no customer has actually changed tiers since collection started, not a missing feature.${partialNote}</div>`;
+    ${movementSection}
+    <div style="margin-top:10px;font-size:11px;color:var(--text-muted)">From Yotpo webhook events accumulated since ${data.collecting_since ? new Date(data.collecting_since).toLocaleDateString('en-US') : '—'} — no historical backfill is possible, so periods before that aren’t shown here. Redemptions with no resolvable tier are grouped under BRONZE. YoY/MoM compare points redeemed against the same date range one year/month earlier. "Movement between tiers" only reflects real tier-change webhook events (never backfilled) — it's hidden here rather than shown empty when no customer has changed tiers in this period, which is expected in the early days after go-live.${partialNote}</div>`;
 }
 
 /* ---------------- Section 2: Top Selling Products (live from Shopify where available) ---------------- */
