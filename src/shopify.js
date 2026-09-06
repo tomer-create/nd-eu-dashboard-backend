@@ -99,10 +99,32 @@ async function graphql(site, query, variables = {}, attempt = 0) {
     return graphql(site, query, variables, attempt + 1);
   }
 
-  const body = await res.json();
+  // Read as text first, not res.json() directly — a non-2xx response from
+  // Shopify (or an intermediary proxy) isn't guaranteed to be JSON, and
+  // res.json() throwing here produces an opaque "Unexpected token" crash
+  // that hides the real problem. Fixed 2026-09-06 after that exact failure
+  // mode surfaced (see the .some() fix below for the other half of it).
+  const rawText = await res.text();
+  let body;
+  try {
+    body = JSON.parse(rawText);
+  } catch {
+    throw new Error(
+      `Shopify returned a non-JSON response for "${site}" (status ${res.status}): ${rawText.slice(0, 300)}`
+    );
+  }
 
   if (body.errors) {
-    const throttled = body.errors.some((e) => e.extensions?.code === 'THROTTLED');
+    // body.errors is normally an array of {message, extensions} objects, but
+    // Shopify (and proxies in front of it) can return it as a plain string
+    // for some error classes (auth failures, malformed requests) — that
+    // shape broke `.some()` here outright (TypeError: body.errors.some is
+    // not a function), which masked the real underlying Shopify error
+    // message entirely. Fixed 2026-09-06 by normalizing to an array first.
+    const errorsArray = Array.isArray(body.errors)
+      ? body.errors
+      : [{ message: typeof body.errors === 'string' ? body.errors : JSON.stringify(body.errors) }];
+    const throttled = errorsArray.some((e) => e && e.extensions && e.extensions.code === 'THROTTLED');
     if (throttled && attempt < 5) {
       await new Promise((r) => setTimeout(r, 1000 * (attempt + 1)));
       return graphql(site, query, variables, attempt + 1);
