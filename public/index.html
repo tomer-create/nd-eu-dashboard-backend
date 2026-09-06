@@ -1637,7 +1637,22 @@ function yotpoDateRange(month) {
 async function fetchYotpoSummaryForSite(site, start, end) {
   const url = `${BACKEND_URL}/api/yotpo/summary?site=${encodeURIComponent(site)}&start=${start}&end=${end}`;
   const res = await fetch(url);
-  const body = await res.json();
+  // Read as text first, not res.json() directly — an error response isn't
+  // guaranteed to be JSON (a Render deploy-window gateway page, a proxy
+  // error, anything upstream) and res.json() throwing on that produces an
+  // opaque browser-internal "Unexpected token '<'" crash that hides what
+  // actually went wrong. Fixed 2026-09-06 after that exact failure mode
+  // surfaced during setup — this now reports the real status code and a
+  // snippet of what actually came back instead.
+  const rawText = await res.text();
+  let body;
+  try {
+    body = JSON.parse(rawText);
+  } catch {
+    throw new Error(
+      `Backend returned a non-JSON response (status ${res.status}): ${rawText.slice(0, 150)}`
+    );
+  }
   if (!res.ok) throw new Error(body.error || `Backend returned ${res.status}`);
   return body;
 }
