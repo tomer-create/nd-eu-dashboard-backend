@@ -224,6 +224,12 @@
     <div id="section-7"></div>
   </div>
 
+  <div class="card">
+    <div class="section-title"><span class="section-num">8</span>Yotpo Loyalty</div>
+    <div class="section-sub">New members, points redeemed by tier, and movement between tiers — from Yotpo webhook events</div>
+    <div id="section-8"></div>
+  </div>
+
   <footer class="dash-footer" id="footer-note"></footer>
 
 </div>
@@ -301,6 +307,16 @@ const BACKEND_URL = '';
 const MONTH_INDEX = { Jan:0, Feb:1, Mar:2, Apr:3, May:4, Jun:5, Jul:6, Aug:7, Sep:8, Oct:9, Nov:10, Dec:11 };
 // cache of live pulls, keyed 'site|month' -> { data, fetchedAt }
 const liveCache = {};
+// Section 8 (Yotpo Loyalty) — added 2026-09-06. Cache of /api/yotpo/summary
+// pulls, keyed 'site|month' same as liveCache, but INTENTIONALLY separate
+// from it and from the Sync button entirely: this data isn't a Shopify
+// pull that needs an explicit user-triggered Sync, it's our own database
+// being read, so it just fetches automatically whenever the site/month
+// selection changes (see renderYotpoLoyalty below). Values are the raw
+// /api/yotpo/summary response, or the string 'loading'/'error' while a
+// fetch is in flight/failed, so renderYotpoLoyalty can tell those states
+// apart from "not fetched yet".
+const yotpoCache = {};
 // Section 5 (Sales by Country) "show more" expand state, keyed the same way
 // as liveCache ('site|month') so expanding ND.EU's long country list doesn't
 // leak into a different site/month view that has few enough countries to
@@ -744,13 +760,22 @@ function mergeLiveIntoMonthData(monthData, live, site) {
   // Discount/Returns Ratio earlier in this function. Blended ROAS is
   // intentionally NOT touched here — see the comment near the top of this
   // function.
+  //
+  // Profit Margin formula confirmed with Tomer same day: "(Net Income /
+  // Total Revenue) × 100 = Net Profit Margin (%)" — Net Income = Profit
+  // (computed just above) and Total Revenue = Net Sales (Tomer confirmed
+  // this explicitly, not Gross Sales, keeping it consistent with the
+  // Profit formula's own denominator). The "× 100" is just the percent
+  // display convention already applied everywhere else on this dashboard
+  // (see fmtVal's 'percent' case) — `margin` itself is stored as a 0–1
+  // fraction like every other percent-formatted KPI, not pre-multiplied.
   {
     const netSalesKpi = merged.kpis.find(k => k.label === 'Net Sales');
     const netSales = live.kpis.net_sales !== undefined ? live.kpis.net_sales : (netSalesKpi ? netSalesKpi.actual : undefined);
     const otherCostsTotal = merged.total_other_costs_actual;
     if (netSales !== undefined && otherCostsTotal !== undefined && otherCostsTotal !== null) {
-      const profit = netSales - otherCostsTotal;
-      const margin = netSales ? profit / netSales : null;
+      const profit = netSales - otherCostsTotal; // Net Income
+      const margin = netSales ? profit / netSales : null; // Net Income / Total Revenue
       merged.kpis = merged.kpis.map(k => {
         if (k.label === 'Profit') {
           const goal = k.goal;
@@ -1564,6 +1589,172 @@ function renderOtherCosts(monthData) {
   <div style="margin-top:10px;font-size:11px;color:var(--text-muted)">Total includes "PR Box Cost + Product Cost", which intentionally repeats Product Cost per the dashboard spec (so Product Cost is counted twice in this total, by design). Ad-platform spend (Google, Meta, TikTok, Criteo, etc.) is tracked in Section 4, not here.</div>`;
 }
 
+/* ---------------- Section 8: Yotpo Loyalty ----------------
+   Added 2026-09-06 per Tomer: "add Yotpo Loyalty MCP connection to show
+   the redeem and use of points by tier + new users and movement between
+   the Tiers." See src/yotpo.js's file header (backend) for the full
+   architecture rationale — short version: there's no Yotpo Loyalty MCP
+   connector and no bulk reporting API, so this reads from a database we
+   accumulate ourselves from Yotpo's webhook events. That has one big
+   consequence for this section specifically: there is NO historical
+   backfill — data only exists from whenever the webhook registration went
+   live, so a month entirely before that shows "not collected yet", not a
+   misleading all-zero table.
+
+   Deliberately NOT wired through the Sync button / liveCache /
+   mergeLiveIntoMonthData like every other section — this isn't a Shopify
+   pull that needs an explicit user-triggered Sync, it's our own database,
+   so it just fetches automatically whenever the site/month selection
+   changes. That's why it has its own cache (yotpoCache) and its own
+   render function called directly from render(), not from
+   getSingleSiteMonthData/getMonthData. */
+
+// Mirrors monthDateRange()'s end-exclusive convention, but for the whole
+// Year-to-Date span (Jan 1 through today) rather than one month, since
+// Yotpo events aren't bucketed into the embedded DATA snapshot's months at
+// all — there's nothing to look up an `is_current` flag from here.
+function yotpoDateRange(month) {
+  if (month === 'YTD') {
+    const start = isoDate(new Date(Date.UTC(2026, 0, 1)));
+    const now = new Date();
+    const end = isoDate(new Date(Date.UTC(now.getUTCFullYear(), now.getUTCMonth(), now.getUTCDate() + 1)));
+    return { start, end };
+  }
+  const isCurrent = DATA.sites.com.months[month] ? DATA.sites.com.months[month].is_current : false;
+  return monthDateRange(month, isCurrent);
+}
+
+async function fetchYotpoSummaryForSite(site, start, end) {
+  const url = `${BACKEND_URL}/api/yotpo/summary?site=${encodeURIComponent(site)}&start=${start}&end=${end}`;
+  const res = await fetch(url);
+  const body = await res.json();
+  if (!res.ok) throw new Error(body.error || `Backend returned ${res.status}`);
+  return body;
+}
+
+// Sums per-site summaries into one combined view for the "All Sites (USD)"
+// tab — no currency conversion needed here (points/redemption counts
+// aren't a currency figure the way Section 1/4/7's dollar totals are).
+function combineYotpoSummaries(perSite) {
+  const collected = perSite.filter((s) => s && !s.no_data);
+  if (!collected.length) return { no_data: true };
+  const newMembers = collected.reduce((sum, s) => sum + (s.new_members || 0), 0);
+  const tierMap = new Map();
+  collected.forEach((s) => (s.redemptions_by_tier || []).forEach((r) => {
+    const cur = tierMap.get(r.tier) || { tier: r.tier, redemptions: 0, points_used: 0 };
+    cur.redemptions += r.redemptions;
+    cur.points_used += r.points_used;
+    tierMap.set(r.tier, cur);
+  }));
+  const movementMap = new Map();
+  collected.forEach((s) => (s.tier_movement || []).forEach((m) => {
+    const key = m.from + '→' + m.to;
+    const cur = movementMap.get(key) || { from: m.from, to: m.to, count: 0 };
+    cur.count += m.count;
+    movementMap.set(key, cur);
+  }));
+  return {
+    no_data: false,
+    partial: collected.length < perSite.length,
+    covered_sites: collected.length,
+    total_sites: perSite.length,
+    new_members: newMembers,
+    redemptions_by_tier: Array.from(tierMap.values()).sort((a, b) => b.points_used - a.points_used),
+    tier_movement: Array.from(movementMap.values()).sort((a, b) => b.count - a.count),
+  };
+}
+
+async function renderYotpoLoyalty() {
+  const el = document.getElementById('section-8');
+  if (state.site === 'all') {
+    const { start, end } = yotpoDateRange(state.month);
+    const sites = Object.keys(DATA.sites);
+    const keys = sites.map((s) => s + '|' + state.month);
+    const requestedMonth = state.month;
+    if (keys.every((k) => yotpoCache[k] && yotpoCache[k] !== 'loading')) {
+      renderYotpoSection(el, combineYotpoSummaries(keys.map((k) => (yotpoCache[k] === 'error' ? null : yotpoCache[k]))), true);
+    } else {
+      el.innerHTML = '<div class="placeholder">Loading Yotpo Loyalty data…</div>';
+      await Promise.all(sites.map(async (s, i) => {
+        const key = keys[i];
+        if (yotpoCache[key] && yotpoCache[key] !== 'loading') return;
+        yotpoCache[key] = 'loading';
+        try {
+          yotpoCache[key] = await fetchYotpoSummaryForSite(s, start, end);
+        } catch (err) {
+          console.error('yotpo summary fetch failed for', s, err);
+          yotpoCache[key] = 'error';
+        }
+      }));
+      // Only repaint if the user hasn't since navigated away from "All
+      // Sites" or switched months while this was in flight.
+      if (state.site === 'all' && state.month === requestedMonth) {
+        renderYotpoSection(el, combineYotpoSummaries(keys.map((k) => (yotpoCache[k] === 'error' ? null : yotpoCache[k]))), true);
+      }
+    }
+    return;
+  }
+
+  const key = state.site + '|' + state.month;
+  const cached = yotpoCache[key];
+  if (cached && cached !== 'loading') {
+    renderYotpoSection(el, cached === 'error' ? { no_data: true, fetch_error: true } : cached, false);
+    return;
+  }
+  el.innerHTML = '<div class="placeholder">Loading Yotpo Loyalty data…</div>';
+  yotpoCache[key] = 'loading';
+  const { start, end } = yotpoDateRange(state.month);
+  const requestedSite = state.site, requestedMonth = state.month;
+  try {
+    const data = await fetchYotpoSummaryForSite(state.site, start, end);
+    yotpoCache[key] = data;
+    if (state.site === requestedSite && state.month === requestedMonth) renderYotpoSection(el, data, false);
+  } catch (err) {
+    console.error('yotpo summary fetch failed:', err);
+    yotpoCache[key] = 'error';
+    if (state.site === requestedSite && state.month === requestedMonth) renderYotpoSection(el, { no_data: true, fetch_error: true }, false);
+  }
+}
+
+function renderYotpoSection(el, data, combined) {
+  if (!data || data.no_data) {
+    el.innerHTML = `<div class="placeholder">
+      <div class="ph-title">${data && data.fetch_error ? 'Couldn’t reach the Yotpo data endpoint' : 'No Yotpo data collected yet for this period'}</div>
+      <ul>${data && data.fetch_error
+        ? '<li>The backend request failed — try again in a moment.</li>'
+        : '<li>This section is powered by Yotpo webhook events accumulated in our own database (there’s no bulk history API to backfill from) — see the build notes for why. It only has data from whenever the webhook registration went live, so a period before that shows this message rather than a misleading all-zero table.</li>'}</ul>
+    </div>`;
+    return;
+  }
+  const tierRows = (data.redemptions_by_tier || []).map(r => `<tr>
+      <td>${r.tier}</td>
+      <td>${r.redemptions.toLocaleString('en-US')}</td>
+      <td>${r.points_used.toLocaleString('en-US')}</td>
+    </tr>`).join('') || '<tr><td colspan="3" style="color:var(--text-muted)">No redemptions in this period</td></tr>';
+  const movementRows = (data.tier_movement || []).map(m => `<tr>
+      <td>${m.from} → ${m.to}</td>
+      <td>${m.count.toLocaleString('en-US')}</td>
+    </tr>`).join('') || '<tr><td colspan="2" style="color:var(--text-muted)">No tier movement in this period</td></tr>';
+  const partialNote = combined && data.partial
+    ? ` Only ${data.covered_sites} of ${data.total_sites} sites have collected Yotpo data for this period yet — the rest show “not collected yet.”`
+    : '';
+  el.innerHTML = `
+    <div class="kpi-grid" style="margin-bottom:14px">
+      <div class="kpi-tile"><div class="kpi-top"><span class="kpi-label">New Loyalty Members</span></div><div class="kpi-value">${data.new_members.toLocaleString('en-US')}</div></div>
+    </div>
+    <div style="font-size:12.5px;font-weight:600;margin:4px 0 6px">Points redeemed by tier</div>
+    <table class="dtable">
+      <thead><tr><th style="text-align:left">Tier</th><th>Redemptions</th><th>Points used</th></tr></thead>
+      <tbody>${tierRows}</tbody>
+    </table>
+    <div style="font-size:12.5px;font-weight:600;margin:16px 0 6px">Movement between tiers</div>
+    <table class="dtable">
+      <thead><tr><th style="text-align:left">Tier change</th><th>Customers</th></tr></thead>
+      <tbody>${movementRows}</tbody>
+    </table>
+    <div style="margin-top:10px;font-size:11px;color:var(--text-muted)">From Yotpo webhook events accumulated since ${data.collecting_since ? new Date(data.collecting_since).toLocaleDateString('en-US') : '—'} — no historical backfill is possible, so periods before that aren’t shown here.${partialNote}</div>`;
+}
+
 /* ---------------- Section 2: Top Selling Products (live from Shopify where available) ---------------- */
 function yoyCell(v) {
   if (v === null || v === undefined) return '<span style="color:var(--text-muted)">—</span>';
@@ -1967,6 +2158,10 @@ function render() {
   renderCountry(monthData);
   renderDiscounts(monthData);
   renderOtherCosts(monthData);
+  // Fire-and-forget — Section 8 is its own async data source (see the
+  // comment above renderYotpoLoyalty), not part of monthData/getMonthData,
+  // so it doesn't block the rest of this synchronous render pass.
+  renderYotpoLoyalty();
   document.getElementById('footer-note').textContent = combined
     ? monthData.combined_footer_note
     : isSynced
