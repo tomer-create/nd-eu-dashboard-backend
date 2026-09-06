@@ -160,6 +160,88 @@ function parseRedemptionsCsv(buffer, tierByEmail) {
   return events;
 }
 
+// ============================================================================
+// 2026-09-06 fix — ND.COM's import was hitting a 502 Bad Gateway
+// ============================================================================
+// ND.COM's export is far larger than EU's or IL's (~48,500 new members +
+// ~17,500 redemptions ≈ 66,000 rows total, vs. EU's ~16,700 and IL's
+// ~5,065). Two separate bugs, both scaling with row count, only showed up
+// at that size:
+//
+// 1. This function used to insert one row at a time (a separate `await
+//    client.query(...)` per customer / per event) inside a single DB
+//    transaction. For ~66,000 sequential round trips that's slow enough to
+//    blow past Render's own gateway timeout — the browser sees a bare "502
+//    Bad Gateway" from Render's edge, even though the Node process is still
+//    working and (per the server logs) hadn't crashed. Fixed by batching
+//    every insert into multi-row VALUES statements (BATCH_SIZE rows per
+//    query — see chunkArray/insertBatch below) — this turns ~66,000 round
+//    trips into ~130, which finishes comfortably inside any reasonable
+//    request timeout.
+// 2. After the transaction committed, the summary step used
+//    `Math.min(...allDates)` / `Math.max(...allDates)` to find the earliest/
+//    latest imported date. Spreading a large array as call arguments hits a
+//    hard V8 limit (documented behavior, not a bug in this specific data —
+//    it throws "RangeError: Maximum call stack size exceeded" once the
+//    array gets large enough, and ND.COM's ~66,000 combined dates crossed
+//    that threshold). Confirmed in Render's logs: "yotpo history import
+//    (site=com) failed: Maximum call stack size exceeded" — this fired
+//    AFTER the real data had already committed successfully, so the import
+//    itself was fine; only the summary calculation crashed, taking the
+//    success response down with it. Fixed with a plain loop (minMaxDates
+//    below) that has no size limit.
+//
+// Both fixes are pure performance/robustness changes — the data written and
+// the summary numbers returned are identical to before, just computed in a
+// way that scales to ND.COM's larger export.
+
+const BATCH_SIZE = 500;
+
+function chunkArray(arr, size) {
+  const out = [];
+  for (let i = 0; i < arr.length; i += size) out.push(arr.slice(i, i + size));
+  return out;
+}
+
+// Batch-inserts `rows` into `table(columns...)` in chunks of BATCH_SIZE,
+// sharing a single `$1` placeholder for `site` across every row in a batch
+// (it's the same value every time — Postgres allows reusing a numbered
+// parameter across multiple VALUES tuples in one query) and building the
+// rest of each row's placeholders from `rowValues(row)`, which must return
+// an array of values in the same order as `columns` (excluding site, and
+// excluding any literal columns already baked into `literalColumns`).
+async function insertBatch(client, table, columns, literalColumns, rows, site, rowValues) {
+  for (const batch of chunkArray(rows, BATCH_SIZE)) {
+    const valueTuples = [];
+    const params = [site];
+    for (const row of batch) {
+      const vals = rowValues(row);
+      const base = params.length;
+      params.push(...vals);
+      const placeholders = vals.map((_, i) => `$${base + i + 1}`);
+      valueTuples.push(`($1, ${literalColumns.map((l) => `'${l}'`).join(', ')}${placeholders.length ? ', ' : ''}${placeholders.join(', ')})`);
+    }
+    await client.query(
+      `INSERT INTO ${table} (${columns.join(', ')}) VALUES ${valueTuples.join(', ')}`,
+      params
+    );
+  }
+}
+
+// Replacement for `Math.min(...dates)` / `Math.max(...dates)` — see fix #2
+// above. A plain loop has no argument-count ceiling, unlike spreading an
+// array as call arguments.
+function minMaxDates(dates) {
+  if (!dates.length) return { min: null, max: null };
+  let min = dates[0];
+  let max = dates[0];
+  for (let i = 1; i < dates.length; i++) {
+    if (dates[i] < min) min = dates[i];
+    if (dates[i] > max) max = dates[i];
+  }
+  return { min, max };
+}
+
 // Runs the full import for one site: seeds yotpo_customers from the
 // Customers CSV, then inserts backfilled new_member and redemption events
 // (replacing any prior backfill for this site first — see file header on
@@ -168,6 +250,7 @@ async function importYotpoHistory(pool, site, { customersBuffer, redemptionsBuff
   const { customers, newMemberEvents } = parseCustomersCsv(customersBuffer);
   const tierByEmail = new Map(customers.map((c) => [c.email, c.tier]));
   const redemptionEvents = parseRedemptionsCsv(redemptionsBuffer, tierByEmail);
+  const customersWithTier = customers.filter((c) => c.tier); // nothing useful to seed without a tier value
 
   const client = await pool.connect();
   try {
@@ -181,32 +264,42 @@ async function importYotpoHistory(pool, site, { customersBuffer, redemptionsBuff
 
     // Seed/update yotpo_customers from the Customers export — this is what
     // both the redemption-tier approximation and future real webhook
-    // tier_from lookups read from.
-    for (const c of customers) {
-      if (!c.tier) continue; // nothing useful to record without a tier value
+    // tier_from lookups read from. Batched (see file header, fix #1).
+    for (const batch of chunkArray(customersWithTier, BATCH_SIZE)) {
+      const valueTuples = [];
+      const params = [site];
+      for (const c of batch) {
+        const base = params.length;
+        params.push(c.email, c.tier);
+        valueTuples.push(`($1, $${base + 1}, $${base + 2}, now())`);
+      }
       await client.query(
         `INSERT INTO yotpo_customers (site, email, current_tier, updated_at)
-         VALUES ($1, $2, $3, now())
-         ON CONFLICT (site, email) DO UPDATE SET current_tier = $3, updated_at = now()`,
-        [site, c.email, c.tier]
+         VALUES ${valueTuples.join(', ')}
+         ON CONFLICT (site, email) DO UPDATE SET current_tier = EXCLUDED.current_tier, updated_at = now()`,
+        params
       );
     }
 
-    for (const e of newMemberEvents) {
-      await client.query(
-        `INSERT INTO yotpo_events (site, topic, event_type, email, tier_at_event, received_at, raw_payload)
-         VALUES ($1, 'backfill:customers_csv', 'new_member', $2, $3, $4, $5)`,
-        [site, e.email, e.tierAtEvent, e.receivedAt.toISOString(), JSON.stringify(e.rawRow)]
-      );
-    }
+    await insertBatch(
+      client,
+      'yotpo_events',
+      ['site', 'topic', 'event_type', 'email', 'tier_at_event', 'received_at', 'raw_payload'],
+      ['backfill:customers_csv', 'new_member'],
+      newMemberEvents,
+      site,
+      (e) => [e.email, e.tierAtEvent, e.receivedAt.toISOString(), JSON.stringify(e.rawRow)]
+    );
 
-    for (const e of redemptionEvents) {
-      await client.query(
-        `INSERT INTO yotpo_events (site, topic, event_type, email, tier_at_event, points, reward_name, received_at, raw_payload)
-         VALUES ($1, 'backfill:redemptions_csv', 'redemption', $2, $3, $4, $5, $6, $7)`,
-        [site, e.email, e.tierAtEvent, e.points, e.rewardName, e.receivedAt.toISOString(), JSON.stringify(e.rawRow)]
-      );
-    }
+    await insertBatch(
+      client,
+      'yotpo_events',
+      ['site', 'topic', 'event_type', 'email', 'tier_at_event', 'points', 'reward_name', 'received_at', 'raw_payload'],
+      ['backfill:redemptions_csv', 'redemption'],
+      redemptionEvents,
+      site,
+      (e) => [e.email, e.tierAtEvent, e.points, e.rewardName, e.receivedAt.toISOString(), JSON.stringify(e.rawRow)]
+    );
 
     await client.query('COMMIT');
   } catch (err) {
@@ -216,13 +309,14 @@ async function importYotpoHistory(pool, site, { customersBuffer, redemptionsBuff
     client.release();
   }
 
-  const allDates = [...newMemberEvents.map((e) => e.receivedAt), ...redemptionEvents.map((e) => e.receivedAt)];
-  const earliest = allDates.length ? new Date(Math.min(...allDates)) : null;
-  const latest = allDates.length ? new Date(Math.max(...allDates)) : null;
+  const { min: earliest, max: latest } = minMaxDates([
+    ...newMemberEvents.map((e) => e.receivedAt),
+    ...redemptionEvents.map((e) => e.receivedAt),
+  ]);
 
   return {
     site,
-    customers_seeded: customers.filter((c) => c.tier).length,
+    customers_seeded: customersWithTier.length,
     new_members_imported: newMemberEvents.length,
     redemptions_imported: redemptionEvents.length,
     earliest_date: earliest ? earliest.toISOString().slice(0, 10) : null,
