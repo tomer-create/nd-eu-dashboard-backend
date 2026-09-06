@@ -190,10 +190,29 @@ function parseRedemptionsCsv(buffer, tierByEmail) {
 //    itself was fine; only the summary calculation crashed, taking the
 //    success response down with it. Fixed with a plain loop (minMaxDates
 //    below) that has no size limit.
+// 3. Once #1 and #2 were fixed, ND.COM's real Customers export surfaced a
+//    THIRD size-dependent bug: "ON CONFLICT DO UPDATE command cannot affect
+//    row a second time" — a hard Postgres rule, not something batching can
+//    work around by retrying. It fires when a single multi-row INSERT ...
+//    ON CONFLICT DO UPDATE statement contains two rows with the same
+//    conflict key (here, the same (site, email) pair) — Postgres refuses to
+//    update the same row twice within one statement, even though upserting
+//    the same row twice across SEPARATE statements (the old one-row-at-a-
+//    time code) is perfectly fine. ND.COM's export apparently has duplicate
+//    email rows somewhere in its ~48,500 customers (plausible at that size —
+//    EU/IL's much smaller exports never happened to collide within a
+//    500-row batch). Fixed by deduplicating customers by email BEFORE
+//    batching (dedupedCustomers below), keeping the LAST occurrence in the
+//    file — this matches both `tierByEmail` above (a Map already collapses
+//    duplicates the same way) and the old row-by-row behavior, where a
+//    later duplicate row's own INSERT ... ON CONFLICT DO UPDATE would
+//    simply overwrite an earlier one's tier value.
 //
-// Both fixes are pure performance/robustness changes — the data written and
-// the summary numbers returned are identical to before, just computed in a
-// way that scales to ND.COM's larger export.
+// All three fixes are pure performance/robustness changes — the data
+// written and the summary numbers returned are identical to before (modulo
+// #3, which now reports the true count of unique customers actually
+// written, rather than a raw CSV row count that could double-count a
+// duplicate), just computed in a way that scales to ND.COM's larger export.
 
 const BATCH_SIZE = 500;
 
@@ -251,6 +270,9 @@ async function importYotpoHistory(pool, site, { customersBuffer, redemptionsBuff
   const tierByEmail = new Map(customers.map((c) => [c.email, c.tier]));
   const redemptionEvents = parseRedemptionsCsv(redemptionsBuffer, tierByEmail);
   const customersWithTier = customers.filter((c) => c.tier); // nothing useful to seed without a tier value
+  // Dedupe by email before the batched upsert below — see fix #3 above.
+  // Last occurrence in the file wins.
+  const dedupedCustomers = [...new Map(customersWithTier.map((c) => [c.email, c])).values()];
 
   const client = await pool.connect();
   try {
@@ -264,8 +286,9 @@ async function importYotpoHistory(pool, site, { customersBuffer, redemptionsBuff
 
     // Seed/update yotpo_customers from the Customers export — this is what
     // both the redemption-tier approximation and future real webhook
-    // tier_from lookups read from. Batched (see file header, fix #1).
-    for (const batch of chunkArray(customersWithTier, BATCH_SIZE)) {
+    // tier_from lookups read from. Batched (see file header, fix #1) and
+    // deduplicated (fix #3).
+    for (const batch of chunkArray(dedupedCustomers, BATCH_SIZE)) {
       const valueTuples = [];
       const params = [site];
       for (const c of batch) {
@@ -316,7 +339,7 @@ async function importYotpoHistory(pool, site, { customersBuffer, redemptionsBuff
 
   return {
     site,
-    customers_seeded: customersWithTier.length,
+    customers_seeded: dedupedCustomers.length,
     new_members_imported: newMemberEvents.length,
     redemptions_imported: redemptionEvents.length,
     earliest_date: earliest ? earliest.toISOString().slice(0, 10) : null,
