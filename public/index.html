@@ -1672,7 +1672,7 @@ function yotpoPctChange(curr, prev) {
   return (curr - prev) / Math.abs(prev);
 }
 
-async function fetchYotpoSummaryForSite(site, start, end) {
+async function fetchYotpoSummaryForSite(site, start, end, attempt = 0) {
   const url = `${BACKEND_URL}/api/yotpo/summary?site=${encodeURIComponent(site)}&start=${start}&end=${end}`;
   const res = await fetch(url);
   // Read as text first, not res.json() directly — an error response isn't
@@ -1687,8 +1687,20 @@ async function fetchYotpoSummaryForSite(site, start, end) {
   try {
     body = JSON.parse(rawText);
   } catch {
+    // A non-JSON body here (confirmed 2026-09-06, matching this exact error
+    // reported right as a new deploy landed) is Render's own generic
+    // placeholder/error page for the ~10-30 seconds this single-instance
+    // service takes to swap over during a deploy — not a real API failure,
+    // and it clears itself well within a minute. Retry a couple of times
+    // with a short delay before surfacing anything, so pasting a new file
+    // and immediately reloading the dashboard doesn't produce a scary
+    // console error for something this transient.
+    if (attempt < 2) {
+      await new Promise((r) => setTimeout(r, 4000));
+      return fetchYotpoSummaryForSite(site, start, end, attempt + 1);
+    }
     throw new Error(
-      `Backend returned a non-JSON response (status ${res.status}): ${rawText.slice(0, 150)}`
+      `Backend returned a non-JSON response (status ${res.status}) after ${attempt + 1} attempts, ~${(attempt + 1) * 4}s apart — if a file was just pasted/deployed, wait a bit and retry: ${rawText.slice(0, 150)}`
     );
   }
   if (!res.ok) throw new Error(body.error || `Backend returned ${res.status}`);
