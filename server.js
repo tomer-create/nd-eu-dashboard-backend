@@ -2,11 +2,11 @@ require('dotenv').config();
 const path = require('path');
 const express = require('express');
 const cors = require('cors');
-const { fetchOrders, fetchOrdersLight, fetchSalesReversals, fetchCostOfGoodsSold, fetchTopReturnsByProduct, fetchCountryBreakdown, fetchSalesSummary, fetchProductRetailPrices, getAuthorizeUrl, exchangeCodeForToken } = require('./src/shopify');
+const { fetchOrders, fetchOrdersLight, fetchOrdersForTierRevenue, fetchSalesReversals, fetchCostOfGoodsSold, fetchTopReturnsByProduct, fetchCountryBreakdown, fetchSalesSummary, fetchProductRetailPrices, getAuthorizeUrl, exchangeCodeForToken } = require('./src/shopify');
 const { aggregate } = require('./src/aggregate');
 const { fetchChannelPerformance } = require('./src/triplewhale');
 const { fetchPnlSheetChannels, fetchPnlSheetOtherCosts } = require('./src/googlesheets');
-const { VALID_SITES: YOTPO_VALID_SITES, ensureYotpoSchema, recordYotpoEvent, getYotpoSummary, getPool: getYotpoPool } = require('./src/yotpo');
+const { VALID_SITES: YOTPO_VALID_SITES, ensureYotpoSchema, recordYotpoEvent, getYotpoSummary, getYotpoCustomerTierMap, getPool: getYotpoPool } = require('./src/yotpo');
 const { registerYotpoWebhooksForSite } = require('./src/yotpo-setup');
 const { importYotpoHistory } = require('./src/yotpo-import');
 const multer = require('multer');
@@ -683,15 +683,90 @@ app.post('/api/yotpo/webhook/:site', async (req, res) => {
   }
 });
 
-// GET /api/yotpo/summary?site=com&start=2026-09-01&end=2026-09-06
+// Joins Shopify order revenue against Yotpo tier membership for Section 8's
+// Net Sales-by-tier column — added 2026-09-06 per Tomer ("add to the Yotpo
+// Loyalty another column with the Revenue of the tier on Net sales").
+//
+// Deliberately NOT folded into getYotpoSummary (src/yotpo.js) — that
+// function is a pure DB read with no Shopify dependency, and this needs a
+// live Shopify order fetch (fetchOrdersForTierRevenue), which is real extra
+// API cost per call. Gated behind the `include_revenue` query param below so
+// the YoY/MoM fetches the frontend already makes for this same endpoint
+// (see fetchYotpoSummaryForSite in public/index.html) don't ALSO pay for a
+// Shopify order fetch every time — only the current-period fetch requests
+// it, since Tomer only asked for one column, not YoY/MoM on it too.
+//
+// Only counts orders whose customer email matches a KNOWN yotpo_customers
+// row for this site (see getYotpoCustomerTierMap's own comment for why a
+// non-member order must be excluded entirely rather than folded into
+// BRONZE). Net Sales per order = sum(lineItems.originalTotalSet) -
+// totalDiscountsSet — the exact same definition src/aggregate.js uses
+// store-wide, just computed per order here so it can be split by tier.
+async function computeYotpoTierRevenue(site, start, end) {
+  const [orders, tierByEmail] = await Promise.all([
+    fetchOrdersForTierRevenue(site, start, end),
+    getYotpoCustomerTierMap(site),
+  ]);
+
+  const revenueByTier = new Map();
+  for (const order of orders) {
+    const email = order.customer && order.customer.email ? order.customer.email.toLowerCase() : null;
+    if (!email) continue; // guest checkout / no email on the order at all
+    const tier = tierByEmail.get(email);
+    if (!tier) continue; // not a known Yotpo member — excluded, not folded into BRONZE
+
+    const gross = order.lineItems.edges.reduce(
+      (sum, e) => sum + Number((e.node.originalTotalSet && e.node.originalTotalSet.shopMoney && e.node.originalTotalSet.shopMoney.amount) || 0),
+      0
+    );
+    const discount = Number((order.totalDiscountsSet && order.totalDiscountsSet.shopMoney && order.totalDiscountsSet.shopMoney.amount) || 0);
+    const netSales = gross - discount;
+
+    revenueByTier.set(tier, (revenueByTier.get(tier) || 0) + netSales);
+  }
+  return revenueByTier;
+}
+
+// GET /api/yotpo/summary?site=com&start=2026-09-01&end=2026-09-06[&include_revenue=1]
 app.get('/api/yotpo/summary', async (req, res) => {
-  const { site, start, end } = req.query;
+  const { site, start, end, include_revenue } = req.query;
   if (!YOTPO_VALID_SITES.includes(site)) {
     return res.status(400).json({ error: `Unknown or missing site "${site}"` });
   }
   try {
     const summary = await getYotpoSummary(site, start, end);
-    res.json(summary || { site, start, end, no_data: true });
+    if (!summary) return res.json({ site, start, end, no_data: true });
+
+    if (include_revenue === '1' && !summary.no_data) {
+      try {
+        const revenueByTier = await computeYotpoTierRevenue(site, start, end);
+        const seenTiers = new Set();
+        summary.redemptions_by_tier = summary.redemptions_by_tier.map((r) => {
+          seenTiers.add(r.tier);
+          return { ...r, net_sales: revenueByTier.get(r.tier) || 0 };
+        });
+        // A tier can have Net Sales this period with zero redemptions (a
+        // member who bought something but didn't redeem points) — don't let
+        // that revenue silently vanish just because it has no row yet.
+        for (const [tier, netSales] of revenueByTier.entries()) {
+          if (!seenTiers.has(tier)) {
+            summary.redemptions_by_tier.push({ tier, redemptions: 0, points_used: 0, points_value: 0, net_sales: netSales });
+          }
+        }
+        summary.revenue_included = true;
+      } catch (err) {
+        // Most likely cause right now: the store's Shopify access token
+        // predates the read_customers scope (added 2026-09-06 alongside
+        // this feature) and needs re-authorizing — see src/shopify.js's
+        // SCOPES comment. Degrade gracefully: the rest of Section 8 (which
+        // has nothing to do with Shopify) still renders normally, just
+        // without net_sales on each row.
+        console.error(`yotpo tier revenue (site=${site}) failed:`, err.message);
+        summary.revenue_error = err.message;
+      }
+    }
+
+    res.json(summary);
   } catch (err) {
     console.error(err);
     res.status(err.status || 502).json({ error: err.message });
