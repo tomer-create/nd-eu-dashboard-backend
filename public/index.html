@@ -1658,19 +1658,30 @@ async function fetchYotpoSummaryForSite(site, start, end) {
 }
 
 // Sums per-site summaries into one combined view for the "All Sites (USD)"
-// tab — no currency conversion needed here (points/redemption counts
-// aren't a currency figure the way Section 1/4/7's dollar totals are).
+// tab. Redemption counts and points aren't a currency figure, so those sum
+// directly across sites same as before — but points_value (added 2026-09-06,
+// each site's own points redeemed converted to that site's local currency —
+// see POINTS_PER_CURRENCY_UNIT in src/yotpo.js) IS a monetary figure, so it
+// needs the same USD conversion every other Section 1/4/7 dollar total gets
+// here (see FX_TO_USD above) before being summed across com/eu/il. That's
+// why each entry now needs to carry which site it came from (`_site`, set by
+// the two call sites in renderYotpoLoyalty below) — this function alone
+// can't otherwise tell a EUR points_value from a USD one.
 function combineYotpoSummaries(perSite) {
   const collected = perSite.filter((s) => s && !s.no_data);
   if (!collected.length) return { no_data: true };
   const newMembers = collected.reduce((sum, s) => sum + (s.new_members || 0), 0);
   const tierMap = new Map();
-  collected.forEach((s) => (s.redemptions_by_tier || []).forEach((r) => {
-    const cur = tierMap.get(r.tier) || { tier: r.tier, redemptions: 0, points_used: 0 };
-    cur.redemptions += r.redemptions;
-    cur.points_used += r.points_used;
-    tierMap.set(r.tier, cur);
-  }));
+  collected.forEach((s) => {
+    const fx = FX_TO_USD[s._site] != null ? FX_TO_USD[s._site] : 1;
+    (s.redemptions_by_tier || []).forEach((r) => {
+      const cur = tierMap.get(r.tier) || { tier: r.tier, redemptions: 0, points_used: 0, points_value: 0 };
+      cur.redemptions += r.redemptions;
+      cur.points_used += r.points_used;
+      cur.points_value += (r.points_value || 0) * fx;
+      tierMap.set(r.tier, cur);
+    });
+  });
   const movementMap = new Map();
   collected.forEach((s) => (s.tier_movement || []).forEach((m) => {
     const key = m.from + '→' + m.to;
@@ -1696,8 +1707,17 @@ async function renderYotpoLoyalty() {
     const sites = Object.keys(DATA.sites);
     const keys = sites.map((s) => s + '|' + state.month);
     const requestedMonth = state.month;
+    // Tags each cached summary with which site it came from (`_site`) so
+    // combineYotpoSummaries can look up the right FX_TO_USD rate for the new
+    // points_value column below — the cache itself is keyed by "site|month"
+    // and stores the raw backend response, which has no site field of its
+    // own (see fetchYotpoSummaryForSite).
+    const taggedEntries = () => keys.map((k, i) => {
+      const v = yotpoCache[k];
+      return v && v !== 'error' ? { ...v, _site: sites[i] } : null;
+    });
     if (keys.every((k) => yotpoCache[k] && yotpoCache[k] !== 'loading')) {
-      renderYotpoSection(el, combineYotpoSummaries(keys.map((k) => (yotpoCache[k] === 'error' ? null : yotpoCache[k]))), true);
+      renderYotpoSection(el, combineYotpoSummaries(taggedEntries()), true);
     } else {
       el.innerHTML = '<div class="placeholder">Loading Yotpo Loyalty data…</div>';
       await Promise.all(sites.map(async (s, i) => {
@@ -1714,7 +1734,7 @@ async function renderYotpoLoyalty() {
       // Only repaint if the user hasn't since navigated away from "All
       // Sites" or switched months while this was in flight.
       if (state.site === 'all' && state.month === requestedMonth) {
-        renderYotpoSection(el, combineYotpoSummaries(keys.map((k) => (yotpoCache[k] === 'error' ? null : yotpoCache[k]))), true);
+        renderYotpoSection(el, combineYotpoSummaries(taggedEntries()), true);
       }
     }
     return;
@@ -1751,11 +1771,21 @@ function renderYotpoSection(el, data, combined) {
     </div>`;
     return;
   }
+  // Value column — added 2026-09-06 per Tomer: 10 Yotpo points = 1 unit of
+  // local currency across all 3 sites (US $15=150pts…$30=300pts; EU same
+  // point costs in €; IL ₪25=250pts…₪50=500pts all reduce to the same 10:1
+  // ratio — see POINTS_PER_CURRENCY_UNIT in src/yotpo.js). The backend
+  // already returns points_value in the site's own local currency for a
+  // single-site tab; for "All Sites (USD)" combineYotpoSummaries above
+  // converts each site's value to USD first (same FX_TO_USD rates as every
+  // other dollar figure on this dashboard), so sym() here is always the
+  // right symbol for whatever's actually in points_value.
   const tierRows = (data.redemptions_by_tier || []).map(r => `<tr>
       <td>${r.tier}</td>
       <td>${r.redemptions.toLocaleString('en-US')}</td>
       <td>${r.points_used.toLocaleString('en-US')}</td>
-    </tr>`).join('') || '<tr><td colspan="3" style="color:var(--text-muted)">No redemptions in this period</td></tr>';
+      <td>${sym()}${(r.points_value || 0).toLocaleString('en-US', { maximumFractionDigits: 0 })}</td>
+    </tr>`).join('') || '<tr><td colspan="4" style="color:var(--text-muted)">No redemptions in this period</td></tr>';
   const movementRows = (data.tier_movement || []).map(m => `<tr>
       <td>${m.from} → ${m.to}</td>
       <td>${m.count.toLocaleString('en-US')}</td>
@@ -1769,7 +1799,7 @@ function renderYotpoSection(el, data, combined) {
     </div>
     <div style="font-size:12.5px;font-weight:600;margin:4px 0 6px">Points redeemed by tier</div>
     <table class="dtable">
-      <thead><tr><th style="text-align:left">Tier</th><th>Redemptions</th><th>Points used</th></tr></thead>
+      <thead><tr><th style="text-align:left">Tier</th><th>Redemptions</th><th>Points used</th><th>Value (${sym()})</th></tr></thead>
       <tbody>${tierRows}</tbody>
     </table>
     <div style="font-size:12.5px;font-weight:600;margin:16px 0 6px">Movement between tiers</div>
@@ -1777,7 +1807,7 @@ function renderYotpoSection(el, data, combined) {
       <thead><tr><th style="text-align:left">Tier change</th><th>Customers</th></tr></thead>
       <tbody>${movementRows}</tbody>
     </table>
-    <div style="margin-top:10px;font-size:11px;color:var(--text-muted)">From Yotpo webhook events accumulated since ${data.collecting_since ? new Date(data.collecting_since).toLocaleDateString('en-US') : '—'} — no historical backfill is possible, so periods before that aren’t shown here.${partialNote}</div>`;
+    <div style="margin-top:10px;font-size:11px;color:var(--text-muted)">From Yotpo webhook events accumulated since ${data.collecting_since ? new Date(data.collecting_since).toLocaleDateString('en-US') : '—'} — no historical backfill is possible, so periods before that aren’t shown here. Redemptions with no resolvable tier are grouped under BRONZE. "Movement between tiers" only reflects real tier-change webhook events (not backfilled) — an empty table here means no customer has actually changed tiers since collection started, not a missing feature.${partialNote}</div>`;
 }
 
 /* ---------------- Section 2: Top Selling Products (live from Shopify where available) ---------------- */
