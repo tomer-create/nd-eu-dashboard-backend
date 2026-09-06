@@ -1677,20 +1677,39 @@ function yotpoPctChange(curr, prev) {
   return (curr - prev) / Math.abs(prev);
 }
 
-// Retry budget for the deploy-window gap (see comment below). Measured
-// against real deploys on 2026-09-06: three back-to-back deploys took 33s,
-// 23s, and 27s respectively from "Deploying..." to "Your service is live".
-// The original budget here (2 retries, 4s apart — ~8s of real wait) was
-// well short of that, so the exact same "non-JSON after 3 attempts" error
-// kept recurring on every deploy even though the retry code was working
-// exactly as designed — it just gave up before the gap closed. Widened to
-// 8 retries at 5s apart (~40s of real wait) so it comfortably outlasts a
-// normal single-instance restart with margin to spare.
-const YOTPO_FETCH_MAX_RETRIES = 8;
+// Retry budget for the deploy-window gap (see comment below). This has been
+// widened twice now on 2026-09-06, and both times the cause was the same
+// pattern, just longer: a SINGLE deploy takes ~23-35s to go live, but when
+// two files are pasted into GitHub within moments of each other (e.g.
+// yotpo.js then index.html, ~30s apart — confirmed from Render's deploy log
+// for exactly this incident: deploy #1 ran 14:05:27→14:05:50, deploy #2
+// started at 14:05:56, only 6s after #1 finished, and ran until 14:06:25),
+// the two restart windows back onto each other with almost no gap, so the
+// combined outage the browser sees is close to DOUBLE a single deploy's
+// downtime (~58s in that incident) — comfortably past the previous 40s
+// budget (8 retries × 5s), which is exactly why it kept exhausting even
+// though nothing was actually broken. Widened again to 16 retries × 5s
+// (~80s of real wait) — comfortably covers 2 stacked deploys with real
+// margin, and gets close on 3. If this recurs a third time, the fix isn't
+// another number bump — it's either accepting the occasional long wait, or
+// pasting files ~30s apart so each deploy's restart clears before the next
+// one starts (avoids the wait entirely, doesn't require any code change).
+const YOTPO_FETCH_MAX_RETRIES = 16;
 const YOTPO_FETCH_RETRY_DELAY_MS = 5000;
 
-async function fetchYotpoSummaryForSite(site, start, end, attempt = 0) {
-  const url = `${BACKEND_URL}/api/yotpo/summary?site=${encodeURIComponent(site)}&start=${start}&end=${end}`;
+// `includeRevenue` (added 2026-09-06, per Tomer: "add to the Yotpo Loyalty
+// another column with the Revenue of the tier on Net sales") tells the
+// backend to also join Shopify order revenue against tier membership for
+// this call — real extra Shopify API cost per request (see
+// computeYotpoTierRevenue in server.js), so callers should only pass true
+// for the CURRENT period fetch, never for the YoY/MoM comparison fetches
+// below (which don't render a net_sales column and would just waste the
+// Shopify call). Requires the backend's Shopify token to have the
+// read_customers scope — until that's re-authorized per store, the response
+// still comes back fine, just without net_sales on each row (see
+// revenue_error handling in renderYotpoSection).
+async function fetchYotpoSummaryForSite(site, start, end, attempt = 0, includeRevenue = false) {
+  const url = `${BACKEND_URL}/api/yotpo/summary?site=${encodeURIComponent(site)}&start=${start}&end=${end}${includeRevenue ? '&include_revenue=1' : ''}`;
   const res = await fetch(url);
   // Read as text first, not res.json() directly — an error response isn't
   // guaranteed to be JSON (a Render deploy-window gateway page, a proxy
@@ -1714,7 +1733,7 @@ async function fetchYotpoSummaryForSite(site, start, end, attempt = 0) {
     // error for something this transient.
     if (attempt < YOTPO_FETCH_MAX_RETRIES) {
       await new Promise((r) => setTimeout(r, YOTPO_FETCH_RETRY_DELAY_MS));
-      return fetchYotpoSummaryForSite(site, start, end, attempt + 1);
+      return fetchYotpoSummaryForSite(site, start, end, attempt + 1, includeRevenue);
     }
     const totalWaitSeconds = (YOTPO_FETCH_MAX_RETRIES * YOTPO_FETCH_RETRY_DELAY_MS) / 1000;
     throw new Error(
@@ -1739,14 +1758,23 @@ function combineYotpoSummaries(perSite) {
   const collected = perSite.filter((s) => s && !s.no_data);
   if (!collected.length) return { no_data: true };
   const newMembers = collected.reduce((sum, s) => sum + (s.new_members || 0), 0);
+  // net_sales (added 2026-09-06) is a monetary figure in each site's own
+  // currency, same as points_value — needs the same per-site FX_TO_USD
+  // conversion before summing across com/eu/il on the "All Sites (USD)" tab.
+  // A site whose response has no net_sales yet (revenue not requested, or
+  // revenue_error — see fetchYotpoSummaryForSite/renderYotpoSection) simply
+  // contributes 0 here via `|| 0`, same graceful-degradation as elsewhere.
+  const anyRevenueIncluded = collected.some((s) => s.revenue_included);
+  const anyRevenueError = collected.some((s) => s.revenue_error);
   const tierMap = new Map();
   collected.forEach((s) => {
     const fx = FX_TO_USD[s._site] != null ? FX_TO_USD[s._site] : 1;
     (s.redemptions_by_tier || []).forEach((r) => {
-      const cur = tierMap.get(r.tier) || { tier: r.tier, redemptions: 0, points_used: 0, points_value: 0 };
+      const cur = tierMap.get(r.tier) || { tier: r.tier, redemptions: 0, points_used: 0, points_value: 0, net_sales: 0 };
       cur.redemptions += r.redemptions;
       cur.points_used += r.points_used;
       cur.points_value += (r.points_value || 0) * fx;
+      cur.net_sales += (r.net_sales || 0) * fx;
       tierMap.set(r.tier, cur);
     });
   });
@@ -1765,6 +1793,8 @@ function combineYotpoSummaries(perSite) {
     new_members: newMembers,
     redemptions_by_tier: Array.from(tierMap.values()).sort((a, b) => b.points_used - a.points_used),
     tier_movement: Array.from(movementMap.values()).sort((a, b) => b.count - a.count),
+    revenue_included: anyRevenueIncluded,
+    revenue_error: anyRevenueError ? 'One or more sites could not load Net Sales by tier.' : null,
   };
 }
 
@@ -1790,12 +1820,15 @@ async function renderYotpoLoyalty() {
       const v = yotpoCache[k];
       return v && v !== 'error' && v !== 'loading' ? { ...v, _site: sites[i] } : null;
     });
-    const fetchAllFor = (ks, range) => Promise.all(sites.map(async (s, i) => {
+    // `includeRevenue` (default false) is passed true only by the current-
+    // period call below — see fetchYotpoSummaryForSite's own comment for why
+    // YoY/MoM never request it.
+    const fetchAllFor = (ks, range, includeRevenue = false) => Promise.all(sites.map(async (s, i) => {
       const key = ks[i];
       if (yotpoCache[key] && yotpoCache[key] !== 'loading') return;
       yotpoCache[key] = 'loading';
       try {
-        yotpoCache[key] = await fetchYotpoSummaryForSite(s, range.start, range.end);
+        yotpoCache[key] = await fetchYotpoSummaryForSite(s, range.start, range.end, 0, includeRevenue);
       } catch (err) {
         console.error('yotpo summary fetch failed for', s, err);
         yotpoCache[key] = 'error';
@@ -1814,7 +1847,7 @@ async function renderYotpoLoyalty() {
     } else {
       el.innerHTML = '<div class="placeholder">Loading Yotpo Loyalty data…</div>';
       await Promise.all([
-        fetchAllFor(keys, { start, end }),
+        fetchAllFor(keys, { start, end }, true),
         fetchAllFor(yoyKeys, yoyRange),
         fetchAllFor(momKeys, momRange),
       ]);
@@ -1849,7 +1882,7 @@ async function renderYotpoLoyalty() {
   const momRange = yotpoShiftDateRange(start, end, { months: 1 });
   const requestedSite = state.site, requestedMonth = state.month;
   await Promise.all([
-    fetchYotpoSummaryForSite(state.site, start, end)
+    fetchYotpoSummaryForSite(state.site, start, end, 0, true)
       .then((d) => { yotpoCache[key] = d; })
       .catch((err) => { console.error('yotpo summary fetch failed:', err); yotpoCache[key] = 'error'; }),
     fetchYotpoSummaryForSite(state.site, yoyRange.start, yoyRange.end)
@@ -1919,7 +1952,7 @@ function renderYotpoSection(el, data, yoyData, momData, combined) {
   // new this period, or the comparison fetch itself failed/had no data)
   // shows "—" rather than a misleading ±100%/undefined.
   const rows = allTiers.map(tier => {
-    const cur = curMap.get(tier) || { redemptions: 0, points_used: 0, points_value: 0 };
+    const cur = curMap.get(tier) || { redemptions: 0, points_used: 0, points_value: 0, net_sales: 0 };
     const yoyRow = yoyMap.get(tier);
     const momRow = momMap.get(tier);
     return {
@@ -1927,6 +1960,10 @@ function renderYotpoSection(el, data, yoyData, momData, combined) {
       redemptions: cur.redemptions || 0,
       points_used: cur.points_used || 0,
       points_value: cur.points_value || 0,
+      // net_sales (added 2026-09-06) is current-period-only — no YoY/MoM
+      // fetch requests it (see fetchYotpoSummaryForSite), so unlike the
+      // other columns there's no comparison cell for this one.
+      net_sales: cur.net_sales || 0,
       yoy: yoyRow ? yotpoPctChange(cur.points_used || 0, yoyRow.points_used) : null,
       mom: momRow ? yotpoPctChange(cur.points_used || 0, momRow.points_used) : null,
     };
@@ -1936,6 +1973,7 @@ function renderYotpoSection(el, data, yoyData, momData, combined) {
       <td>${r.redemptions.toLocaleString('en-US')}</td>
       <td>${r.points_used.toLocaleString('en-US')}</td>
       <td>${sym()}${r.points_value.toLocaleString('en-US', { maximumFractionDigits: 0 })}</td>
+      <td>${data.revenue_included ? sym() + r.net_sales.toLocaleString('en-US', { maximumFractionDigits: 0 }) : '<span style="color:var(--text-muted)">—</span>'}</td>
       <td>${yoyCell(r.yoy)}</td>
       <td>${yoyCell(r.mom)}</td>
     </tr>`).join('');
@@ -1949,6 +1987,7 @@ function renderYotpoSection(el, data, yoyData, momData, combined) {
   const totalRedemptions = rows.reduce((s, r) => s + r.redemptions, 0);
   const totalPoints = rows.reduce((s, r) => s + r.points_used, 0);
   const totalValue = rows.reduce((s, r) => s + r.points_value, 0);
+  const totalNetSales = rows.reduce((s, r) => s + r.net_sales, 0);
   const yoyTotalPoints = (yoyData && yoyData.redemptions_by_tier)
     ? yoyData.redemptions_by_tier.reduce((s, r) => s + (r.points_used || 0), 0)
     : null;
@@ -1962,6 +2001,7 @@ function renderYotpoSection(el, data, yoyData, momData, combined) {
       <td>${totalRedemptions.toLocaleString('en-US')}</td>
       <td>${totalPoints.toLocaleString('en-US')}</td>
       <td>${sym()}${totalValue.toLocaleString('en-US', { maximumFractionDigits: 0 })}</td>
+      <td>${data.revenue_included ? sym() + totalNetSales.toLocaleString('en-US', { maximumFractionDigits: 0 }) : '<span style="color:var(--text-muted)">—</span>'}</td>
       <td>${yoyCell(totalYoy)}</td>
       <td>${yoyCell(totalMom)}</td>
     </tr>`;
@@ -1992,11 +2032,11 @@ function renderYotpoSection(el, data, yoyData, momData, combined) {
     </div>
     <div style="font-size:12.5px;font-weight:600;margin:4px 0 6px">Points redeemed by tier</div>
     <table class="dtable">
-      <thead><tr><th style="text-align:left">Tier</th><th>Redeemers</th><th>Points used</th><th>Value (${sym()})</th><th>YoY</th><th>MoM</th></tr></thead>
+      <thead><tr><th style="text-align:left">Tier</th><th>Redeemers</th><th>Points used</th><th>Value (${sym()})</th><th>Net Sales (${sym()})</th><th>YoY</th><th>MoM</th></tr></thead>
       <tbody>${tierRows}${totalRow}</tbody>
     </table>
     ${movementSection}
-    <div style="margin-top:10px;font-size:11px;color:var(--text-muted)">From Yotpo webhook events accumulated since ${data.collecting_since ? new Date(data.collecting_since).toLocaleDateString('en-US') : '—'} — no historical backfill is possible, so periods before that aren’t shown here. Redemptions with no resolvable tier are grouped under BRONZE. YoY/MoM compare points redeemed against the same date range one year/month earlier. "Movement between tiers" only reflects real tier-change webhook events (never backfilled) — it's hidden here rather than shown empty when no customer has changed tiers in this period, which is expected in the early days after go-live.${partialNote}</div>`;
+    <div style="margin-top:10px;font-size:11px;color:var(--text-muted)">From Yotpo webhook events accumulated since ${data.collecting_since ? new Date(data.collecting_since).toLocaleDateString('en-US') : '—'} — no historical backfill is possible, so periods before that aren’t shown here. Redemptions with no resolvable tier are grouped under BRONZE. YoY/MoM compare points redeemed against the same date range one year/month earlier. "Movement between tiers" only reflects real tier-change webhook events (never backfilled) — it's hidden here rather than shown empty when no customer has changed tiers in this period, which is expected in the early days after go-live. Net Sales is each tier's Shopify order revenue (gross − discounts, current period only — no YoY/MoM yet) from customers we can match to that tier by email; guest/non-member orders aren't included in any tier's figure, so this total won't tie to the store's overall Net Sales.${data.revenue_error ? ' Net Sales isn’t loading right now (backend needs the Shopify read_customers scope re-authorized for this store) — showing “—” until that’s done.' : ''}${partialNote}</div>`;
 }
 
 /* ---------------- Section 2: Top Selling Products (live from Shopify where available) ---------------- */
