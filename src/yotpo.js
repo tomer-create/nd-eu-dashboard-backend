@@ -58,6 +58,69 @@
 
 const { Pool } = require('pg');
 
+// Tier-ID normalization constants — hoisted to module scope 2026-09-06 (were
+// previously local to getYotpoSummary) so normalizeCustomerTier() below can
+// share them for the new tier-revenue feature. See getYotpoSummary's
+// redemptionsRes query for the original commentary on where these came from:
+// IL's mapping is an inference (never confirmed against Yotpo's own admin),
+// COM's was explicitly confirmed by Tomer.
+const IL_TIER_ID_BRONZE = '23668';
+const IL_TIER_ID_GLAM = '23667';
+const COM_TIER_ID_BRONZE = '19818';
+const COM_TIER_ID_GLOW = '19819';
+const COM_TIER_ID_GLAM = '19820';
+
+// Normalizes one yotpo_customers.current_tier value to a canonical tier name
+// (BRONZE/GLOW/GLAM), applying the EXACT SAME rules as the CASE expression in
+// getYotpoSummary's redemptionsRes query below — added 2026-09-06 for the
+// Net Sales-by-tier feature (see computeYotpoTierRevenue in server.js), which
+// needs this same normalization done in JS rather than SQL because the join
+// against Shopify order data happens after the DB query, not inside it.
+// KEEP THESE TWO IN SYNC if the ID mappings or fallback rules ever change.
+//
+// current_tier can hold a raw numeric ID (from the historical CSV import,
+// which stores whatever the "vip_tier"/"tier" column literally said) OR a
+// clean name (from live webhook events via extractTierName) — same
+// dual-format issue tier_at_event has in yotpo_events, same fix here.
+function normalizeCustomerTier(site, rawTier) {
+  if (site === 'il') {
+    if (rawTier === IL_TIER_ID_BRONZE) return 'BRONZE';
+    if (rawTier === IL_TIER_ID_GLAM) return 'GLAM';
+  }
+  if (site === 'com') {
+    if (rawTier === COM_TIER_ID_BRONZE) return 'BRONZE';
+    if (rawTier === COM_TIER_ID_GLOW) return 'GLOW';
+    if (rawTier === COM_TIER_ID_GLAM) return 'GLAM';
+  }
+  if (!rawTier || rawTier === 'Unknown') return 'BRONZE';
+  if (site === 'com' && !['BRONZE', 'GLOW', 'GLAM'].includes(String(rawTier).toUpperCase())) {
+    return 'BRONZE';
+  }
+  return String(rawTier).toUpperCase();
+}
+
+// Builds a Map<lowercased email, canonical tier name> of every KNOWN Yotpo
+// loyalty member for a site — added 2026-09-06 for the Net Sales-by-tier
+// feature. Deliberately only includes customers with a real yotpo_customers
+// row: an email with no row here is a non-member (guest checkout, or a
+// customer who's never triggered a new_member/tier_change webhook or
+// appeared in the historical import), and the caller must exclude those
+// entirely from tier revenue rather than folding them into BRONZE — folding
+// every non-member order into BRONZE would badly inflate it with ordinary
+// store revenue that has nothing to do with the loyalty program.
+async function getYotpoCustomerTierMap(site) {
+  const p = getPool();
+  if (!p) return new Map();
+  await ensureYotpoSchema();
+  const { rows } = await p.query('SELECT email, current_tier FROM yotpo_customers WHERE site = $1', [site]);
+  const tierByEmail = new Map();
+  for (const r of rows) {
+    if (!r.email) continue;
+    tierByEmail.set(r.email.toLowerCase(), normalizeCustomerTier(site, r.current_tier));
+  }
+  return tierByEmail;
+}
+
 let pool = null;
 function getPool() {
   if (!process.env.DATABASE_URL) return null;
@@ -265,32 +328,11 @@ async function getYotpoSummary(site, start, end) {
     [site, start, end]
   );
 
-  // IL-specific tier-ID normalization — added 2026-09-06 after Tomer's first
-  // real IL Customers/Redemptions CSV import surfaced raw internal Yotpo
-  // tier IDs ("23667", "23668") in the tier field instead of a name string
-  // like COM/EU's account returns (BRONZE/GLOW/GLAM). ND.IL only has 2 real
-  // tiers (Bronze, Glam — per Tomer, no Glow there), so this maps those 2 IDs
-  // to their names. THE ID-TO-NAME DIRECTION BELOW IS AN INFERENCE, NOT
-  // CONFIRMED: guessed from the same pattern COM/EU show (Bronze always has
-  // far higher redemption volume than Glam) — IL's "23668" had ~2x the
-  // redemptions and ~4x the points of "23667" in the CSV Tomer imported, so
-  // 23668 is mapped to BRONZE and 23667 to GLAM. Verify against Yotpo's own
-  // Loyalty admin (Program Settings → tier list usually shows each tier's ID
-  // next to its name) and tell me if this needs flipping — it's a one-line
-  // fix here if so. Applied generically (not just to backfilled rows) so a
-  // future live webhook event for IL is normalized the same way, in case
-  // IL's account also reports tier as a raw ID rather than a name there.
-  const IL_TIER_ID_BRONZE = '23668';
-  const IL_TIER_ID_GLAM = '23667';
-
-  // ND.COM tier-ID normalization — added 2026-09-06. Same underlying issue
-  // as IL above (Yotpo reporting a raw internal tier ID instead of a name),
-  // but this time Tomer confirmed the exact mapping directly against
-  // Yotpo's own admin, so these are CONFIRMED, not an inference like IL's
-  // above: 19818=Bronze, 19819=Glow, 19820=Glam.
-  const COM_TIER_ID_BRONZE = '19818';
-  const COM_TIER_ID_GLOW = '19819';
-  const COM_TIER_ID_GLAM = '19820';
+  // IL/COM tier-ID normalization constants (IL_TIER_ID_BRONZE, IL_TIER_ID_GLAM,
+  // COM_TIER_ID_BRONZE/GLOW/GLAM) moved to module scope 2026-09-06 — see the
+  // block near the top of this file (above normalizeCustomerTier) for the
+  // full history/commentary on where these values came from. Still used
+  // below exactly as before, just no longer redeclared locally here.
 
   // Per Tomer's request (2026-09-06): any redemption whose tier couldn't be
   // resolved (no match in the imported Customers CSV, or a live event for a
@@ -384,5 +426,7 @@ module.exports = {
   ensureYotpoSchema,
   recordYotpoEvent,
   getYotpoSummary,
+  getYotpoCustomerTierMap, // added 2026-09-06 for the Net Sales-by-tier feature (see server.js)
+  normalizeCustomerTier, // exported for the test harness
   classifyTopic, // exported for the test harness
 };
