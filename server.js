@@ -863,7 +863,36 @@ app.get('/admin/yotpo/inspect', async (req, res) => {
       customerLookup = emails.map((e) => foundByEmail.get(e) || { email: e, found: false });
     }
 
-    res.json({ site, start, end, event_type: eventType, distinct_tier_at_event_values: tiers, samples, customer_lookup: customerLookup });
+    // Aggregate-only match-rate check — added so this can be checked WITHOUT
+    // ever putting a real customer email in a URL (lookup_email above is
+    // left in for Tomer's own direct browser use, but shouldn't be
+    // constructed by the assistant itself — no personal data in URL query
+    // strings). Answers the exact open question from the null-tier finding:
+    // of the distinct emails behind this window's events, how many have ANY
+    // row at all in yotpo_customers (regardless of that row's current_tier
+    // value)? A low/zero match rate means these customers were never
+    // matched during the Customers CSV import (a join miss); a high match
+    // rate with tier_at_event still null would instead mean they ARE in
+    // yotpo_customers but with a blank/null current_tier — a different root
+    // cause (the CSV's own tier column was empty for them).
+    const matchRes = await pool.query(
+      `SELECT
+         COUNT(DISTINCT e.email) AS distinct_emails,
+         COUNT(DISTINCT e.email) FILTER (WHERE c.email IS NOT NULL) AS matched_in_yotpo_customers,
+         COUNT(DISTINCT e.email) FILTER (WHERE c.email IS NOT NULL AND c.current_tier IS NOT NULL) AS matched_with_nonnull_tier
+       FROM yotpo_events e
+       LEFT JOIN yotpo_customers c ON c.site = e.site AND c.email = e.email
+       WHERE e.site = $1 AND e.event_type = $2 AND e.received_at >= $3 AND e.received_at < $4 AND e.email IS NOT NULL`,
+      [site, eventType, start, end]
+    );
+    const matchRow = matchRes.rows[0];
+    const customerMatchRate = {
+      distinct_emails: Number(matchRow.distinct_emails),
+      matched_in_yotpo_customers: Number(matchRow.matched_in_yotpo_customers),
+      matched_with_nonnull_tier: Number(matchRow.matched_with_nonnull_tier),
+    };
+
+    res.json({ site, start, end, event_type: eventType, distinct_tier_at_event_values: tiers, samples, customer_lookup: customerLookup, customer_match_rate: customerMatchRate });
   } catch (err) {
     console.error(err);
     res.status(500).json({ error: err.message });
