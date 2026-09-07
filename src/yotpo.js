@@ -389,7 +389,26 @@ async function getYotpoSummary(site, start, end) {
     ]
   );
 
-  const movementRes = await p.query(
+  // tier_movement — fixed 2026-09-07 per Tomer ("hide 19818 → GLOW" on the
+  // dashboard's "Movement between tiers" table). Root cause: this query
+  // never normalized tier_from/tier_to at all, unlike redemptionsRes just
+  // above — a tier_change webhook event that reported the RAW numeric ID
+  // (e.g. ND.COM's "19818", confirmed = BRONZE — see the tier-ID constants
+  // above) in tier_from showed up verbatim as "19818 → GLOW" instead of
+  // resolving to "BRONZE → GLOW" the way every other tier display on this
+  // dashboard does. Reuses normalizeCustomerTier() (already shared with the
+  // Net Sales-by-tier feature — see that function's own comment for why it
+  // must stay in sync with redemptionsRes's CASE expression) instead of
+  // duplicating the ID-mapping a third time as a second SQL CASE. Normalizes
+  // in JS after the raw GROUP BY below, then re-aggregates: two different
+  // raw values that normalize to the same name (e.g. a real "BRONZE"
+  // tier_from and a raw "19818" tier_from both moving to GLOW in the same
+  // period) now correctly merge into one summed row instead of appearing as
+  // two separate ones. A pair that normalizes to the SAME name on both sides
+  // (e.g. raw "19818" → literal "BRONZE" — not a real tier change, just an
+  // ID/name inconsistency for the same tier) is dropped, same as the raw
+  // query already dropped literal tier_from = tier_to pairs.
+  const movementRaw = await p.query(
     `SELECT tier_from, tier_to, COUNT(*) AS n
      FROM yotpo_events
      WHERE site = $1 AND event_type = 'tier_change' AND tier_from IS NOT NULL AND tier_from <> tier_to
@@ -398,6 +417,22 @@ async function getYotpoSummary(site, start, end) {
      ORDER BY n DESC`,
     [site, start, end]
   );
+  const movementByPair = new Map();
+  for (const r of movementRaw.rows) {
+    const fromName = normalizeCustomerTier(site, r.tier_from);
+    const toName = normalizeCustomerTier(site, r.tier_to);
+    if (fromName === toName) continue; // ID/name variants of the same real tier — not a real movement
+    const key = `${fromName}→${toName}`;
+    movementByPair.set(key, (movementByPair.get(key) || 0) + Number(r.n));
+  }
+  const movementRes = {
+    rows: Array.from(movementByPair.entries())
+      .map(([key, n]) => {
+        const [tier_from, tier_to] = key.split('→');
+        return { tier_from, tier_to, n };
+      })
+      .sort((a, b) => b.n - a.n),
+  };
 
   return {
     site,
