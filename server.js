@@ -5,7 +5,7 @@ const cors = require('cors');
 const { fetchOrders, fetchOrdersLight, fetchOrdersForTierRevenue, fetchSalesReversals, fetchCostOfGoodsSold, fetchTopReturnsByProduct, fetchCountryBreakdown, fetchSalesSummary, fetchCustomerAcquisition, fetchProductRetailPrices, getAuthorizeUrl, exchangeCodeForToken } = require('./src/shopify');
 const { aggregate } = require('./src/aggregate');
 const { fetchChannelPerformance } = require('./src/triplewhale');
-const { fetchPnlSheetChannels, fetchPnlSheetOtherCosts, fetchPnlSheetTotalCost } = require('./src/googlesheets');
+const { fetchPnlSheetChannels, fetchPnlSheetOtherCosts, fetchPnlSheetTotalCost, fetchPnlSheetMarketingSpend } = require('./src/googlesheets');
 const { VALID_SITES: YOTPO_VALID_SITES, ensureYotpoSchema, recordYotpoEvent, getYotpoSummary, getYotpoCustomerTierMap, getPool: getYotpoPool } = require('./src/yotpo');
 const { registerYotpoWebhooksForSite } = require('./src/yotpo-setup');
 const { importYotpoHistory } = require('./src/yotpo-import');
@@ -356,6 +356,9 @@ async function buildDataResponse({ site, start, end, compare }) {
     pnlSheetChannels,
     pnlSheetOtherCosts,
     pnlSheetTotalCost,
+    pnlSheetTotalCostMom,
+    pnlSheetMarketingSpend,
+    pnlSheetMarketingSpendMom,
   ] = await Promise.all([
     fetchOrders(site, start, end),
     wantYoy ? fetchOrdersLight(site, yoyRange.start, yoyRange.end) : Promise.resolve(null),
@@ -406,6 +409,43 @@ async function buildDataResponse({ site, start, end, compare }) {
       console.error(`fetchPnlSheetTotalCost threw for site=${site}:`, err.message);
       return null;
     }),
+    // pnlSheetTotalCostMom (added 2026-09-07, alongside pnlSheetMarketingSpend
+    // below) — Profit/Profit Margin's MoM change needs the PRIOR month's own
+    // Total Cost, not just this month's (already covered by pnlSheetTotalCost
+    // above). Reuses the exact same fetchPnlSheetTotalCost function with
+    // momRange.start instead of start — findActualColIdx locates whichever
+    // month that date falls in, no separate function needed (see that
+    // function's comments in src/googlesheets.js). Only fetched when
+    // wantMom, same conditional pattern as every other mom-only call above.
+    // Deliberately no YoY equivalent: the sheet only has 2026 columns (no
+    // prior-year tab exists anywhere in this spreadsheet — confirmed live
+    // 2026-09-07), so that call would always return { no_data: true } and
+    // isn't worth the extra CSV fetch.
+    wantMom
+      ? fetchPnlSheetTotalCost(site, momRange.start).catch((err) => {
+          console.error(`fetchPnlSheetTotalCost (mom) threw for site=${site}:`, err.message);
+          return null;
+        })
+      : Promise.resolve(null),
+    // pnlSheetMarketingSpend / pnlSheetMarketingSpendMom (added 2026-09-07)
+    // — makes Section 1's "Blended ROAS" tile live for the first time (it
+    // previously had NO live-sync path at all, current month included — see
+    // the big comment on fetchPnlSheetMarketingSpend in src/googlesheets.js
+    // for why this needs its own sheet read rather than reusing Section 4's
+    // Triple Whale channel data: the sheet's own Blended ROAS definition is
+    // Gross Sales ÷ a specific 15-line marketing-cost subset, not attributed
+    // per-channel revenue ÷ spend). Same no-YoY reasoning as
+    // pnlSheetTotalCostMom above.
+    fetchPnlSheetMarketingSpend(site, start).catch((err) => {
+      console.error(`fetchPnlSheetMarketingSpend threw for site=${site}:`, err.message);
+      return null;
+    }),
+    wantMom
+      ? fetchPnlSheetMarketingSpend(site, momRange.start).catch((err) => {
+          console.error(`fetchPnlSheetMarketingSpend (mom) threw for site=${site}:`, err.message);
+          return null;
+        })
+      : Promise.resolve(null),
   ]);
 
   // fetchCountryBreakdown now returns { rows, groupedBy, fallbackReason? }
@@ -480,22 +520,15 @@ async function buildDataResponse({ site, start, end, compare }) {
       // gross_sales_change (see dashboard_v2.html's mergeLiveIntoMonthData),
       // the same technique already used for AOV's yoy/mom.
       //
-      // units_returned is deliberately NOT included here even though
-      // aggregate() technically produces a number for it: ORDERS_QUERY_LIGHT
-      // (used for the yoy/mom order fetches) doesn't request `refunds` at
-      // all — see that query's own comment block — so yoyAgg/momAgg's
-      // units_returned is always exactly 0, never a real prior-period count.
-      // A change computed against that would always come back null anyway
-      // (pctChange treats a zero denominator as "no comparison available"),
-      // so it's left off entirely rather than adding a field that looks
-      // wired up but never actually produces a number. Fetching real
-      // refund-line-item data for two more periods would need a heavier
-      // query — the same cost/rate-limit tradeoff that made
-      // ORDERS_QUERY_LIGHT light in the first place (see its comments) —
-      // so this needs a deliberate follow-up, not a quiet bolt-on here.
+      // units_returned_change added the same day, once ORDERS_QUERY_LIGHT
+      // started fetching refund line item quantities too (see that query's
+      // comments in src/shopify.js for why this was deliberately left out
+      // originally, and what was added instead of a full revert to
+      // ORDERS_QUERY's heavier refund shape).
       discounts_change: pctChange(current.kpis.discounts_total, yoyAgg.kpis.discounts_total),
       returns_change: pctChange(current.kpis.returns_total, yoyAgg.kpis.returns_total),
       units_sold_change: pctChange(current.kpis.units_sold, yoyAgg.kpis.units_sold),
+      units_returned_change: pctChange(current.kpis.units_returned, yoyAgg.kpis.units_returned),
     };
     topProducts = attachChangeByKey(topProducts, yoyAgg.top_products, 'title', 'gross_sales_yoy_change');
     byCountry = attachChangeByKey(byCountry, yoyCountry, 'country', 'gross_sales_yoy_change');
@@ -512,14 +545,30 @@ async function buildDataResponse({ site, start, end, compare }) {
       cogs_change: pctChange(current.kpis.cogs, momCogsFinal),
       new_customers_change: pctChange(current.kpis.new_customers, momAcquisition.new_customers),
       returning_customers_change: pctChange(current.kpis.returning_customers, momAcquisition.returning_customers),
-      // See the matching comment in the result.yoy block above (including
-      // why units_returned_change is deliberately not included here).
+      // See the matching comment in the result.yoy block above.
       discounts_change: pctChange(current.kpis.discounts_total, momAgg.kpis.discounts_total),
       returns_change: pctChange(current.kpis.returns_total, momAgg.kpis.returns_total),
       units_sold_change: pctChange(current.kpis.units_sold, momAgg.kpis.units_sold),
+      units_returned_change: pctChange(current.kpis.units_returned, momAgg.kpis.units_returned),
     };
     topProducts = attachChangeByKey(topProducts, momAgg.top_products, 'title', 'gross_sales_mom_change');
     byCountry = attachChangeByKey(byCountry, momCountry, 'country', 'gross_sales_mom_change');
+
+    // Profit/Profit Margin and Blended ROAS MoM (added 2026-09-07) — the
+    // PRIOR month's own Total Cost / marketing spend, read live from the
+    // sheet the same way this month's already is below. The frontend
+    // (mergeLiveIntoMonthData in dashboard_v2.html) reconstructs the prior
+    // month's Net Sales/Gross Sales from net_sales_change/gross_sales_change
+    // above (same technique already used for AOV's yoy/mom) and combines
+    // them with these two totals to derive real Profit/Profit Margin/
+    // Blended ROAS MoM — no YoY equivalent for either (see
+    // pnlSheetTotalCostMom's Promise.all comment above for why).
+    if (pnlSheetTotalCostMom && !pnlSheetTotalCostMom.no_data) {
+      result.mom.pnl_total_cost_actual = pnlSheetTotalCostMom.actual;
+    }
+    if (pnlSheetMarketingSpendMom && !pnlSheetMarketingSpendMom.no_data) {
+      result.mom.blended_marketing_spend_actual = pnlSheetMarketingSpendMom.actual;
+    }
   }
 
   result.top_products = topProducts;
@@ -573,6 +622,21 @@ async function buildDataResponse({ site, start, end, compare }) {
   // Cost" row couldn't be read this sync.
   if (pnlSheetTotalCost && !pnlSheetTotalCost.no_data) {
     result.pnl_total_cost_actual = pnlSheetTotalCost.actual;
+  }
+
+  // Blended ROAS (added 2026-09-07) — this KPI tile previously had NO
+  // live-sync path at all, unlike every other Section 1 tile: it stayed
+  // frozen at the embedded P&L-sheet snapshot even for the CURRENT month.
+  // See the big comment on fetchPnlSheetMarketingSpend in
+  // src/googlesheets.js for the full rationale (there's no single "Blended
+  // ROAS"/"Marketing Spend" row to read directly — it's Gross Sales ÷ a sum
+  // of 15 specific cost lines, same formula build_dashboard_data.py
+  // originally hand-computed once for the snapshot). The frontend
+  // (mergeLiveIntoMonthData, same derivedRatios branch as % Discount Ratio/
+  // % Returns Ratio) divides live.kpis.gross_sales (already live) by this
+  // figure to get the actual live Blended ROAS.
+  if (pnlSheetMarketingSpend && !pnlSheetMarketingSpend.no_data) {
+    result.kpis.blended_marketing_spend = pnlSheetMarketingSpend.actual;
   }
 
   return result;
