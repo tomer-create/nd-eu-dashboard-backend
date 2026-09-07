@@ -89,6 +89,18 @@
 //     working automatically (see CHANNEL_MAP entry below), no code change
 //     needed.
 //
+// MICROSOFT ADS WENT LIVE 2026-09-07 — Tomer: "Microsoft ads you can pull
+// now from triple whale, the cost and the revenue from the combined gross
+// sales on triple whale." Re-ran the channel-discovery query from the notes
+// above and confirmed ND.COM now has a real, non-organic 'bing' row (spend
+// $691.31, Aug 1 - Sep 7 2026 — the exact "no paid platform connected" gap
+// called out in the two notes above is now closed for this store). ND.EU/
+// ND.IL still show no 'bing' rows. Added 'bing' to the CHANNEL_MAP entry
+// below — see that entry's own comment for the CV-choice caveat (kept Pixel
+// CV, the existing default, since Tomer's request didn't specify Channel CV
+// the way he did for Snapchat/impact.com/Pinterest, even though Bing's
+// Channel CV is noticeably higher here too).
+//
 // PIXEL CV INFLATION BUG FIXED 2026-09-03 — Tomer asked to double-check the
 // Triple Whale numbers. Cross-checked this file's SQL against Triple
 // Whale's own MCP connector (pixel-attribution tool + get-table-schemas +
@@ -137,11 +149,30 @@ const CHANNEL_MAP = [
   { ids: ['google-ads'], label: 'Google Ads', cv: 'pixel' },
   { ids: ['tiktok-ads'], label: 'TikTok Ads', cv: 'pixel' },
   { ids: ['facebook-ads'], label: 'Meta Ads', cv: 'pixel' },
-  // Not confirmed active on any of the 3 stores as of 2026-08-31 (see file
-  // header) — included so it starts working automatically the moment a
-  // Bing/Microsoft Ads integration is connected in Triple Whale, without
-  // needing another code change.
-  { ids: ['microsoft-ads', 'bing-ads'], label: 'Microsoft Ads', cv: 'pixel' },
+  // CONFIRMED LIVE 2026-09-07 per Tomer ("Microsoft ads you can pull now
+  // from triple whale") — re-ran a live channel-discovery query
+  // (SELECT DISTINCT channel FROM pixel_joined_tvf()) for all 3 stores and
+  // found ND.COM now has real spend under channel id 'bing' (Aug 1 - Sep 7
+  // 2026: spend $691.31, channel_reported_conversion_value $11,649.26,
+  // order_revenue/Pixel CV $3,103.28 — confirmed via Triple Whale's own
+  // get-summary-kpis too: bingAdSpend/bingConversionValue match exactly).
+  // ND.EU/ND.IL still have no 'bing' rows as of this writing. Added 'bing'
+  // to this entry's ids (kept 'microsoft-ads'/'bing-ads' too in case Triple
+  // Whale ever normalizes the id) — no other code change needed:
+  // mergeChannelSources() in server.js already prefers Triple Whale over
+  // the P&L-sheet fallback the moment a label comes back non-no_data, and
+  // the frontend merge (dashboard_v2.html) already handles any channel
+  // generically by label.
+  // CV CHOICE: kept 'pixel' (Last-Click order_revenue), matching this
+  // entry's original default and every other channel except the ones Tomer
+  // explicitly asked to use Channel CV for (Snapchat, impact.com, Pinterest
+  // — see below). Bing's Channel CV ($11,649.26) is ~3.75x its Pixel CV
+  // ($3,103.28) — a real gap, same shape as those three carve-outs — but
+  // Tomer's request didn't specify which CV he wants for Microsoft Ads, so
+  // this doesn't default to Channel CV without him saying so. Flagged back
+  // to him; switch to 'channel' here (and update the channels_note string
+  // in dashboard_v2.html) if he confirms that's what he wants.
+  { ids: ['microsoft-ads', 'bing-ads', 'bing'], label: 'Microsoft Ads', cv: 'pixel' },
   { ids: ['criteo'], label: 'Criteo', cv: 'pixel' },
   // Switched to Channel CV 2026-09-07 per Tomer: "for Pinterest and Snapchat
   // sources pull the actual CV from triple whale and not the pixel cv as
