@@ -393,13 +393,12 @@ const LIVE_KPI_MAP = {
   'AOV': { key: 'average_order_value', change: null },
   'Number of Orders': { key: 'orders', change: 'orders_change' },
   'Units Sold': { key: 'units_sold', change: 'units_sold_change' },
-  // Units Returned's change is intentionally still null — the backend's
-  // yoy/mom order fetches deliberately don't pull refund data (see the
-  // units_returned_change comment in server.js), so there's no real
-  // prior-period units-returned figure to diff against yet. This tile keeps
-  // falling back to whatever the snapshot/P&L sheet last had, same as
-  // before this fix, until that's built.
-  'Units Returned': { key: 'units_returned', change: null },
+  // Units Returned's change wired up 2026-09-07 (Tomer: "yes build all") —
+  // the backend's yoy/mom order fetches now pull refund line item
+  // quantities too (see units_returned_change in server.js / the
+  // ORDERS_QUERY_LIGHT comments in the backend's src/shopify.js for what
+  // changed and why it was deliberately left out originally).
+  'Units Returned': { key: 'units_returned', change: 'units_returned_change' },
   // Added 2026-08-24 per Tomer's request ("the COGS number isn't correct,
   // you should pull it from Shopify as well") — the backend now pulls this
   // from Shopify's own ShopifyQL "cost_of_goods_sold" metric (see
@@ -442,7 +441,9 @@ function mergeLiveIntoMonthData(monthData, live, site) {
   // the live.other_costs block below) — Profit/Profit Margin are computed
   // as Net Sales − Other Costs total per Tomer's request ("should be
   // formula: net sales - Other Costs"), not read directly from the sheet.
-  // Blended ROAS is now the only top-level KPI tile still P&L-sheet-only.
+  // Blended ROAS was the last top-level KPI tile with no live-sync path at
+  // all (not even its CURRENT-period actual) — fixed 2026-09-07 (Tomer: "yes
+  // build all"), see the derivedRatios entry and blendedRoasMom block below.
   // COGS *is* synced (added 2026-08-24, see LIVE_KPI_MAP above) via
   // Shopify's own ShopifyQL cost_of_goods_sold metric, which the P&L-sheet
   // figure this tile used to show could disagree with — and, added
@@ -453,6 +454,19 @@ function mergeLiveIntoMonthData(monthData, live, site) {
   const derivedRatios = {
     '% Discount Ratio': live.kpis.gross_sales ? live.kpis.discounts_total / live.kpis.gross_sales : null,
     '% Returns Ratio': live.kpis.gross_sales ? live.kpis.returns_total / live.kpis.gross_sales : null,
+    // Blended ROAS — added 2026-09-07. There's no single "Blended ROAS"/
+    // "Marketing Spend" row anywhere in the P&L sheet to read directly
+    // (confirmed live by grepping all 3 sites' full CSV export for
+    // "blended" — zero matches); this dashboard's Blended ROAS was always
+    // Gross Sales ÷ a specific 15-line marketing-cost subset, first
+    // hand-computed once in build_dashboard_data.py for the embedded
+    // snapshot. live.kpis.blended_marketing_spend (see server.js /
+    // fetchPnlSheetMarketingSpend in the backend's src/googlesheets.js) is
+    // that same sum, read live — so this is the same formula, just no
+    // longer frozen. null (not 0) when the sheet total isn't available this
+    // sync, so this tile falls through to whatever the snapshot last had,
+    // same convention as every other tile here.
+    'Blended ROAS': live.kpis.blended_marketing_spend ? live.kpis.gross_sales / live.kpis.blended_marketing_spend : null,
   };
 
   // Real live YoY/MoM for % Discount Ratio / % Returns Ratio — added
@@ -482,9 +496,35 @@ function mergeLiveIntoMonthData(monthData, live, site) {
   const discountRatioMom = deriveLiveRatioChange(live.mom, 'discounts_change', 'gross_sales_change', live.kpis.discounts_total, live.kpis.gross_sales);
   const returnsRatioYoy = deriveLiveRatioChange(live.yoy, 'returns_change', 'gross_sales_change', live.kpis.returns_total, live.kpis.gross_sales);
   const returnsRatioMom = deriveLiveRatioChange(live.mom, 'returns_change', 'gross_sales_change', live.kpis.returns_total, live.kpis.gross_sales);
+
+  // Blended ROAS MoM — added 2026-09-07 alongside the actual (see
+  // derivedRatios above). Slightly different shape than
+  // deriveLiveRatioChange above: the backend gives the PRIOR month's
+  // marketing spend as a real absolute number (live.mom.
+  // blended_marketing_spend_actual, read straight off that month's own
+  // sheet column — see server.js), not a % change to reconstruct from, so
+  // only Gross Sales' prior value needs reconstructing (via
+  // gross_sales_change, same technique as everywhere else in this
+  // function). No YoY: the backend never populates a yoy marketing-spend
+  // figure at all (the sheet has no prior-year column — see
+  // fetchPnlSheetMarketingSpend's comments in the backend), so this always
+  // comes back null for yoy and this tile's YoY keeps showing whatever the
+  // snapshot last had, same as Profit/Profit Margin's YoY below.
+  function deriveRoasChange(changeObj, grossNow, spendNow, spendPriorAbsolute) {
+    if (!changeObj || changeObj.gross_sales_change === undefined || changeObj.gross_sales_change === null
+        || !spendNow || !spendPriorAbsolute) return null;
+    const grossPrior = grossNow / (1 + changeObj.gross_sales_change);
+    const roasPrior = grossPrior / spendPriorAbsolute;
+    if (!roasPrior) return null;
+    const roasNow = grossNow / spendNow;
+    return (roasNow - roasPrior) / roasPrior;
+  }
+  const blendedRoasMom = deriveRoasChange(live.mom, live.kpis.gross_sales, live.kpis.blended_marketing_spend, live.mom && live.mom.blended_marketing_spend_actual);
+
   const derivedRatioChanges = {
     '% Discount Ratio': { yoy: discountRatioYoy, mom: discountRatioMom },
     '% Returns Ratio': { yoy: returnsRatioYoy, mom: returnsRatioMom },
+    'Blended ROAS': { yoy: null, mom: blendedRoasMom },
   };
 
   // AOV's own YoY isn't returned by the backend either, but it can be
@@ -839,6 +879,19 @@ function mergeLiveIntoMonthData(monthData, live, site) {
   // Section-7-only total only if that row couldn't be read this sync (sheet
   // fetch failure, "Total Cost" label not found, etc.), so this degrades
   // gracefully instead of going blank.
+  //
+  // MoM added 2026-09-07 (Tomer: "yes build all", after these two tiles were
+  // flagged as having no YoY/MoM at all). The backend now also reads the
+  // PRIOR month's own Total Cost from the sheet (live.mom.
+  // pnl_total_cost_actual — see pnlSheetTotalCostMom in server.js), so the
+  // prior month's Profit/Profit Margin can be reconstructed the same way
+  // AOV's/the ratio tiles' MoM already are: Net Sales and Gross Sales's
+  // prior-month values come from reversing net_sales_change/
+  // gross_sales_change, combined with that real prior Total Cost. No YoY:
+  // the sheet only has 2026 columns — there's no prior-year Total Cost to
+  // read at all (confirmed live 2026-09-07 — no 2025 tab exists anywhere in
+  // the spreadsheet), so YoY keeps showing whatever the snapshot last had,
+  // same as before this fix.
   {
     const netSalesKpi = merged.kpis.find(k => k.label === 'Net Sales');
     const netSales = live.kpis.net_sales !== undefined ? live.kpis.net_sales : (netSalesKpi ? netSalesKpi.actual : undefined);
@@ -847,6 +900,27 @@ function mergeLiveIntoMonthData(monthData, live, site) {
     const otherCostsTotal = (live.pnl_total_cost_actual !== undefined && live.pnl_total_cost_actual !== null)
       ? live.pnl_total_cost_actual
       : merged.total_other_costs_actual;
+
+    let profitMomChange = null;
+    let marginMomChange = null;
+    if (netSales !== undefined && grossSales !== undefined && live.mom
+        && live.mom.net_sales_change !== undefined && live.mom.net_sales_change !== null
+        && live.mom.gross_sales_change !== undefined && live.mom.gross_sales_change !== null
+        && live.mom.pnl_total_cost_actual !== undefined && live.mom.pnl_total_cost_actual !== null) {
+      const netSalesMomPrior = netSales / (1 + live.mom.net_sales_change);
+      const grossSalesMomPrior = grossSales / (1 + live.mom.gross_sales_change);
+      const profitMomPrior = netSalesMomPrior - live.mom.pnl_total_cost_actual;
+      const marginMomPrior = grossSalesMomPrior ? profitMomPrior / grossSalesMomPrior : null;
+      // profit/margin (this sync's actual) are computed just below — compute
+      // them here too so this block doesn't depend on evaluation order.
+      if (otherCostsTotal !== undefined && otherCostsTotal !== null) {
+        const profitNow = netSales - otherCostsTotal;
+        const marginNow = grossSales ? profitNow / grossSales : null;
+        profitMomChange = profitMomPrior ? (profitNow - profitMomPrior) / profitMomPrior : null;
+        marginMomChange = (marginMomPrior && marginNow !== null) ? (marginNow - marginMomPrior) / marginMomPrior : null;
+      }
+    }
+
     if (netSales !== undefined && otherCostsTotal !== undefined && otherCostsTotal !== null) {
       const profit = netSales - otherCostsTotal; // Net Sales − Total Cost
       const margin = grossSales ? profit / grossSales : null; // Profit ÷ Gross Sales
@@ -854,12 +928,14 @@ function mergeLiveIntoMonthData(monthData, live, site) {
         if (k.label === 'Profit') {
           const goal = k.goal;
           const pct_of_goal = (goal !== null && goal !== undefined && goal !== 0) ? profit / goal : null;
-          return Object.assign({}, k, { actual: profit, pct_of_goal, no_data: false });
+          const mom = profitMomChange !== null ? profitMomChange : k.mom;
+          return Object.assign({}, k, { actual: profit, pct_of_goal, mom, no_data: false });
         }
         if (k.label === 'Profit Margin') {
           const goal = k.goal;
           const pct_of_goal = (goal !== null && goal !== undefined && goal !== 0 && margin !== null) ? margin / goal : null;
-          return Object.assign({}, k, { actual: margin, pct_of_goal, no_data: margin === null });
+          const mom = marginMomChange !== null ? marginMomChange : k.mom;
+          return Object.assign({}, k, { actual: margin, pct_of_goal, mom, no_data: margin === null });
         }
         return k;
       });
