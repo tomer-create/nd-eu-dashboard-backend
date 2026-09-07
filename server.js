@@ -466,6 +466,36 @@ async function buildDataResponse({ site, start, end, compare }) {
       cogs_change: pctChange(current.kpis.cogs, yoyCogsFinal),
       new_customers_change: pctChange(current.kpis.new_customers, yoyAcquisition.new_customers),
       returning_customers_change: pctChange(current.kpis.returning_customers, yoyAcquisition.returning_customers),
+      // Added 2026-09-07 per Tomer's report ("no data for YOY and MOM" on
+      // Discounts / % Discount Ratio / Returns / % Returns Ratio / Units
+      // Sold / Units Returned). discounts_total (via applySalesSummary),
+      // returns_total (via applySalesReversals) and units_sold (via
+      // aggregate()'s per-line-item `quantity`, present on the lighter
+      // ORDERS_QUERY_LIGHT used for yoy/mom too — see that query's comments
+      // in src/shopify.js) are all real, authoritative figures for EVERY
+      // one of the current/yoy/mom periods already — the only thing missing
+      // was actually diffing them here, same as every other _change field
+      // on this object. The two ratio tiles derive their own yoy/mom
+      // client-side from discounts_change/returns_change plus
+      // gross_sales_change (see dashboard_v2.html's mergeLiveIntoMonthData),
+      // the same technique already used for AOV's yoy/mom.
+      //
+      // units_returned is deliberately NOT included here even though
+      // aggregate() technically produces a number for it: ORDERS_QUERY_LIGHT
+      // (used for the yoy/mom order fetches) doesn't request `refunds` at
+      // all — see that query's own comment block — so yoyAgg/momAgg's
+      // units_returned is always exactly 0, never a real prior-period count.
+      // A change computed against that would always come back null anyway
+      // (pctChange treats a zero denominator as "no comparison available"),
+      // so it's left off entirely rather than adding a field that looks
+      // wired up but never actually produces a number. Fetching real
+      // refund-line-item data for two more periods would need a heavier
+      // query — the same cost/rate-limit tradeoff that made
+      // ORDERS_QUERY_LIGHT light in the first place (see its comments) —
+      // so this needs a deliberate follow-up, not a quiet bolt-on here.
+      discounts_change: pctChange(current.kpis.discounts_total, yoyAgg.kpis.discounts_total),
+      returns_change: pctChange(current.kpis.returns_total, yoyAgg.kpis.returns_total),
+      units_sold_change: pctChange(current.kpis.units_sold, yoyAgg.kpis.units_sold),
     };
     topProducts = attachChangeByKey(topProducts, yoyAgg.top_products, 'title', 'gross_sales_yoy_change');
     byCountry = attachChangeByKey(byCountry, yoyCountry, 'country', 'gross_sales_yoy_change');
@@ -482,6 +512,11 @@ async function buildDataResponse({ site, start, end, compare }) {
       cogs_change: pctChange(current.kpis.cogs, momCogsFinal),
       new_customers_change: pctChange(current.kpis.new_customers, momAcquisition.new_customers),
       returning_customers_change: pctChange(current.kpis.returning_customers, momAcquisition.returning_customers),
+      // See the matching comment in the result.yoy block above (including
+      // why units_returned_change is deliberately not included here).
+      discounts_change: pctChange(current.kpis.discounts_total, momAgg.kpis.discounts_total),
+      returns_change: pctChange(current.kpis.returns_total, momAgg.kpis.returns_total),
+      units_sold_change: pctChange(current.kpis.units_sold, momAgg.kpis.units_sold),
     };
     topProducts = attachChangeByKey(topProducts, momAgg.top_products, 'title', 'gross_sales_mom_change');
     byCountry = attachChangeByKey(byCountry, momCountry, 'country', 'gross_sales_mom_change');
