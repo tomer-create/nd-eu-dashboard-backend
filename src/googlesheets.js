@@ -598,11 +598,113 @@ async function fetchPnlSheetTotalCost(site, start) {
   return { no_data: false, actual, source: 'pnl_sheet' };
 }
 
+// Marketing-only cost rows — added 2026-09-07 to make Section 1's "Blended
+// ROAS" tile live (previously 100% frozen at the embedded snapshot, even for
+// the CURRENT month — unlike every other KPI tile, it had no live-sync path
+// at all). There's no single "Blended ROAS" or "Marketing Spend" row
+// anywhere in the sheet to just read directly (confirmed live 2026-09-07 by
+// grepping all 3 sites' full CSV export for "blended" — zero matches) — this
+// dashboard's Blended ROAS was always a COMPUTED metric
+// (Gross Sales ÷ sum of these specific cost lines), first hand-built in
+// build_dashboard_data.py when the dashboard's embedded snapshot was
+// generated. This list is exactly that script's MARKETING_COST_KEYS,
+// translated to the sheet's own row labels instead of that script's
+// internal key names, so the live figure is the same formula, not a new
+// one — same principle as the 2026-09-07 Total Cost fix (Tomer: "check who
+// is wrong and why" when the dashboard and sheet disagreed on Profit).
+//
+// Confirmed live 2026-09-07 that ALL 3 sites (COM/EU/IL) use these exact 15
+// labels in their Cost sections, unlike OTHER_COST_ROWS above (which is a
+// genuinely asymmetric per-site list) — so this is intentionally ONE shared
+// list, not a per-site map. Only the ROW NUMBERS differ site to site (and
+// month to month, as rows are inserted/removed) — findRevenueAndCostRows's
+// label-scan handles that the same way it does for every other lookup in
+// this file.
+const MARKETING_COST_ROWS = [
+  'Google Ads',
+  'Meta ads',
+  'TikTok Shop Ads',
+  'Commision', // sheet's own spelling (not a typo in this file) — exact-match lookup
+  'TikTok Gifting',
+  'Criteo Ads',
+  'PPC Agency Fee',
+  'Shop PPC',
+  'Impact TBU',
+  'Impact Affiliate fees',
+  'Collabs',
+  'SMS Jurney', // sheet's own spelling
+  'SMS Campaign',
+  'Email Jurney', // sheet's own spelling
+  'Email Campaign - Newsletter',
+];
+
+// Fetches this month's total marketing spend (sum of MARKETING_COST_ROWS)
+// for `site`, for whichever month `start` falls in — see the MARKETING_COST_ROWS
+// comment above for the full rationale. Same live label-scan approach as
+// fetchPnlSheetOtherCosts/fetchPnlSheetTotalCost above (via
+// findRevenueAndCostRows's costRows map — never a hardcoded row number).
+// Tolerant of individual missing rows: sums whatever it finds and reports
+// how many of the 15 expected rows it actually located, rather than failing
+// the whole total over one missing/renamed label. Returns
+// { no_data: false, actual, source: 'pnl_sheet', rows_found, rows_expected }
+// or { no_data: true } (nothing found at all, month column not found, sheet
+// not shared) or null (the sheet fetch itself failed before any
+// label-scanning could happen) — same failure shape as this file's other
+// fetchers, logged, never thrown.
+//
+// Reused as-is for the MoM comparison period too (server.js calls this a
+// second time with the previous month's start date) — findActualColIdx
+// looks up whichever month label `start` falls in, so no separate function
+// is needed. NOT reused for YoY: the sheet only has 2026 columns (confirmed
+// live 2026-09-07 — no prior-year tab exists anywhere in this spreadsheet),
+// so a YoY call would just always return { no_data: true } — server.js
+// doesn't bother making that call at all rather than spending an extra CSV
+// fetch on a comparison that can never succeed with this data source.
+async function fetchPnlSheetMarketingSpend(site, start) {
+  if (!start) return null;
+
+  const rows = await fetchSheetRows(site);
+  if (!rows) return null;
+
+  const actualColIdx = findActualColIdx(rows, start, site);
+  if (actualColIdx === -1) return null;
+
+  const { costRows } = findRevenueAndCostRows(rows);
+  if (costRows.size === 0) {
+    console.error(`googlesheets: could not locate the "Cost" section in the ${site} CSV (fetchPnlSheetMarketingSpend)`);
+    return null;
+  }
+
+  let total = 0;
+  let foundCount = 0;
+  for (const label of MARKETING_COST_ROWS) {
+    const rIdx = costRows.get(label);
+    if (rIdx === undefined) continue;
+    const val = parseNum(rows[rIdx] ? rows[rIdx][actualColIdx] : undefined);
+    if (val === null) continue;
+    total += val;
+    foundCount += 1;
+  }
+  if (foundCount === 0) {
+    console.error(`googlesheets: found none of the expected marketing-cost rows in the ${site} CSV's Cost section — layout may have changed`);
+    return { no_data: true };
+  }
+  return {
+    no_data: false,
+    actual: total,
+    source: 'pnl_sheet',
+    rows_found: foundCount,
+    rows_expected: MARKETING_COST_ROWS.length,
+  };
+}
+
 module.exports = {
   fetchPnlSheetChannels,
   fetchPnlSheetOtherCosts,
   fetchPnlSheetTotalCost,
+  fetchPnlSheetMarketingSpend,
   CHANNEL_ROWS,
   OTHER_COST_ROWS,
+  MARKETING_COST_ROWS,
   parseCsv,
 };
