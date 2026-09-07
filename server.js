@@ -5,7 +5,7 @@ const cors = require('cors');
 const { fetchOrders, fetchOrdersLight, fetchOrdersForTierRevenue, fetchSalesReversals, fetchCostOfGoodsSold, fetchTopReturnsByProduct, fetchCountryBreakdown, fetchSalesSummary, fetchCustomerAcquisition, fetchProductRetailPrices, getAuthorizeUrl, exchangeCodeForToken } = require('./src/shopify');
 const { aggregate } = require('./src/aggregate');
 const { fetchChannelPerformance } = require('./src/triplewhale');
-const { fetchPnlSheetChannels, fetchPnlSheetOtherCosts } = require('./src/googlesheets');
+const { fetchPnlSheetChannels, fetchPnlSheetOtherCosts, fetchPnlSheetTotalCost } = require('./src/googlesheets');
 const { VALID_SITES: YOTPO_VALID_SITES, ensureYotpoSchema, recordYotpoEvent, getYotpoSummary, getYotpoCustomerTierMap, getPool: getYotpoPool } = require('./src/yotpo');
 const { registerYotpoWebhooksForSite } = require('./src/yotpo-setup');
 const { importYotpoHistory } = require('./src/yotpo-import');
@@ -355,6 +355,7 @@ async function buildDataResponse({ site, start, end, compare }) {
     channelPerformance,
     pnlSheetChannels,
     pnlSheetOtherCosts,
+    pnlSheetTotalCost,
   ] = await Promise.all([
     fetchOrders(site, start, end),
     wantYoy ? fetchOrdersLight(site, yoyRange.start, yoyRange.end) : Promise.resolve(null),
@@ -392,6 +393,17 @@ async function buildDataResponse({ site, start, end, compare }) {
     }),
     fetchPnlSheetOtherCosts(site, start).catch((err) => {
       console.error(`fetchPnlSheetOtherCosts threw for site=${site}:`, err.message);
+      return null;
+    }),
+    // pnlSheetTotalCost (added 2026-09-07) covers the sheet's own "Total
+    // Cost" row directly — see the big comment on fetchPnlSheetTotalCost in
+    // src/googlesheets.js for why Profit/Profit Margin need this instead of
+    // reconstructing a total from Section 7 + Section 4's channel spend
+    // (that reconstruction double-counts for EU/IL, whose Other Costs list
+    // includes categories COM keeps Section-4-only). Independent try/catch,
+    // same reasoning as pnlSheetOtherCosts above.
+    fetchPnlSheetTotalCost(site, start).catch((err) => {
+      console.error(`fetchPnlSheetTotalCost threw for site=${site}:`, err.message);
       return null;
     }),
   ]);
@@ -514,6 +526,18 @@ async function buildDataResponse({ site, start, end, compare }) {
   // raw sheet-sourced line items.
   if (pnlSheetOtherCosts) {
     result.other_costs = pnlSheetOtherCosts;
+  }
+
+  // Profit/Profit Margin's true cost figure (added 2026-09-07) — see the
+  // big comment on fetchPnlSheetTotalCost in src/googlesheets.js. Attached
+  // separately from `other_costs` above: Section 7 still displays only its
+  // own curated line-item subset (unchanged), while the frontend's Profit
+  // calc (mergeLiveIntoMonthData in dashboard_v2.html) now prefers this
+  // total_cost_actual figure over total_other_costs_actual when present,
+  // falling back to the old Section-7-only total if the sheet's "Total
+  // Cost" row couldn't be read this sync.
+  if (pnlSheetTotalCost && !pnlSheetTotalCost.no_data) {
+    result.pnl_total_cost_actual = pnlSheetTotalCost.actual;
   }
 
   return result;
