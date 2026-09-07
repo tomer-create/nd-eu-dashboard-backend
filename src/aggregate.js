@@ -37,6 +37,9 @@ const DEFAULT_TAG_LABELS = {
   // request for Section 6 on ND.IL.
   'DISCOUNT-I1KYC': 'Annual Reward Sale Bronze',
   'DISCOUNT-Y40T0': 'Annual Reward Sale Glam',
+  // ND.IL-specific "Rosh HaShana Sale" code, added 2026-09-07 per Tomer's
+  // request for Section 6 on ND.IL.
+  'DISCOUNT-MM7ME': 'Rosh HaShana Sale',
   // ND.EU-specific "Bi-Annual Reward Sale" codes, added 2026-08-26 per
   // Tomer's request for Section 6 on ND.EU. Same program names as the
   // ND.COM/ND.US codes just below, but each store mints its own distinct
