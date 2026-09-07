@@ -1485,6 +1485,25 @@ function renderPBar(pct, higherIsBetter, isCurrent, size) {
 function renderKPIs(monthData) {
   const grid = document.getElementById('kpi-grid');
   grid.innerHTML = '';
+
+  // Added 2026-09-07 per Tomer's request ("on Goal Tracker for new users and
+  // returning users, add to each the % from the total users"). Neither tile
+  // has a P&L-sheet goal (see the LIVE_KPI_MAP comment above — goal is always
+  // null), so their progress bar previously just showed a meaningless "— MTD"
+  // once synced. Reuse that same bar slot to show each tile's share of
+  // (New + Returning) instead. This is computed client-side from the two
+  // actuals already on the page — no new backend field needed. Guarded on
+  // both tiles actually having data (post-Sync) and a positive total, so a
+  // pre-Sync "Awaiting Shopify data" state (handled below) is unaffected.
+  const newUsersKpi = monthData.kpis.find(k => k.label === 'New Users');
+  const returningUsersKpi = monthData.kpis.find(k => k.label === 'Returning Users');
+  let totalUsers = null;
+  if (newUsersKpi && returningUsersKpi && !newUsersKpi.no_data && !returningUsersKpi.no_data
+      && typeof newUsersKpi.actual === 'number' && typeof returningUsersKpi.actual === 'number') {
+    const sum = newUsersKpi.actual + returningUsersKpi.actual;
+    totalUsers = sum > 0 ? sum : null;
+  }
+
   monthData.kpis.forEach(k => {
     const tile = document.createElement('div');
     tile.className = 'kpi-tile' + (k.no_data ? ' no-data' : '');
@@ -1499,8 +1518,15 @@ function renderKPIs(monthData) {
     const momVal = k.mom === undefined ? null : k.mom;
     const momStr = fmtYoY(momVal);
     const momDir = momVal === null ? 'flat' : (momVal >= 0 === k.higher_is_better ? 'up' : 'down');
+    const isUserSplitTile = totalUsers !== null && (k.label === 'New Users' || k.label === 'Returning Users');
     let progressHtml;
-    if (k.pct_of_goal === null && k.met_goal !== null && k.met_goal !== undefined) {
+    if (isUserSplitTile) {
+      const pctOfTotal = k.actual / totalUsers;
+      // Pass isCurrent=true unconditionally so renderPBar always uses the
+      // neutral "info" color (see pbarClass) rather than a good/warn/crit
+      // threshold read — a users-mix share isn't a goal being hit or missed.
+      progressHtml = renderPBar(pctOfTotal, true, true) + `<div class="pbar-pct">${pctLabel(pctOfTotal)} of total users</div>`;
+    } else if (k.pct_of_goal === null && k.met_goal !== null && k.met_goal !== undefined) {
       // goal is zero/negative (e.g. a loss-making profit target) — a ratio isn't meaningful
       progressHtml = `<div class="pbar-pct"><span class="pill ${k.met_goal ? 'good' : 'crit'}">${k.met_goal ? 'Met goal' : 'Below goal'}</span></div>`;
     } else {
