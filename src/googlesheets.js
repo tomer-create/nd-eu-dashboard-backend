@@ -547,9 +547,61 @@ async function fetchPnlSheetOtherCosts(site, start) {
   });
 }
 
+// Fetches this month's "Total Cost" row directly from the sheet — added
+// 2026-09-07 after Tomer noticed the dashboard's Profit/Profit Margin
+// disagreed with the sheet's own Profit row for "the same formula". Root
+// cause: the 2026-09-03 fix computed Profit as Net Sales − Section 7's
+// "Other Costs" total, but "Other Costs" (OTHER_COST_ROWS above) is only a
+// SUBSET of the sheet's true Total Cost row — it deliberately excludes
+// whatever cost categories Section 4 already shows per-channel (ad-platform
+// spend for every site; for EU/IL that's ALSO SMS/Email/Collabs/Impact fees,
+// since those sit in OTHER_COST_ROWS.eu/.il but not .com — see the site
+// lists above). Reconstructing "true total cost" client-side by adding
+// Section 4's channel spend back on top of Section 7's total would have
+// double-counted those categories for EU/IL (present in both sections
+// there) while under-counting nothing for COM — an asymmetric, error-prone
+// fix. Reading the sheet's own "Total Cost" row directly (it's already a
+// single SUM formula covering every cost line, see the sheet's row for the
+// exact range) sidesteps that entirely: one number, straight from the same
+// authoritative formula Tomer already reviews, for all 3 sites uniformly,
+// with no reconstruction logic to get subtly wrong per site.
+//
+// Uses the SAME live sheet-row-scanning approach as fetchPnlSheetOtherCosts
+// (label-scan via findRevenueAndCostRows's costRows map, not a hardcoded
+// row number) so this doesn't silently break the next time a row is
+// inserted above it. Returns { no_data: false, actual, source: 'pnl_sheet' }
+// or { no_data: true } (label not found, month column not found, sheet not
+// shared, or the request failed — logged, never thrown), or null if the
+// sheet fetch itself failed before any label-scanning could happen.
+async function fetchPnlSheetTotalCost(site, start) {
+  if (!start) return null;
+
+  const rows = await fetchSheetRows(site);
+  if (!rows) return null;
+
+  const actualColIdx = findActualColIdx(rows, start, site);
+  if (actualColIdx === -1) return null;
+
+  const { costRows } = findRevenueAndCostRows(rows);
+  if (costRows.size === 0) {
+    console.error(`googlesheets: could not locate the "Cost" section in the ${site} CSV (fetchPnlSheetTotalCost)`);
+    return null;
+  }
+
+  const rIdx = costRows.get('Total Cost');
+  if (rIdx === undefined) {
+    console.error(`googlesheets: could not find a "Total Cost" row in the ${site} CSV's Cost section`);
+    return { no_data: true };
+  }
+  const actual = parseNum(rows[rIdx] ? rows[rIdx][actualColIdx] : undefined);
+  if (actual === null) return { no_data: true };
+  return { no_data: false, actual, source: 'pnl_sheet' };
+}
+
 module.exports = {
   fetchPnlSheetChannels,
   fetchPnlSheetOtherCosts,
+  fetchPnlSheetTotalCost,
   CHANNEL_ROWS,
   OTHER_COST_ROWS,
   parseCsv,
