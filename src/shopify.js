@@ -311,29 +311,36 @@ async function fetchOrdersForTierRevenue(site, startISO, endISO) {
 // Slimmed-down version of ORDERS_QUERY for the YoY/MoM comparison periods.
 // aggregate() in src/aggregate.js reads gross_sales/orders (via lineItems +
 // totalDiscountsSet) AND per-product gross_sales (via lineItems.title) off
-// the comparison periods' orders — by_country/discounts/units/returns are
-// computed but discarded by buildDataResponse() for yoy/mom (returns come
-// from fetchSalesReversals below, for all 3 periods, not from this query),
-// so there's no reason to pay for refunds/refundLineItems/shippingAddress/
-// tags on those two fetches. Each of those adds real GraphQL query cost per
-// order, and doing all 3 periods (current + yoy + mom) concurrently means
-// they compete for the same per-shop rate-limit budget — the lighter this
-// query, the less that concurrency causes THROTTLED retries. `title` was
-// added 2026-08-24 to support real per-product YoY/MoM on Section 2 (see
-// attachProductChange() in server.js) — it's a cheap scalar per line item,
-// not the expensive part of the original full query (that was
-// refunds/shippingAddress/tags, still excluded here), so this shouldn't
-// meaningfully change the latency this lighter query was built to fix.
+// the comparison periods' orders — by_country/units are computed but
+// discarded by buildDataResponse() for yoy/mom (returns_total comes from
+// fetchSalesReversals below, for all 3 periods, not from this query), so
+// there's no reason to pay for shippingAddress/tags on those two fetches (and
+// originally no reason to pay for refunds either — see the note on
+// units_returned below for why that changed). Each excluded field adds real
+// GraphQL query cost per order, and doing all 3 periods (current + yoy + mom)
+// concurrently means they compete for the same per-shop rate-limit budget —
+// the lighter this query, the less that concurrency causes THROTTLED
+// retries. `title` was added 2026-08-24 to support real per-product YoY/MoM
+// on Section 2 (see attachProductChange() in server.js) — it's a cheap
+// scalar per line item, not the expensive part of the original full query
+// (that was refunds/shippingAddress/tags), so this shouldn't meaningfully
+// change the latency this lighter query was built to fix.
 // (Fields left out here are simply undefined on the returned node;
 // aggregate() already treats refunds/shippingAddress/tags as optional via
 // `|| []` / `?.`, so it runs unmodified against these lighter objects.
-// unitsReturned/returnsTotal still come out as 0 off this query since refunds
-// aren't fetched — harmless, since server.js overrides returns_total with the
-// true sales_reversals figure for every period and never reads a store-wide
-// unitsReturned off a comparison period. unitsSold/per-product units_sold
-// USED TO be 0/NaN here too before the `quantity` field below was added —
-// see that note for why a comparison period's per-product unit counts are
-// now needed.)
+// returnsTotal still comes out as 0 off this query even with refunds now
+// fetched (see below) since `subtotalSet` still isn't requested — harmless,
+// since server.js overrides returns_total with the true sales_reversals
+// figure for every period and never reads a store-wide returns_total off a
+// comparison period. unitsSold/per-product units_sold USED TO be 0/NaN here
+// too before the `quantity` field below was added — see that note for why a
+// comparison period's per-product unit counts are now needed.
+//
+// unitsReturned USED TO always come out as 0 here too (refunds weren't
+// fetched at all) — added 2026-09-07 per Tomer's request to build live
+// YoY/MoM for the "Units Returned" tile. See the `refunds` field below for
+// exactly what was added and why it's still much lighter than reverting to
+// ORDERS_QUERY's full refund shape.)
 // `quantity` added 2026-08-25 alongside the ND.IL retail-price COGS feature
 // (see fetchProductRetailPrices/RETAIL_COGS_SITES in server.js) — computing a
 // period's implied retail value (units sold x current catalog price, per
@@ -343,6 +350,22 @@ async function fetchOrdersForTierRevenue(site, startISO, endISO) {
 // on 2026-08-24: this is a plain per-line-item integer, not one of the
 // expensive fields (refunds/shippingAddress/tags) that were stripped out to
 // fix the original sync-timeout bug, so it shouldn't reintroduce that risk.
+//
+// `refunds { refundLineItems { quantity } }` added 2026-09-07 per Tomer's
+// request to build live YoY/MoM for the "Units Returned" KPI tile. This was
+// deliberately left out when this query was first built (see the comment
+// block above this one) — a comparison period's units-returned always came
+// back exactly 0 without it, which is why units_returned_change was
+// deliberately NOT added to server.js's yoy/mom blocks alongside
+// discounts_change/returns_change/units_sold_change earlier today. This is a
+// narrower addition than reverting to the full ORDERS_QUERY though: only
+// `quantity` per refund line item, no `subtotalSet`/`lineItem.title`/
+// `createdAt` (this query only ever needs a store-wide unit COUNT for
+// yoy/mom, never a $ value or per-product breakdown for those periods — see
+// aggregate() in src/aggregate.js, which already discards everything else
+// off a refund except quantity and subtotalSet, and returns_total gets
+// overridden by the authoritative fetchSalesReversals figure regardless).
+// Still meaningfully lighter than ORDERS_QUERY's full refund shape.
 const ORDERS_QUERY_LIGHT = `
   query OrdersForRangeLight($cursor: String, $searchQuery: String!) {
     orders(first: 100, after: $cursor, query: $searchQuery, sortKey: CREATED_AT) {
@@ -356,6 +379,15 @@ const ORDERS_QUERY_LIGHT = `
                 title
                 quantity
                 originalTotalSet { shopMoney { amount } }
+              }
+            }
+          }
+          refunds {
+            refundLineItems(first: 100) {
+              edges {
+                node {
+                  quantity
+                }
               }
             }
           }
