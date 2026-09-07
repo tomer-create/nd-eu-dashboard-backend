@@ -143,12 +143,25 @@ const CHANNEL_MAP = [
   // needing another code change.
   { ids: ['microsoft-ads', 'bing-ads'], label: 'Microsoft Ads', cv: 'pixel' },
   { ids: ['criteo'], label: 'Criteo', cv: 'pixel' },
-  { ids: ['pinterest-ads'], label: 'Pinterest', cv: 'pixel' },
+  // Switched to Channel CV 2026-09-07 per Tomer: "for Pinterest and Snapchat
+  // sources pull the actual CV from triple whale and not the pixel cv as
+  // it's pulling right now." Was 'pixel' since this file was first built
+  // 2026-08-31 — Snapchat and impact.com were carved out for Channel CV back
+  // then (see the DATA MODEL note above: Pixel CV came back $0 for those two
+  // on ND.COM even though Channel CV was populated), but Pinterest wasn't
+  // flagged as having that same problem at the time. Tomer's 2026-09-07
+  // report means Pinterest's Pixel CV isn't reliable either — same fix,
+  // same reasoning, just a channel Tomer didn't call out the first time.
+  { ids: ['pinterest-ads'], label: 'Pinterest', cv: 'channel' },
   // New rows — not present in the dashboard's existing P&L-sourced Section 4
   // data for any site/month yet. The frontend merge adds these as brand new
   // channel rows the first time a Sync returns data for them.
   { ids: ['openai-ads'], label: 'ChatGPT Ads', cv: 'pixel' },
   { ids: ['impact'], label: 'impact.com', cv: 'channel' },
+  // Snapchat has used Channel CV since 2026-08-31 already (see DATA MODEL
+  // note above) — re-confirmed still correct 2026-09-07 when Tomer asked for
+  // Pinterest to get the same treatment; no change needed here, this entry
+  // already matches what he's asking for.
   { ids: ['snapchat-ads'], label: 'Snapchat', cv: 'channel' },
   // Added 2026-09-03 — see the SHOP APP note in the file header above.
   // Shopify's own on-platform "Shop" app/marketplace channel: real Pixel CV
