@@ -382,11 +382,23 @@ async function fetchLiveData(site, month, isCurrent) {
 const LIVE_KPI_MAP = {
   'Gross Sales': { key: 'gross_sales', change: 'gross_sales_change' },
   'Net Sales': { key: 'net_sales', change: 'net_sales_change' },
-  'Discounts': { key: 'discounts_total', change: null },
-  'Returns': { key: 'returns_total', change: null },
+  // change wired up 2026-09-07 per Tomer's report ("no data for YOY and MOM"
+  // on several Goal Tracker tiles) — the backend now computes
+  // discounts_change/returns_change/units_sold_change the same way it
+  // already did for gross_sales_change etc. (see server.js; these totals
+  // were already computed for every current/yoy/mom period, the diff just
+  // wasn't being taken before).
+  'Discounts': { key: 'discounts_total', change: 'discounts_change' },
+  'Returns': { key: 'returns_total', change: 'returns_change' },
   'AOV': { key: 'average_order_value', change: null },
   'Number of Orders': { key: 'orders', change: 'orders_change' },
-  'Units Sold': { key: 'units_sold', change: null },
+  'Units Sold': { key: 'units_sold', change: 'units_sold_change' },
+  // Units Returned's change is intentionally still null — the backend's
+  // yoy/mom order fetches deliberately don't pull refund data (see the
+  // units_returned_change comment in server.js), so there's no real
+  // prior-period units-returned figure to diff against yet. This tile keeps
+  // falling back to whatever the snapshot/P&L sheet last had, same as
+  // before this fix, until that's built.
   'Units Returned': { key: 'units_returned', change: null },
   // Added 2026-08-24 per Tomer's request ("the COGS number isn't correct,
   // you should pull it from Shopify as well") — the backend now pulls this
@@ -443,6 +455,38 @@ function mergeLiveIntoMonthData(monthData, live, site) {
     '% Returns Ratio': live.kpis.gross_sales ? live.kpis.returns_total / live.kpis.gross_sales : null,
   };
 
+  // Real live YoY/MoM for % Discount Ratio / % Returns Ratio — added
+  // 2026-09-07 per Tomer's report ("no data for YOY and MOM" on several
+  // Goal Tracker tiles). The backend now returns discounts_change/
+  // returns_change alongside gross_sales_change (see server.js, added the
+  // same day), so these ratios can be derived the same way AOV's yoy/mom
+  // already are below: reconstruct the prior period's numerator and
+  // denominator from the just-synced actual and its % change, then compare
+  // the two ratios. Returns null (not a snapshot fallback) when the backend
+  // didn't return the needed change fields this sync — the caller below
+  // falls back to the snapshot's own last-known yoy/mom in that case, same
+  // safety net this block has always had.
+  function deriveLiveRatioChange(changeObj, numKey, denKey, numNow, denNow) {
+    if (!changeObj || changeObj[numKey] === undefined || changeObj[numKey] === null
+        || changeObj[denKey] === undefined || changeObj[denKey] === null
+        || !denNow || numNow === undefined || numNow === null) return null;
+    const numPrior = numNow / (1 + changeObj[numKey]);
+    const denPrior = denNow / (1 + changeObj[denKey]);
+    if (!denPrior) return null;
+    const ratioPrior = numPrior / denPrior;
+    if (!ratioPrior) return null;
+    const ratioNow = numNow / denNow;
+    return (ratioNow - ratioPrior) / ratioPrior;
+  }
+  const discountRatioYoy = deriveLiveRatioChange(live.yoy, 'discounts_change', 'gross_sales_change', live.kpis.discounts_total, live.kpis.gross_sales);
+  const discountRatioMom = deriveLiveRatioChange(live.mom, 'discounts_change', 'gross_sales_change', live.kpis.discounts_total, live.kpis.gross_sales);
+  const returnsRatioYoy = deriveLiveRatioChange(live.yoy, 'returns_change', 'gross_sales_change', live.kpis.returns_total, live.kpis.gross_sales);
+  const returnsRatioMom = deriveLiveRatioChange(live.mom, 'returns_change', 'gross_sales_change', live.kpis.returns_total, live.kpis.gross_sales);
+  const derivedRatioChanges = {
+    '% Discount Ratio': { yoy: discountRatioYoy, mom: discountRatioMom },
+    '% Returns Ratio': { yoy: returnsRatioYoy, mom: returnsRatioMom },
+  };
+
   // AOV's own YoY isn't returned by the backend either, but it can be
   // derived the same way — from Net Sales' and Orders' YoY, since
   // AOV = Net Sales ÷ Orders (implied prior-year value = actual/(1+yoy)).
@@ -474,23 +518,21 @@ function mergeLiveIntoMonthData(monthData, live, site) {
       if (actual === null) return k;
       const goal = k.goal;
       const pct_of_goal = (goal !== null && goal !== undefined && goal !== 0) ? actual / goal : null;
-      // % Discount Ratio / % Returns Ratio: a true live-recomputed YoY/MoM
-      // would need the comparison period's own gross/discounts totals,
-      // which the backend doesn't expose at this level (only the resulting
-      // % change for a handful of other KPIs). This used to hardcode
-      // yoy/mom to null here, which meant every Sync WIPED a real number
-      // these two tiles already had from the P&L sheet (Tomer reported
-      // 2026-08-31: "on some sections i don't have the MOM and YOY" — this
-      // was a live sync regression, not a document gap: pre-sync these
-      // tiles showed real percentages). Fixed by falling back to the
-      // snapshot's own last-known yoy/mom instead, same convention already
-      // used below for every other KPI without a backend-supplied change
-      // (Discounts, Returns, Units Sold, Units Returned). It's an
-      // approximation — the ratio's growth rate as of the P&L sheet's last
-      // manual update, not freshly recomputed against the just-synced
-      // actual — but it's a real number instead of a dash, consistent with
-      // every sibling KPI on this dashboard.
-      return Object.assign({}, k, { actual, yoy: k.yoy, mom: k.mom, pct_of_goal, no_data: false });
+      // % Discount Ratio / % Returns Ratio: originally hardcoded yoy/mom to
+      // null here, which meant every Sync WIPED a real number these two
+      // tiles already had from the P&L sheet (Tomer reported 2026-08-31:
+      // "on some sections i don't have the MOM and YOY" — a live-sync
+      // regression, not a document gap: pre-sync these tiles showed real
+      // percentages). First fix (2026-08-31) fell back to the snapshot's
+      // own last-known yoy/mom. Real fix (2026-09-07, once the backend
+      // started returning discounts_change/returns_change — see
+      // derivedRatioChanges above): use the freshly-computed live change
+      // when available, falling back to the snapshot's stale value only if
+      // this sync's data wasn't enough to compute one.
+      const liveChange = derivedRatioChanges[k.label] || {};
+      const yoy = liveChange.yoy !== null && liveChange.yoy !== undefined ? liveChange.yoy : k.yoy;
+      const mom = liveChange.mom !== null && liveChange.mom !== undefined ? liveChange.mom : k.mom;
+      return Object.assign({}, k, { actual, yoy, mom, pct_of_goal, no_data: false });
     }
     const map = LIVE_KPI_MAP[k.label];
     if (!map || live.kpis[map.key] === undefined) return k;
