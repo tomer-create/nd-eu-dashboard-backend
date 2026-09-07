@@ -762,14 +762,13 @@ function mergeLiveIntoMonthData(monthData, live, site) {
   }
 
   // Profit / Profit Margin — added 2026-09-03, now computed live as Net
-  // Sales − Other Costs total (Tomer's exact formula) instead of staying
-  // frozen at the embedded P&L-sheet snapshot, for all 3 sites. Uses this
-  // sync's live Net Sales when available (see LIVE_KPI_MAP above), else
-  // falls back to whatever Net Sales this monthData already has after the
-  // merge above — same "best available" fallback already used for %
-  // Discount/Returns Ratio earlier in this function. Blended ROAS is
-  // intentionally NOT touched here — see the comment near the top of this
-  // function.
+  // Sales − Total Cost instead of staying frozen at the embedded P&L-sheet
+  // snapshot, for all 3 sites. Uses this sync's live Net Sales when
+  // available (see LIVE_KPI_MAP above), else falls back to whatever Net
+  // Sales this monthData already has after the merge above — same "best
+  // available" fallback already used for % Discount/Returns Ratio earlier
+  // in this function. Blended ROAS is intentionally NOT touched here — see
+  // the comment near the top of this function.
   //
   // Profit Margin formula corrected 2026-09-06 per Tomer: "Profit Margin
   // Formula KPI = profit/gross sales" — supersedes the 2026-09-03 formula
@@ -782,14 +781,32 @@ function mergeLiveIntoMonthData(monthData, live, site) {
   // already applied everywhere else on this dashboard (see fmtVal's
   // 'percent' case) — `margin` itself is stored as a 0–1 fraction like every
   // other percent-formatted KPI, not pre-multiplied.
+  //
+  // Cost figure corrected 2026-09-07 — Tomer reported the dashboard's
+  // Profit/Profit Margin disagreeing with the sheet's own Profit row despite
+  // "the same formula". Root cause: this used to subtract
+  // merged.total_other_costs_actual (Section 7's total), but Section 7 is
+  // only a SUBSET of the sheet's true Total Cost — it deliberately excludes
+  // whatever cost categories Section 4 already shows per-channel (ad-platform
+  // spend for every site; for EU/IL that's also SMS/Email/Collabs/Impact
+  // fees). That made Profit/Profit Margin overstate reality by the amount of
+  // excluded spend (~15 points of Profit Margin for ND.COM on the day this
+  // was found). Now prefers live.pnl_total_cost_actual — the sheet's own
+  // "Total Cost" row, read directly server-side (see fetchPnlSheetTotalCost
+  // in the backend's src/googlesheets.js) — falling back to the old
+  // Section-7-only total only if that row couldn't be read this sync (sheet
+  // fetch failure, "Total Cost" label not found, etc.), so this degrades
+  // gracefully instead of going blank.
   {
     const netSalesKpi = merged.kpis.find(k => k.label === 'Net Sales');
     const netSales = live.kpis.net_sales !== undefined ? live.kpis.net_sales : (netSalesKpi ? netSalesKpi.actual : undefined);
     const grossSalesKpi = merged.kpis.find(k => k.label === 'Gross Sales');
     const grossSales = live.kpis.gross_sales !== undefined ? live.kpis.gross_sales : (grossSalesKpi ? grossSalesKpi.actual : undefined);
-    const otherCostsTotal = merged.total_other_costs_actual;
+    const otherCostsTotal = (live.pnl_total_cost_actual !== undefined && live.pnl_total_cost_actual !== null)
+      ? live.pnl_total_cost_actual
+      : merged.total_other_costs_actual;
     if (netSales !== undefined && otherCostsTotal !== undefined && otherCostsTotal !== null) {
-      const profit = netSales - otherCostsTotal; // Net Sales − Other Costs
+      const profit = netSales - otherCostsTotal; // Net Sales − Total Cost
       const margin = grossSales ? profit / grossSales : null; // Profit ÷ Gross Sales
       merged.kpis = merged.kpis.map(k => {
         if (k.label === 'Profit') {
