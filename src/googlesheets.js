@@ -45,12 +45,18 @@
 // so Tomer doesn't mistake "sheet-sourced" for "live-live" the way
 // Shopify/Triple Whale channels are.
 //
-// SCOPE: ND.COM only for now — the "COM P&L 2026" tab's row layout is what
-// was inspected and verified live on 2026-09-03 (see below). ND.EU/ND.IL
-// have their own "EU P&L 2026"/"IL P&L 2026" tabs with row layouts that
-// have NOT been inspected yet — fetchPnlSheetChannels() below returns null
-// immediately for any site other than 'com' rather than guess at an
-// unverified layout.
+// SCOPE: ND.COM and ND.IL as of 2026-09-08 — the "COM P&L 2026" tab's row
+// layout was inspected and verified live 2026-09-03 (see below); ND.IL's
+// "IL P&L 2026" tab was verified live 2026-09-08 (see the "IL ADDED" note
+// further below) and turned out to have the IDENTICAL Revenue Breakdown/Cost
+// row labels, so CHANNEL_ROWS is shared across both sites rather than
+// needing a per-site label map. ND.EU's "EU P&L 2026" tab was ALSO checked
+// live the same day and also matches this layout exactly, but is
+// deliberately not enabled yet — see fetchPnlSheetChannels()'s own comment
+// for why (OTHER_COST_ROWS double-counting risk that needs the same audit
+// IL just got, plus new-row implications for channels EU doesn't actually
+// run). fetchPnlSheetChannels() below returns null immediately for any site
+// other than 'com'/'il' rather than guess at an unaudited site.
 //
 // SHEET STRUCTURE (verified live 2026-09-03 by reading actual cell values
 // in the browser, not just labels — row numbers had already drifted once
@@ -138,6 +144,42 @@
 // right call. Dashboard label confirmed as "Collabs Affiliate" by grepping
 // dashboard_v2.html's embedded Section 4 data.
 //
+// IL ADDED 2026-09-08 — Tomer: "on Marketing & Sales Channel Performance in
+// ND.IL Doesn't pull data from spreadsheet and for collabs Affiliate as
+// well." Root cause: fetchPnlSheetChannels() below had a hard `site !== 'com'`
+// gate from when this was first built (see the original SCOPE note above) —
+// ND.IL's Section 4 was ENTIRELY frozen on the embedded snapshot, Collabs
+// Affiliate included, exactly as reported. Verified live via WebFetch against
+// the IL P&L tab's own CSV export (gid 1903859495, same redirect-following
+// technique as the Section 7 fetch below) that its Revenue Breakdown and Cost
+// sections have the EXACT SAME row labels as ND.COM's tab (SMS Jurney, SMS
+// Campaign, Email Jurney, Email Campaign - Newsletter, Microsoft Ads,
+// Pinterest, Collabs, TikTok Organic + Affiliates, Organic Revenue (P.N.) —
+// all present, same spelling) — and cross-checked the dashboard's own
+// embedded Section 4 data for ND.IL to confirm every CHANNEL_ROWS
+// dashboardLabel already exists as a row there too. So CHANNEL_ROWS needed NO
+// per-site variant for IL — just widening fetchPnlSheetChannels()'s site
+// gate to also allow 'il'. ND.EU's tab was checked the same way the same day
+// and ALSO matches this layout exactly, but is deliberately not turned on
+// yet (see fetchPnlSheetChannels()'s own comment for why — the same
+// double-counting audit this IL fix required, not yet done for EU).
+//
+// DOUBLE-COUNTING FIX REQUIRED ALONGSIDE THIS: IL's OTHER_COST_ROWS (Section
+// 7) previously included 'Collabs', 'SMS Campaign', 'Email Jurney', and
+// 'Email Campaign - Newsletter' as line items — legitimate at the time,
+// since Section 4 wasn't sourcing them for IL yet (see the PER-SITE
+// OTHER-COSTS SCOPE note below, written back when this was still true).
+// Now that Section 4 pulls these same sheet rows for IL, leaving them in
+// OTHER_COST_ROWS.il would count each one TWICE: once in Section 4's
+// per-channel spend and again in Section 7's "Other Costs" total (which
+// Profit falls back to when the sheet's own "Total Cost" row can't be read
+// this sync). Removed all 4 from OTHER_COST_ROWS.il below, matching exactly
+// how OTHER_COST_ROWS.com already excludes these same categories for the
+// identical reason. ('SMS Jurney' was never in IL's Section 7 list to begin
+// with — IL doesn't run that channel; matches it being one of the channels
+// HIDDEN_CHANNELS_BY_SITE.il hides from Section 4's IL view in
+// dashboard_v2.html — so nothing to remove there.)
+//
 // SECTION 7 (OTHER COSTS) + LIVE PROFIT/PROFIT MARGIN ADDED 2026-09-03
 // (later still) — Tomer: "fix the Profit and the profit margin" ->
 // clarified "for all 3 sites... should be formula: net sales - Other
@@ -150,8 +192,9 @@
 // the same way CHANNEL_ROWS does for Section 4 — dynamic anchor-scan of
 // each site's own "Cost" section, no hardcoded rows.
 //
-// THIS PART COVERS ALL 3 SITES, unlike CHANNEL_ROWS above (still COM-only)
-// — Tomer explicitly asked for all 3, and Section 7 already has its own
+// THIS PART COVERS ALL 3 SITES, unlike CHANNEL_ROWS above (COM+IL as of
+// 2026-09-08, EU still pending — see the SCOPE note above) — Tomer
+// explicitly asked for all 3 here, and Section 7 already has its own
 // curated, DIFFERENT list of line items per site (EU/IL P&L tab row
 // layouts inspected live 2026-09-03 via WebFetch against the sheet's own
 // CSV export, following its redirect to
@@ -162,15 +205,19 @@
 // il-pnl-monthly-update-fast skill files, cross-checked live).
 //
 // PER-SITE OTHER-COSTS SCOPE DIFFERS ON PURPOSE: each site's Section 7
-// list (OTHER_COST_ROWS below) was already curated in an earlier session to
-// exclude exactly the cost rows that ARE tracked in that site's Section 4
-// (to avoid double-counting) — and Section 4's live coverage differs by
-// site (COM now covers Attentive/Microsoft Ads/Collabs/Pinterest via the
-// sheet as of earlier today; EU/IL's Section 4 does not, so EU/IL's
-// Section 7 still legitimately includes Impact Affiliate fees, Collabs,
-// SMS/Email costs that COM's Section 7 excludes). This fetch respects
-// whatever list each site's embedded other_costs already has — it does not
-// change which line items appear, only makes their values live.
+// list (OTHER_COST_ROWS below) is curated to exclude exactly the cost rows
+// that ARE tracked in that site's Section 4 (to avoid double-counting) — and
+// Section 4's live sheet-coverage differs by site. As of 2026-09-08 (see the
+// "IL ADDED" note above): COM and IL both cover Attentive/Microsoft
+// Ads/Collabs/Pinterest via Section 4's sheet pull, so both sites' Section 7
+// lists exclude Collabs/SMS/Email accordingly. EU's Section 4 does NOT yet
+// pull these from the sheet (see fetchPnlSheetChannels()'s own comment for
+// why it's not enabled there yet), so EU's Section 7 still legitimately
+// includes Impact Affiliate fees, Collabs, SMS/Email costs that COM/IL's
+// Section 7 now exclude — that's intentional, not drift, until EU gets the
+// same audit. This fetch respects whatever list each site's embedded
+// other_costs already has — it does not change which line items appear,
+// only makes their values live.
 //
 // PRODUCT COST / COGS: deliberately NOT read from the sheet for any site.
 // Section 1's "COGS" KPI tile already pulls live from Shopify's own
@@ -207,9 +254,12 @@ function csvExportUrl(site) {
 }
 
 // Sheet label -> dashboard label, plus whether a matching Cost-section row
-// exists for it. See the LABEL MAPPING note above. COM only (see SCOPE note
-// above) — Section 4's live P&L-sheet channel pull hasn't been extended to
-// EU/IL yet.
+// exists for it. See the LABEL MAPPING note above. Used for ND.COM and
+// ND.IL as of 2026-09-08 (see the SCOPE and "IL ADDED" notes above) — shared
+// as-is across both sites since their sheet tabs were verified live to have
+// identical Revenue Breakdown/Cost row labels for every channel here. Not
+// yet used for ND.EU (verified to match too, but not enabled — see
+// fetchPnlSheetChannels()'s own comment).
 const CHANNEL_ROWS = [
   { sheetLabel: 'SMS Jurney', dashboardLabel: 'Attentive - SMS Journey', hasCost: true },
   { sheetLabel: 'SMS Campaign', dashboardLabel: 'Attentive - SMS Campaign', hasCost: true },
@@ -287,13 +337,18 @@ const OTHER_COST_ROWS = {
     { sheetLabel: 'Triple Whale - BI Tool', dashboardLabel: 'Triple Whale - BI Tool' },
     { sheetLabel: 'Reach Panel', dashboardLabel: 'Reach Panel' },
     { sheetLabel: 'Shopify + Apps', dashboardLabel: 'Shopify + Apps' },
-    { sheetLabel: 'Collabs', dashboardLabel: 'Collabs' },
+    // 'Collabs', 'SMS Campaign', 'Email Jurney', and 'Email Campaign -
+    // Newsletter' REMOVED 2026-09-08 — see the "IL ADDED"/"DOUBLE-COUNTING
+    // FIX" note near the top of this file. These now live in Section 4
+    // (CHANNEL_ROWS above, as 'Collabs Affiliate'/'Attentive - SMS
+    // Campaign'/'Attentive - Email Journey'/'Attentive - Email Campaign
+    // (Newsletter)') now that Section 4's sheet pull covers ND.IL — leaving
+    // them here too would double-count them in Section 7's Other Costs
+    // total. ('SMS Jurney' was never in this list — IL doesn't run that
+    // channel, see HIDDEN_CHANNELS_BY_SITE.il in dashboard_v2.html.)
     { sheetLabel: 'Quiz Fees', dashboardLabel: 'Quiz Fees' },
     { sheetLabel: 'Tolstoy Fee', dashboardLabel: 'Tolstoy Fee' },
     { sheetLabel: 'Development', dashboardLabel: 'Development' },
-    { sheetLabel: 'SMS Campaign', dashboardLabel: 'SMS Campaign' },
-    { sheetLabel: 'Email Jurney', dashboardLabel: 'Email Jurney' },
-    { sheetLabel: 'Email Campaign - Newsletter', dashboardLabel: 'Email Campaign - Newsletter' },
     { sheetLabel: 'Yotpo Loyalty Program', dashboardLabel: 'Yotpo Loyalty Program' },
     { sheetLabel: 'Yotpo Reviews', dashboardLabel: 'Yotpo Reviews' },
     { sheetLabel: 'PR Box cost', dashboardLabel: 'PR Box Cost' }, // standalone on IL, not combined with COGS
@@ -471,7 +526,16 @@ function findActualColIdx(rows, start, site) {
 // month/rows couldn't be located, or the request failed (logged, never
 // thrown).
 async function fetchPnlSheetChannels(site, start) {
-  if (site !== 'com') return null; // EU/IL tabs not extended to Section 4 yet -- see SCOPE note above
+  // ND.IL added 2026-09-08 -- see the "IL ADDED" note above. ND.EU's tab
+  // verified to have the identical row layout too (same live check, same
+  // day) but NOT enabled here yet -- Tomer only reported ND.IL, and turning
+  // EU on would need the same OTHER_COST_ROWS double-count audit this IL fix
+  // got (EU's OTHER_COST_ROWS.eu currently still includes Collabs/SMS/Email,
+  // same as IL's did before this fix) plus a check of what NEW rows would
+  // appear for channels EU doesn't actually run (e.g. Microsoft Ads/Pinterest
+  // showing a $0 row instead of staying absent). Flip this to include 'eu'
+  // once that's done, following the exact same pattern as IL below.
+  if (site !== 'com' && site !== 'il') return null;
   if (!start) return null;
 
   const rows = await fetchSheetRows(site);
