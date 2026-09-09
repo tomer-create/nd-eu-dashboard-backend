@@ -317,15 +317,28 @@ const OTHER_COST_ROWS = {
     { sheetLabel: 'SEO', dashboardLabel: 'SEO' },
     { sheetLabel: 'Shopify + Apps', dashboardLabel: 'Shopify + Apps' },
     { sheetLabel: 'Impact TBU', dashboardLabel: 'Impact TBU' },
-    { sheetLabel: 'Impact Affiliate fees', dashboardLabel: 'Impact Affiliate fees' },
-    { sheetLabel: 'Collabs', dashboardLabel: 'Collabs' },
+    // 'Impact Affiliate fees', 'Collabs', 'SMS Jurney', 'SMS Campaign',
+    // 'Email Jurney', and 'Email Campaign - Newsletter' REMOVED 2026-09-09
+    // per Tomer's request, mirroring the IL double-counting fix from
+    // 2026-09-08 -- see the "ND.EU added" note on fetchPnlSheetChannels
+    // above. Collabs/SMS Jurney/SMS Campaign/Email Jurney/Email Campaign -
+    // Newsletter now live in Section 4 (CHANNEL_ROWS above, as 'Collabs
+    // Affiliate'/'Attentive - SMS Journey'/'Attentive - SMS Campaign'/
+    // 'Attentive - Email Journey'/'Attentive - Email Campaign (Newsletter)')
+    // now that Section 4's sheet pull covers ND.EU too -- leaving them here
+    // too would double-count them in Section 7's Other Costs total.
+    // 'Impact Affiliate fees' is DIFFERENT: unlike the other 5, it has NO
+    // Section 4 counterpart (Impact's revenue is Triple-Whale-sourced, and
+    // CHANNEL_ROWS has no cost-only entry for it) -- Tomer explicitly chose
+    // to just remove it with no replacement (matches ND.COM, which has
+    // never tracked this cost anywhere either), not to build it a live home
+    // in Section 4. If that decision changes later, this would need real
+    // code (CHANNEL_ROWS currently requires a matching Revenue-section row
+    // to return anything, and Impact Affiliate fees' sheet label differs
+    // from Impact's revenue row label), not just re-adding this line here.
     { sheetLabel: 'Quiz Fees', dashboardLabel: 'Quiz Fees' },
     { sheetLabel: 'Tolstoy Fee', dashboardLabel: 'Tolstoy Fee' },
     { sheetLabel: 'Development', dashboardLabel: 'Development' },
-    { sheetLabel: 'SMS Jurney', dashboardLabel: 'SMS Jurney' },
-    { sheetLabel: 'SMS Campaign', dashboardLabel: 'SMS Campaign' },
-    { sheetLabel: 'Email Jurney', dashboardLabel: 'Email Jurney' },
-    { sheetLabel: 'Email Campaign - Newsletter', dashboardLabel: 'Email Campaign - Newsletter' },
     { sheetLabel: 'Yotpo Loyalty Program', dashboardLabel: 'Yotpo Loyalty Program' },
     { sheetLabel: 'Yotpo Reviews', dashboardLabel: 'Yotpo Reviews' },
   ],
@@ -572,16 +585,29 @@ function findActualColIdx(rows, start, site) {
 // month/rows couldn't be located, or the request failed (logged, never
 // thrown).
 async function fetchPnlSheetChannels(site, start) {
-  // ND.IL added 2026-09-08 -- see the "IL ADDED" note above. ND.EU's tab
-  // verified to have the identical row layout too (same live check, same
-  // day) but NOT enabled here yet -- Tomer only reported ND.IL, and turning
-  // EU on would need the same OTHER_COST_ROWS double-count audit this IL fix
-  // got (EU's OTHER_COST_ROWS.eu currently still includes Collabs/SMS/Email,
-  // same as IL's did before this fix) plus a check of what NEW rows would
-  // appear for channels EU doesn't actually run (e.g. Microsoft Ads/Pinterest
-  // showing a $0 row instead of staying absent). Flip this to include 'eu'
-  // once that's done, following the exact same pattern as IL below.
-  if (site !== 'com' && site !== 'il') return null;
+  // ND.IL added 2026-09-08 -- see the "IL ADDED" note above. ND.EU added
+  // 2026-09-09 per Tomer's request to remove Collabs/SMS Jurney/SMS
+  // Campaign/Email Jurney/Email Campaign - Newsletter from EU's Other Costs
+  // (OTHER_COST_ROWS.eu, see below) -- same double-count risk IL had, so
+  // Section 4 needs to actually source these live before Section 7 stops
+  // showing them, same order of operations as the IL fix. Verified live
+  // 2026-09-09 (WebFetch against the EU tab's own CSV export, gid 464121371)
+  // before enabling: Collabs/SMS Jurney/SMS Campaign/Email Jurney/Email
+  // Campaign - Newsletter all have real Revenue-section rows for EU (e.g.
+  // Aug-26 actuals: SMS Jurney revenue 19,105 / cost 1,188, Email Campaign -
+  // Newsletter revenue 78,035 / cost 3,938) -- Collabs itself was blank
+  // ("-") for both revenue and cost in Aug-26, same as it would've been
+  // before this fix, so enabling it doesn't lose anything, it'll just start
+  // showing real numbers once the sheet has them. Also checked the "new row
+  // for a channel EU doesn't run" risk flagged in the comment this replaced:
+  // Microsoft Ads and Pinterest both have BLANK ("-") Revenue-section rows
+  // for EU (confirmed live) -- CHANNEL_ROWS requires a parseable revenue
+  // value to return anything but no_data:true, and the Section 4 merge in
+  // dashboard_v2.html already skips adding a new row for a no_data channel
+  // -- so enabling this for EU does NOT add stray $0 Microsoft Ads/Pinterest
+  // rows right now. (If EU ever starts tracking those in the sheet for
+  // real, a real row appearing is the correct behavior, not a bug.)
+  if (site !== 'com' && site !== 'il' && site !== 'eu') return null;
   if (!start) return null;
 
   const rows = await fetchSheetRows(site);
