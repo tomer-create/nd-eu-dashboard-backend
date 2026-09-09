@@ -332,11 +332,22 @@ const OTHER_COST_ROWS = {
   il: [
     { sheetLabel: 'Boxes', dashboardLabel: 'Boxes' },
     { sheetLabel: 'IL - Shipping cost', dashboardLabel: 'IL - Shipping Cost' },
+    // NOTE: the IL P&L tab also has a second, generic "Shipping cost" row
+    // (no site prefix) directly below "IL - Shipping cost" -- confirmed
+    // live 2026-09-09 to be a blank/unused template leftover (every month
+    // and the YTD column show "-", no formula) carried over from the
+    // COM/EU tabs' two-row shipping split, which doesn't apply to IL
+    // (single country, no split). Deliberately NOT mapped here -- do not
+    // add it without confirming live that it has actually started holding
+    // real numbers.
     { sheetLabel: 'Pick & Pack', dashboardLabel: 'Pick & Pack' },
     { sheetLabel: 'PPC Agency Fee', dashboardLabel: 'PPC Agency Fee' },
     { sheetLabel: 'Triple Whale - BI Tool', dashboardLabel: 'Triple Whale - BI Tool' },
+    { sheetLabel: 'Talent Pop - Cstomer Service', dashboardLabel: 'Talent Pop - Customer Service' }, // sheet has this typo (same as COM)
     { sheetLabel: 'Reach Panel', dashboardLabel: 'Reach Panel' },
+    { sheetLabel: 'SEO', dashboardLabel: 'SEO' },
     { sheetLabel: 'Shopify + Apps', dashboardLabel: 'Shopify + Apps' },
+    { sheetLabel: 'Impact TBU', dashboardLabel: 'Impact TBU' },
     // 'Collabs', 'SMS Campaign', 'Email Jurney', and 'Email Campaign -
     // Newsletter' REMOVED 2026-09-08 — see the "IL ADDED"/"DOUBLE-COUNTING
     // FIX" note near the top of this file. These now live in Section 4
@@ -351,6 +362,19 @@ const OTHER_COST_ROWS = {
     { sheetLabel: 'Development', dashboardLabel: 'Development' },
     { sheetLabel: 'Yotpo Loyalty Program', dashboardLabel: 'Yotpo Loyalty Program' },
     { sheetLabel: 'Yotpo Reviews', dashboardLabel: 'Yotpo Reviews' },
+    { sheetLabel: 'Gratis', dashboardLabel: 'Gratis' },
+    // ADDED 2026-09-09: 'Talent Pop - Cstomer Service', 'SEO', 'Impact TBU',
+    // 'Gratis', 'Commision', and 'TikTok Gifting' were all present as real
+    // Cost-section rows on the live IL P&L tab (confirmed 2026-09-09,
+    // with genuine historical Actual values -- e.g. Gratis=791 Aug-26,
+    // Impact TBU=3,000 YTD, Commision=10 YTD) but were missing from this
+    // array, so Section 7 (Other Costs) never pulled them -- this was the
+    // cause of Tomer's "ND.IL Other Costs doesn't pull all the data"
+    // report. None of these overlap Section 4's channel coverage (they
+    // have no paired revenue channel), so adding them here doesn't
+    // reintroduce the double-counting the 2026-09-08 fix removed.
+    { sheetLabel: 'Commision', dashboardLabel: 'Commission (TikTok Affiliate)' }, // sheet has this typo (same as COM)
+    { sheetLabel: 'TikTok Gifting', dashboardLabel: 'TikTok Gifting' },
     { sheetLabel: 'PR Box cost', dashboardLabel: 'PR Box Cost' }, // standalone on IL, not combined with COGS
   ],
 };
