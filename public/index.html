@@ -798,13 +798,23 @@ function mergeLiveIntoMonthData(monthData, live, site) {
   //    all; ND.IL keeps the two as separate standalone rows). For COM only,
   //    the sheet's raw "PR Box Cost" figure is added to live COGS and
   //    written into that one combined row — never as a second row.
-  // Only EXISTING rows in the snapshot are updated by label match; this
-  // never adds a brand-new cost-category row Tomer hasn't already curated
-  // for that site (mirrors how Section 4 only fills gaps, not invents rows,
-  // for the sheet-sourced channels).
+  // EXISTING rows in the snapshot are updated by label match. A live row
+  // whose label has NO match in the snapshot is now also appended as a new
+  // row (fix added 2026-09-09, mirroring how Section 4 already handles a
+  // brand-new channel — see the `else if (!lc.no_data)` branch above) —
+  // this used to be a strict "never add a new row" merge, but that silently
+  // dropped any item the backend's curated OTHER_COST_ROWS[site] list grows
+  // to include after this HTML's embedded snapshot was baked (e.g. Talent
+  // Pop - Customer Service / SEO / Impact TBU / Gratis / Commission
+  // (TikTok Affiliate) / TikTok Gifting, added to OTHER_COST_ROWS.il
+  // 2026-09-09) — exactly what caused Tomer's "ND.IL Other Costs doesn't
+  // pull all the data" report. A brand-new row that comes back no_data is
+  // still skipped, same as Section 4, so this never adds a permanently
+  // empty "No data" line for a category with nothing to show yet.
   if (live.other_costs && live.other_costs.length) {
     const byLabel = new Map(live.other_costs.map(o => [o.label, o]));
     const cogs = live.kpis.cogs;
+    const seenLabels = new Set(merged.other_costs.map(row => row.label));
     const updatedCosts = merged.other_costs.map(row => {
       if (site === 'com' && row.label === 'PR Box Cost + Product Cost') {
         const prBox = byLabel.get('PR Box Cost');
@@ -819,6 +829,14 @@ function mergeLiveIntoMonthData(monthData, live, site) {
       if (!liveRow || liveRow.no_data) return row;
       return Object.assign({}, row, { actual: liveRow.actual });
     });
+    for (const liveRow of live.other_costs) {
+      if (seenLabels.has(liveRow.label) || liveRow.no_data) continue;
+      updatedCosts.push({
+        label: liveRow.label,
+        actual: liveRow.actual,
+        goal: null,
+      });
+    }
     const total = updatedCosts.reduce((sum, r) => sum + (r.actual || 0), 0);
     merged.other_costs = updatedCosts.map(r => Object.assign({}, r, {
       ratio_of_total: total ? r.actual / total : null,
