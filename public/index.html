@@ -174,15 +174,32 @@
     background:var(--surface-1); color:var(--text-primary); border-radius:8px; padding:8px 13px;
     font-size:12.5px; font-weight:650; font-family:inherit; cursor:pointer; white-space:nowrap; }
   .mobile-toggle-btn:hover { background:var(--track); }
+  /* Wraps today-date + the mobile toggle button so they stay one flex item
+     -- on desktop this changes nothing visually (still one row, same gap
+     via control-bar-top's own gap previously); on mobile it's what lets
+     them share a single centered line (see the mobile-mode rules below). */
+  .date-toggle-row { display: flex; align-items: center; gap: 12px; }
   select.site-picker-mobile { display:none; }
+  .mobile-quicknav-wrap { display:none; }
+  .mobile-quicknav-title { display:none; }
   .mobile-quicknav { display:none; }
 
   body.mobile-mode .wrap { padding: 14px 12px 48px; max-width: 600px; }
-  body.mobile-mode .control-bar { gap: 10px; padding: 12px 0 10px; }
-  body.mobile-mode .control-bar-top { flex-direction: column; align-items: flex-start; gap: 10px; }
+  /* Not sticky on mobile: the control bar (brand/date/dropdowns/sync) is
+     tall enough that keeping BOTH it and the quicknav bar pinned at top:0
+     made the quicknav bar render invisible (hidden behind the taller,
+     higher-z-index control bar) as soon as you scrolled -- found while
+     verifying the quicknav title/centering change 2026-09-09. Only the
+     compact quicknav-wrap below stays pinned in mobile mode now. */
+  body.mobile-mode .control-bar { position: static; gap: 10px; padding: 12px 0 10px; }
+  /* Top line (brand) and the date+toggle line below it are both centered as
+     a block -- requested 2026-09-09: "center the first line" + "desktop
+     view button move to the same line of the date". */
+  body.mobile-mode .control-bar-top { flex-direction: column; align-items: center; gap: 10px; text-align: center; }
+  body.mobile-mode .brand { justify-content: center; }
   body.mobile-mode .brand-logo { height: 28px; }
   body.mobile-mode .brand h1 { font-size: 16px; }
-  body.mobile-mode .today-date { align-self: flex-start; }
+  body.mobile-mode .date-toggle-row { width: 100%; justify-content: center; }
   body.mobile-mode .controls { flex-direction: column; align-items: stretch; gap: 8px; }
   body.mobile-mode .site-tabs { display: none; }
   body.mobile-mode select.site-picker-mobile { display: block; width: 100%; border: 1px solid var(--border);
@@ -192,10 +209,17 @@
   body.mobile-mode .sync-btn { width: 100%; justify-content: center; padding: 12px 13px; font-size: 13.5px; }
   body.mobile-mode .sync-status { text-align: center; }
 
-  /* sticky numbered jump-to-section bar — tap a number, smooth-scroll there */
-  body.mobile-mode .mobile-quicknav { display: flex; gap: 6px; overflow-x: auto; -webkit-overflow-scrolling: touch;
+  /* sticky numbered jump-to-section bar — tap a number, smooth-scroll there.
+     A centered "Jump to Section" title sits above the (also centered) pill
+     row; the WRAPPER is sticky/pinned as one unit while scrolling, added
+     2026-09-09 per Tomer's request to center the pills and label them. */
+  body.mobile-mode .mobile-quicknav-wrap { display: flex; flex-direction: column; align-items: center; gap: 6px;
     position: sticky; top: 0; z-index: 39; background: var(--page-plane);
-    padding: 8px 2px 10px; margin-bottom: 2px; border-bottom: 1px solid var(--border); scrollbar-width: none; }
+    padding: 8px 2px 10px; margin-bottom: 2px; border-bottom: 1px solid var(--border); }
+  body.mobile-mode .mobile-quicknav-title { display: block; font-size: 10.5px; font-weight: 700;
+    text-transform: uppercase; letter-spacing: 0.04em; color: var(--text-muted); }
+  body.mobile-mode .mobile-quicknav { display: flex; justify-content: center; gap: 6px; width: 100%;
+    overflow-x: auto; -webkit-overflow-scrolling: touch; scrollbar-width: none; }
   body.mobile-mode .mobile-quicknav::-webkit-scrollbar { display: none; }
   body.mobile-mode .mobile-quicknav button { flex: none; display:inline-flex; align-items:center; justify-content:center;
     width: 32px; height: 32px; border-radius: 50%; background: var(--surface-1);
@@ -203,7 +227,7 @@
     font-weight: 700; font-family: inherit; cursor: pointer; padding: 0; }
   body.mobile-mode .mobile-quicknav button[hidden] { display: none; }
 
-  body.mobile-mode .card { padding: 14px; border-radius: 10px; scroll-margin-top: 56px; }
+  body.mobile-mode .card { padding: 14px; border-radius: 10px; scroll-margin-top: 78px; }
   body.mobile-mode .section-title { font-size: 14px; }
   body.mobile-mode .section-sub { font-size: 11.5px; }
 
@@ -249,8 +273,10 @@
         <div class="sub" id="site-full-name"></div>
       </div>
     </div>
-    <span class="today-date" id="today-date"></span>
-    <button class="mobile-toggle-btn" id="mobile-toggle-btn" type="button">📱 Mobile View</button>
+    <div class="date-toggle-row">
+      <span class="today-date" id="today-date"></span>
+      <button class="mobile-toggle-btn" id="mobile-toggle-btn" type="button">📱 Mobile View</button>
+    </div>
    </div>
    <div class="controls">
       <div class="site-tabs" id="site-tabs"></div>
@@ -263,7 +289,10 @@
    </div>
   </div>
 
-  <div class="mobile-quicknav" id="mobile-quicknav"></div>
+  <div class="mobile-quicknav-wrap">
+    <div class="mobile-quicknav-title">Jump to Section</div>
+    <div class="mobile-quicknav" id="mobile-quicknav"></div>
+  </div>
 
   <div class="card" id="card-1">
     <div class="section-title"><span class="section-num">1</span>Goal Tracker<span id="mtd-flag-1"></span></div>
