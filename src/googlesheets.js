@@ -462,9 +462,31 @@ function findRevenueAndCostRows(rows) {
   return { revenueRows, costRows };
 }
 
+// Parses a P&L sheet cell's displayed text into a number, or null if it's
+// genuinely empty/non-numeric (a bare "-" placeholder the sheet shows for
+// zero/blank cells, an error string, etc). Strips thousands-separator
+// commas AND whitespace -- not just commas -- because Google Sheets renders
+// negative numbers under this sheet's number format as "- 144,493" (a SPACE
+// between the minus sign and the digits, i.e. accounting-style spacing),
+// and `Number()` refuses to parse that (Number("- 144493") is NaN; only
+// Number("-144493") works). Before 2026-09-09 this function only stripped
+// commas, so any negative cell silently came back as null/no_data instead
+// of its real (negative) value. Caught when ND.IL's "Organic Revenue (P.N)"
+// -- a self-balancing plug row that can legitimately go negative -- showed
+// no_data:true for Sep-26 despite the sheet clearly showing "- 144,493" in
+// that cell (confirmed live via the cell's own formula bar: Sep-26 Actual
+// literally computed to -144,493 that day). Stripping all whitespace (not
+// just the sign-adjacent gap) is safe here: every value this function ever
+// sees is a plain formatted number/currency string, never free text with
+// meaningful internal spaces, and a bare "-" placeholder still correctly
+// parses to NaN -> null after stripping (nothing left for Number() to read
+// but the dash itself). Affects every P&L-sheet reader in this file
+// (fetchPnlSheetChannels, fetchPnlSheetOtherCosts, fetchPnlSheetTotalCost,
+// fetchPnlSheetMarketingSpend) since they all funnel through this one
+// function -- not just the row that surfaced it.
 function parseNum(v) {
   if (v === undefined || v === null || v === '') return null;
-  const n = Number(String(v).replace(/,/g, ''));
+  const n = Number(String(v).replace(/[,\s]/g, ''));
   return Number.isFinite(n) ? n : null;
 }
 
