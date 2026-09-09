@@ -155,6 +155,85 @@
   .placeholder .ph-note { font-size: 11.5px; color: var(--text-muted); margin-top: 10px; }
 
   footer.dash-footer { margin-top: 10px; font-size: 11.5px; color: var(--text-muted); text-align: center; }
+
+  /* ==================================================================
+     MOBILE VIEW — added 2026-09-09 per Tomer: "the mobile version will
+     be switch by a button from the top of the dashboard... everything
+     should be visually mobile friendly and easy to navigate."
+     This is a MANUAL toggle (not a @media auto-detect) — a button flips
+     `mobile-mode` on <body>, remembered per-device via localStorage (see
+     setMobileMode() in the script). All rules below are scoped under
+     body.mobile-mode so desktop rendering is completely untouched when
+     the toggle is off. Data tables (table.dtable, sections 2-4/5/6/7/8)
+     become stacked cards — one card per row, each column rendered as a
+     "LABEL  value" line — via `data-label` attributes the script attaches
+     to every <td> automatically (applyMobileTableLabels()), not by
+     duplicating any render*() function's markup for a second layout.
+     ================================================================== */
+  .mobile-toggle-btn { display:inline-flex; align-items:center; gap:6px; border:1px solid var(--border);
+    background:var(--surface-1); color:var(--text-primary); border-radius:8px; padding:8px 13px;
+    font-size:12.5px; font-weight:650; font-family:inherit; cursor:pointer; white-space:nowrap; }
+  .mobile-toggle-btn:hover { background:var(--track); }
+  select.site-picker-mobile { display:none; }
+  .mobile-quicknav { display:none; }
+
+  body.mobile-mode .wrap { padding: 14px 12px 48px; max-width: 600px; }
+  body.mobile-mode .control-bar { gap: 10px; padding: 12px 0 10px; }
+  body.mobile-mode .control-bar-top { flex-direction: column; align-items: flex-start; gap: 10px; }
+  body.mobile-mode .brand-logo { height: 28px; }
+  body.mobile-mode .brand h1 { font-size: 16px; }
+  body.mobile-mode .today-date { align-self: flex-start; }
+  body.mobile-mode .controls { flex-direction: column; align-items: stretch; gap: 8px; }
+  body.mobile-mode .site-tabs { display: none; }
+  body.mobile-mode select.site-picker-mobile { display: block; width: 100%; border: 1px solid var(--border);
+    background: var(--surface-1); color: var(--text-primary); border-radius: 8px; padding: 11px 12px;
+    font-size: 14px; font-weight: 650; font-family: inherit; }
+  body.mobile-mode select.month-picker { width: 100%; padding: 11px 12px; font-size: 14px; }
+  body.mobile-mode .sync-btn { width: 100%; justify-content: center; padding: 12px 13px; font-size: 13.5px; }
+  body.mobile-mode .sync-status { text-align: center; }
+
+  /* sticky numbered jump-to-section bar — tap a number, smooth-scroll there */
+  body.mobile-mode .mobile-quicknav { display: flex; gap: 6px; overflow-x: auto; -webkit-overflow-scrolling: touch;
+    position: sticky; top: 0; z-index: 39; background: var(--page-plane);
+    padding: 8px 2px 10px; margin-bottom: 2px; border-bottom: 1px solid var(--border); scrollbar-width: none; }
+  body.mobile-mode .mobile-quicknav::-webkit-scrollbar { display: none; }
+  body.mobile-mode .mobile-quicknav button { flex: none; display:inline-flex; align-items:center; justify-content:center;
+    width: 32px; height: 32px; border-radius: 50%; background: var(--surface-1);
+    border: 1px solid var(--border); color: var(--text-secondary); font-size: 12.5px;
+    font-weight: 700; font-family: inherit; cursor: pointer; padding: 0; }
+  body.mobile-mode .mobile-quicknav button[hidden] { display: none; }
+
+  body.mobile-mode .card { padding: 14px; border-radius: 10px; scroll-margin-top: 56px; }
+  body.mobile-mode .section-title { font-size: 14px; }
+  body.mobile-mode .section-sub { font-size: 11.5px; }
+
+  body.mobile-mode .kpi-grid { grid-template-columns: 1fr; }
+  body.mobile-mode .kpi-tile { padding: 12px 13px; }
+
+  /* ---- tables -> stacked cards ---- */
+  body.mobile-mode table.dtable { font-size: 12.5px; }
+  body.mobile-mode table.dtable thead { display: none; }
+  body.mobile-mode table.dtable, body.mobile-mode table.dtable tbody { display: block; width: 100%; }
+  body.mobile-mode table.dtable tr { display: block; border: 1px solid var(--border); border-radius: 10px;
+    padding: 10px 12px 2px; margin-bottom: 8px; background: var(--page-plane); }
+  body.mobile-mode table.dtable tr.total-row { border: 1.5px solid var(--text-primary); background: var(--surface-1); }
+  body.mobile-mode table.dtable tr.no-data-row { background: transparent; border-style: dashed; }
+  body.mobile-mode table.dtable td { display: block; padding: 0; border: none; text-align: left; }
+  body.mobile-mode table.dtable td:first-child { font-weight: 700; font-size: 13.5px; color: var(--text-primary);
+    padding-bottom: 8px; margin-bottom: 6px; border-bottom: 1px solid var(--gridline); }
+  body.mobile-mode table.dtable td:not(:first-child) { display: flex; align-items: center;
+    justify-content: space-between; gap: 10px; padding: 6px 0; border-bottom: 1px dashed var(--gridline); text-align: right; }
+  body.mobile-mode table.dtable td:last-child { border-bottom: none; }
+  body.mobile-mode table.dtable td[data-label]::before { content: attr(data-label); font-size: 10.5px;
+    font-weight: 650; text-transform: uppercase; color: var(--text-muted); letter-spacing: 0.02em;
+    text-align: left; flex: none; }
+  /* full-width message cells (no-data rows, "show more" button row) — not a label:value line */
+  body.mobile-mode table.dtable tr.no-data-row td[colspan],
+  body.mobile-mode table.dtable tr.show-more-row td {
+    display: block; text-align: center; border: none; padding: 4px 0; margin-bottom: 0;
+    font-weight: 500; font-size: 12px; color: var(--text-secondary); }
+  body.mobile-mode table.dtable tr.no-data-row td:first-child { border-bottom: none; margin-bottom: 4px; padding-bottom: 4px; }
+  body.mobile-mode .cell-figs { align-items: flex-end; }
 </style>
 </head>
 <body>
@@ -171,9 +250,11 @@
       </div>
     </div>
     <span class="today-date" id="today-date"></span>
+    <button class="mobile-toggle-btn" id="mobile-toggle-btn" type="button">📱 Mobile View</button>
    </div>
    <div class="controls">
       <div class="site-tabs" id="site-tabs"></div>
+      <select class="site-picker-mobile" id="site-picker-mobile"></select>
       <select class="month-picker" id="month-picker"></select>
       <button class="sync-btn" id="sync-btn" type="button">
         <span class="spin"></span><span class="sync-icon">⟳</span> Sync
@@ -182,25 +263,27 @@
    </div>
   </div>
 
-  <div class="card">
+  <div class="mobile-quicknav" id="mobile-quicknav"></div>
+
+  <div class="card" id="card-1">
     <div class="section-title"><span class="section-num">1</span>Goal Tracker<span id="mtd-flag-1"></span></div>
     <div class="section-sub">Monthly goal vs. actual, progress to goal, and year-over-year change</div>
     <div class="kpi-grid" id="kpi-grid"></div>
   </div>
 
-  <div class="card">
+  <div class="card" id="card-2">
     <div class="section-title"><span class="section-num">2</span>Top 15 Selling Products</div>
     <div class="section-sub">Gross sales, net sales, units sold, share of total, YoY &amp; MoM — from Shopify</div>
     <div id="section-2"></div>
   </div>
 
-  <div class="card">
+  <div class="card" id="card-3">
     <div class="section-title"><span class="section-num">3</span>Top 15 Return Products<span id="mtd-flag-3"></span></div>
     <div class="section-sub">Ranked year-to-date by return $ value; return ratio shown for both YTD and the current month — from Shopify</div>
     <div id="section-3"></div>
   </div>
 
-  <div class="card">
+  <div class="card" id="card-4">
     <div class="section-title"><span class="section-num">4</span>Marketing &amp; Sales Channel Performance<span id="mtd-flag-4"></span></div>
     <div class="section-sub">Spend vs. goal, revenue vs. goal, ROAS, and share of total revenue by channel</div>
     <div id="section-4"></div>
@@ -212,19 +295,19 @@
     <div id="section-5"></div>
   </div>
 
-  <div class="card">
+  <div class="card" id="card-6">
     <div class="section-title"><span class="section-num">6</span>Yotpo Loyalty</div>
     <div class="section-sub">New members, points redeemed by tier, and movement between tiers — from Yotpo webhook events</div>
     <div id="section-8"></div>
   </div>
 
-  <div class="card">
+  <div class="card" id="card-7">
     <div class="section-title"><span class="section-num">7</span>Discounts Breakdown</div>
     <div class="section-sub">Discount $ by program (storefront orders only), identified by order tag — from Shopify</div>
     <div id="section-6"></div>
   </div>
 
-  <div class="card">
+  <div class="card" id="card-8">
     <div class="section-title"><span class="section-num">8</span>Other Costs<span id="mtd-flag-7"></span></div>
     <div class="section-sub">Monthly goal vs. actual by cost line item, and each item's share of total other costs</div>
     <div id="section-7"></div>
@@ -2584,6 +2667,12 @@ function renderDiscounts(monthData) {
 function renderSiteTabs() {
   const el = document.getElementById('site-tabs');
   el.innerHTML = '';
+  // Mobile view (added 2026-09-09) shows this same site list as a native
+  // <select> instead of the pill tabs — built here, from the same
+  // DATA.sites/ALL_SITES_META source, so the two never drift out of sync.
+  // CSS (body.mobile-mode) decides which one is actually visible.
+  const mobileEl = document.getElementById('site-picker-mobile');
+  mobileEl.innerHTML = '';
   Object.keys(DATA.sites).forEach(key => {
     const btn = document.createElement('button');
     btn.className = 'site-tab' + (key === state.site ? ' active' : '');
@@ -2591,6 +2680,11 @@ function renderSiteTabs() {
     btn.dataset.site = key;
     btn.addEventListener('click', () => { state.site = key; render(); });
     el.appendChild(btn);
+
+    const opt = document.createElement('option');
+    opt.value = key;
+    opt.textContent = DATA.sites[key].meta.name;
+    mobileEl.appendChild(opt);
   });
   const allBtn = document.createElement('button');
   allBtn.className = 'site-tab' + (state.site === 'all' ? ' active' : '');
@@ -2599,6 +2693,13 @@ function renderSiteTabs() {
   allBtn.title = FX_NOTE;
   allBtn.addEventListener('click', () => { state.site = 'all'; render(); });
   el.appendChild(allBtn);
+
+  const allOpt = document.createElement('option');
+  allOpt.value = 'all';
+  allOpt.textContent = ALL_SITES_META.name;
+  mobileEl.appendChild(allOpt);
+  mobileEl.value = state.site;
+  mobileEl.addEventListener('change', () => { state.site = mobileEl.value; render(); });
 }
 function renderMonthPicker() {
   const el = document.getElementById('month-picker');
@@ -2626,6 +2727,7 @@ function render() {
   document.querySelectorAll('.site-tab').forEach(btn => {
     btn.classList.toggle('active', btn.dataset.site === state.site);
   });
+  document.getElementById('site-picker-mobile').value = state.site;
   document.getElementById('month-picker').value = state.month;
   updateSyncStatus();
 
@@ -2648,6 +2750,8 @@ function render() {
     section5Card.hidden = false;
     renderCountry(monthData);
   }
+  const quicknav5Btn = document.getElementById('quicknav-5');
+  if (quicknav5Btn) quicknav5Btn.hidden = section5Card.hidden;
   renderDiscounts(monthData);
   renderOtherCosts(monthData);
   // Fire-and-forget — Section 8 is its own async data source (see the
@@ -2663,10 +2767,112 @@ function render() {
 
 document.getElementById('sync-btn').addEventListener('click', performSync);
 
+/* ==================================================================
+   MOBILE VIEW — added 2026-09-09 per Tomer: "the mobile version will
+   be switch by a button from the top of the dashboard... everything
+   should be visually mobile friendly and easy to navigate." Design
+   choices below (stacked cards for tables, dropdowns for site/month,
+   toggle choice remembered per-device) confirmed with Tomer via
+   AskUserQuestion before building. See the matching CSS block (search
+   "MOBILE VIEW" in <style>) for how each piece actually looks.
+   ================================================================== */
+
+// Numbered jump-to-section pills — one per card, in on-screen order (matches
+// the visible section-num badges, NOT the section-N/card-section-5 DOM ids,
+// which have drifted from the display numbering over past fixes — see the
+// "Section 8 (DOM id) / displayed as Section 6" comment on renderYotpoSection
+// for the same drift on Yotpo). Card 5 (Sales by Country) is hidden
+// entirely for ND.IL — its pill's hidden state is kept in sync inside
+// render() above (see quicknav-5), not here, since only render() knows
+// the current site.
+const QUICKNAV_CARDS = [
+  { num: 1, cardId: 'card-1' },
+  { num: 2, cardId: 'card-2' },
+  { num: 3, cardId: 'card-3' },
+  { num: 4, cardId: 'card-4' },
+  { num: 5, cardId: 'card-section-5' },
+  { num: 6, cardId: 'card-6' },
+  { num: 7, cardId: 'card-7' },
+  { num: 8, cardId: 'card-8' },
+];
+function renderMobileQuicknav() {
+  const el = document.getElementById('mobile-quicknav');
+  el.innerHTML = '';
+  QUICKNAV_CARDS.forEach(({ num, cardId }) => {
+    const btn = document.createElement('button');
+    btn.type = 'button';
+    btn.id = 'quicknav-' + num;
+    btn.textContent = String(num);
+    btn.title = 'Jump to section ' + num;
+    btn.addEventListener('click', () => {
+      const target = document.getElementById(cardId);
+      if (target) target.scrollIntoView({ behavior: 'smooth', block: 'start' });
+    });
+    el.appendChild(btn);
+  });
+}
+
+// Auto-labels every table.dtable's <td>s from its own <thead> so the mobile
+// CSS above can render each row as a "LABEL  value" stacked card via
+// td[data-label]::before — deliberately NOT done by editing each
+// render*() function's markup (there are 7 of them, sections 2/3/4/5/6/7/8),
+// which would mean keeping two layouts in sync by hand forever. A colspan
+// cell (a no-data row's message, the country table's "show more" button)
+// is left unlabeled on purpose — the CSS renders those as a plain centered
+// block, not a label:value line — see the tr.no-data-row/tr.show-more-row
+// rules in <style>.
+function applyMobileTableLabels(root) {
+  root.querySelectorAll('table.dtable').forEach(table => {
+    const thead = table.querySelector('thead');
+    if (!thead) return;
+    const labels = Array.from(thead.querySelectorAll('th')).map(th => th.textContent.trim());
+    table.querySelectorAll('tbody > tr').forEach(tr => {
+      let col = 0;
+      Array.from(tr.children).forEach(td => {
+        const span = parseInt(td.getAttribute('colspan') || '1', 10);
+        if (span === 1 && labels[col] && !td.hasAttribute('data-label')) {
+          td.setAttribute('data-label', labels[col]);
+        }
+        col += span;
+      });
+    });
+  });
+}
+// Runs on every future table re-render too (site/month switch, Sync, the
+// country "show more" toggle, the async Yotpo fetch) without needing a
+// call added to each of those call sites individually — childList mutations
+// inside .wrap are enough to catch every el.innerHTML = `<table>...` swap
+// anywhere in the dashboard. setAttribute() doesn't itself fire a childList
+// mutation, so this can't loop.
+const mobileLabelObserver = new MutationObserver((mutations) => {
+  for (const m of mutations) {
+    if (m.type === 'childList' && (m.addedNodes.length || m.removedNodes.length)) {
+      applyMobileTableLabels(document.querySelector('.wrap'));
+      return;
+    }
+  }
+});
+mobileLabelObserver.observe(document.querySelector('.wrap'), { childList: true, subtree: true });
+
+const MOBILE_MODE_KEY = 'nd_dashboard_mobile_view';
+function setMobileMode(on) {
+  document.body.classList.toggle('mobile-mode', on);
+  document.getElementById('mobile-toggle-btn').textContent = on ? '🖥️ Desktop View' : '📱 Mobile View';
+  try { localStorage.setItem(MOBILE_MODE_KEY, on ? '1' : '0'); } catch (e) { /* private browsing etc. — just won't remember next visit */ }
+}
+document.getElementById('mobile-toggle-btn').addEventListener('click', () => {
+  setMobileMode(!document.body.classList.contains('mobile-mode'));
+});
+let initialMobileMode = false;
+try { initialMobileMode = localStorage.getItem(MOBILE_MODE_KEY) === '1'; } catch (e) { /* private browsing etc. — defaults to desktop view */ }
+setMobileMode(initialMobileMode);
+
 renderSiteTabs();
 renderMonthPicker();
 renderTodayDate();
+renderMobileQuicknav();
 render();
+applyMobileTableLabels(document.querySelector('.wrap'));
 </script>
 </body>
 </html>
