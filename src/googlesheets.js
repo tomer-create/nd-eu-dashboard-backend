@@ -271,7 +271,23 @@ const CHANNEL_ROWS = [
   },
   { sheetLabel: 'Microsoft Ads', dashboardLabel: 'Microsoft Ads', hasCost: true },
   { sheetLabel: 'Pinterest', dashboardLabel: 'Pinterest', hasCost: true },
-  { sheetLabel: 'TikTok Organic + Affiliates', dashboardLabel: 'TikTok Affiliates + Organic', hasCost: false },
+  // TikTok Organic + Affiliates has no matching Cost-section row of its own
+  // (organic has no ad spend) -- per Tomer's request 2026-09-09, ND.COM now
+  // sources this channel's "spend" from the TikTok Affiliate program's
+  // Commission cost row instead (sheet label 'Commision', a different label
+  // than the revenue row, hence the costSheetLabel override below -- see
+  // fetchPnlSheetChannels()'s hasCost/costSheetLabel handling). Scoped to
+  // 'com' only via the hasCost array: ND.IL's OTHER_COST_ROWS.il still has
+  // its own 'Commision' line in Section 7 (Tomer didn't ask to move IL's),
+  // so giving IL the same cost source here would double-count it. ND.EU
+  // doesn't track a TikTok Affiliate commission at all and hides this
+  // channel from Section 4 entirely, so it's unaffected either way.
+  {
+    sheetLabel: 'TikTok Organic + Affiliates',
+    dashboardLabel: 'TikTok Affiliates + Organic',
+    hasCost: ['com'],
+    costSheetLabel: 'Commision',
+  },
   { sheetLabel: 'Organic Revenue (P.N)', dashboardLabel: 'Organic', hasCost: false },
   // Added 2026-09-03 — see the COLLABS ADDED note in the file header above.
   { sheetLabel: 'Collabs', dashboardLabel: 'Collabs Affiliate', hasCost: true },
@@ -301,7 +317,11 @@ const OTHER_COST_ROWS = {
     { sheetLabel: 'Yotpo Loyalty Program', dashboardLabel: 'Yotpo Loyalty Program' },
     { sheetLabel: 'Yotpo Reviews', dashboardLabel: 'Yotpo Reviews' },
     { sheetLabel: 'Gratis', dashboardLabel: 'Gratis' },
-    { sheetLabel: 'Commision', dashboardLabel: 'Commission (TikTok Affiliate)' }, // sheet has this typo
+    // 'Commision' (sheet's typo for Commission (TikTok Affiliate)) REMOVED
+    // 2026-09-09 per Tomer's request -- it now lives in Section 4 as
+    // 'TikTok Affiliates + Organic' spend instead (see CHANNEL_ROWS above).
+    // Leaving it here too would double-count it. ND.IL's own 'Commision'
+    // line is untouched -- Tomer only asked for this on ND.COM.
     { sheetLabel: 'TikTok Gifting', dashboardLabel: 'TikTok Gifting' },
     { sheetLabel: 'PR Box cost', dashboardLabel: 'PR Box Cost' }, // combined with live COGS client-side, see note above
   ],
@@ -630,9 +650,17 @@ async function fetchPnlSheetChannels(site, start) {
     const revenue = parseNum(cellAt(rIdx));
     if (revenue === null) return { label: entry.dashboardLabel, no_data: true };
 
+    // hasCost may be `true` (applies to every site this entry is reached
+    // for), `false`, or an array of site codes (applies only to those sites
+    // -- see the TikTok Organic + Affiliates entry above for why). When a
+    // cost row exists under a DIFFERENT label than the revenue row (also
+    // true for that entry), costSheetLabel overrides which Cost-section row
+    // to read.
+    const costApplies = Array.isArray(entry.hasCost) ? entry.hasCost.includes(site) : !!entry.hasCost;
     let spend = 0;
-    if (entry.hasCost) {
-      const cIdx = costRows.get(entry.sheetLabel);
+    if (costApplies) {
+      const costLabel = entry.costSheetLabel || entry.sheetLabel;
+      const cIdx = costRows.get(costLabel);
       const parsedSpend = cIdx !== undefined ? parseNum(cellAt(cIdx)) : null;
       spend = parsedSpend === null ? 0 : parsedSpend;
     }
