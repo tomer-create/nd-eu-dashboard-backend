@@ -762,6 +762,66 @@ async function fetchPnlSheetTotalCost(site, start) {
   return { no_data: false, actual, source: 'pnl_sheet' };
 }
 
+// Fetches this month's "Shop PPC" cost row directly from the sheet — added
+// 2026-09-10 after Tomer reported Section 4's "Shop App" channel spend isn't
+// pulling on ND.COM. Root cause: Shop App's REVENUE is correctly live-synced
+// from Triple Whale (src/triplewhale.js, channel id 'shop_app'), but Triple
+// Whale genuinely never reports ad spend for it — Shopify's own on-platform
+// "Shop" app/marketplace isn't one of the ad-spend tables Triple Whale
+// queries, so its `spend` column is architecturally always 0 for this
+// channel (see the SHOP APP ADDED note in triplewhale.js). The embedded
+// dashboard snapshot has ALWAYS shown a real, nonzero Shop App spend figure
+// (e.g. $22,335.51 for ND.COM Aug) — that number came from this exact sheet
+// row ("Shop PPC", already summed into MARKETING_COST_ROWS above for the
+// Blended ROAS tile) when the snapshot was originally built. But every Sync
+// since Triple Whale went live for Section 4 (2026-08-31) has been silently
+// OVERWRITING that correct number with Triple Whale's always-0 spend the
+// moment mergeChannelSources (server.js) merges Shop App in as "has data,
+// not no_data" — the sheet's own Section-4 fallback never got a chance to
+// fill it in because Triple Whale already "has" a Shop App entry (just with
+// spend permanently wrong for this one field). This fetch gives server.js a
+// way to patch Shop App's spend back onto Triple Whale's revenue right after
+// the sync, rather than relying on the merge-by-label logic that only fills
+// in a field when the winning source left it as no_data entirely.
+//
+// Confirmed live 2026-09-07 (see the MARKETING_COST_ROWS comment above) that
+// "Shop PPC" is one of the 15 labels ALL 3 sites' Cost sections share under
+// the identical spelling — so, unlike the TikTok Commission fix (COM-only,
+// per Tomer's explicit request and IL's differently-scoped Other Costs
+// list), this one is safe and correct to apply uniformly to ND.COM/EU/IL:
+// the underlying bug (Triple Whale can't see Shop ad spend on any of the 3
+// connected stores) is identical across all of them, not a per-site choice.
+//
+// Same shape/failure behavior as fetchPnlSheetTotalCost above: returns
+// { no_data: false, actual, source: 'pnl_sheet' }, { no_data: true } (label
+// or month column not found, sheet not shared), or null (the sheet fetch
+// itself failed before any label-scanning could happen) — logged, never
+// thrown.
+async function fetchPnlSheetShopPpc(site, start) {
+  if (!start) return null;
+
+  const rows = await fetchSheetRows(site);
+  if (!rows) return null;
+
+  const actualColIdx = findActualColIdx(rows, start, site);
+  if (actualColIdx === -1) return null;
+
+  const { costRows } = findRevenueAndCostRows(rows);
+  if (costRows.size === 0) {
+    console.error(`googlesheets: could not locate the "Cost" section in the ${site} CSV (fetchPnlSheetShopPpc)`);
+    return null;
+  }
+
+  const rIdx = costRows.get('Shop PPC');
+  if (rIdx === undefined) {
+    console.error(`googlesheets: could not find a "Shop PPC" row in the ${site} CSV's Cost section`);
+    return { no_data: true };
+  }
+  const actual = parseNum(rows[rIdx] ? rows[rIdx][actualColIdx] : undefined);
+  if (actual === null) return { no_data: true };
+  return { no_data: false, actual, source: 'pnl_sheet' };
+}
+
 // Marketing-only cost rows — added 2026-09-07 to make Section 1's "Blended
 // ROAS" tile live (previously 100% frozen at the embedded snapshot, even for
 // the CURRENT month — unlike every other KPI tile, it had no live-sync path
@@ -867,6 +927,7 @@ module.exports = {
   fetchPnlSheetOtherCosts,
   fetchPnlSheetTotalCost,
   fetchPnlSheetMarketingSpend,
+  fetchPnlSheetShopPpc,
   CHANNEL_ROWS,
   OTHER_COST_ROWS,
   MARKETING_COST_ROWS,
