@@ -364,6 +364,17 @@ async function getYotpoSummary(site, start, end) {
   // fix, not a COM-specific data issue — EU/IL should mean the same thing.
   // `points_used` (SUM(points)) is unchanged — that's a real total, not a
   // per-customer count, so it wasn't wrong before and isn't touched here.
+  //
+  // `uses` added 2026-09-10 per Tomer: "add how many uses was out of the
+  // redeemers" — i.e. show total redemption EVENTS alongside the distinct
+  // redeemer count, so it's visible at a glance how many times an average
+  // member redeems (e.g. 142 uses from 88 redeemers = frequent repeat
+  // redeemers, not 142 different people). This is exactly the raw `COUNT(*)`
+  // this query used BEFORE the 2026-09-06 redemptions->redeemers fix above —
+  // that fix didn't delete the information, it just stopped labeling it
+  // "redemptions"/showing it at all. Restoring it as its own `uses` column
+  // alongside (not instead of) `redemptions` (redeemers) gives Tomer both
+  // numbers together, which is what he's asking for here.
   const redemptionsRes = await p.query(
     `SELECT
        CASE
@@ -377,6 +388,7 @@ async function getYotpoSummary(site, start, end) {
          ELSE tier_at_event
        END AS tier,
        COUNT(DISTINCT email) AS redemptions,
+       COUNT(*) AS uses,
        COALESCE(SUM(points), 0) AS points_used
      FROM yotpo_events
      WHERE site = $1 AND event_type = 'redemption' AND received_at >= $2 AND received_at < $3
@@ -444,6 +456,7 @@ async function getYotpoSummary(site, start, end) {
     redemptions_by_tier: redemptionsRes.rows.map((r) => ({
       tier: r.tier,
       redemptions: Number(r.redemptions),
+      uses: Number(r.uses),
       points_used: Number(r.points_used),
       points_value: Number(r.points_used) / POINTS_PER_CURRENCY_UNIT,
     })),
