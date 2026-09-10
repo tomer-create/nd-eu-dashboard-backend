@@ -1157,13 +1157,25 @@ function isCombinedView() { return state.month === 'YTD' || state.site === 'all'
 // itself always pulls ALL 3 individual sites together now (see
 // performSync below) regardless of which tab is active, and the "All
 // Sites (USD)" tab is just a client-side combination of those same 3
-// per-site live caches (see getMonthData/combineMonthDatas) — so the only
-// view where Sync genuinely can't do anything is Year-to-Date, which spans
-// 12 months and has no single date range to fetch. Deliberately NOT tied
-// to isCombinedView() above (that one still also covers `site === 'all'`,
-// which now DOES support Sync — it's used for footer-text/UI purposes
-// unrelated to sync-ability, not this).
-function canSync() { return state.month !== 'YTD'; }
+// per-site live caches (see getMonthData/combineMonthDatas).
+//
+// Year-to-Date used to be excluded entirely (canSync() returned false for
+// state.month === 'YTD', with the button disabled and a "Sync isn't
+// available on Year-to-Date" message) because there's no single Shopify
+// date range spanning 9 months to fetch in one call. But Tomer reported
+// (2026-09-10) that this read as YTD itself being broken, not as an
+// intentional limitation — and there's a real fix available, not just
+// better copy: syncTargetMonth() below resolves Sync to the current
+// in-progress month regardless of which tab is active. Every OTHER month
+// rolled into a Year-to-Date total is already closed/complete in the
+// embedded snapshot (nothing live to fetch for a finished month), so
+// syncing just the current month is the whole of what "sync YTD" can
+// meaningfully mean — and getSingleSiteMonthData() already reads liveCache
+// for that month regardless of which tab you're viewing, so one Sync click
+// updates the YTD (and All Sites + YTD) views automatically, exactly like
+// it already does for that month's own single-site tab.
+function syncTargetMonth() { return state.month === 'YTD' ? DATA.meta.current_month : state.month; }
+function canSync() { return true; }
 
 // Reports how "in sync" a given month is across all 3 sites' live caches —
 // used by updateSyncStatus() to describe the shared, all-sites Sync state
@@ -1595,9 +1607,13 @@ function combineMonthDatas(entries, opts) {
     discounts_note: dd.list ? ('Combined for ' + label + '.' + combinedTail + (dd.partial ? ' Only ' + dd.sourcesCount + ' of ' + dd.totalSources + ' site/period combination(s) had discount-level data to merge.' : '')) : undefined,
     combined_label: label,
     combined_footer_note: 'Section 1 goals/actuals, Section 4 channels, and Section 7 other costs are true sums across ' + label + (entries.length > 1 && entries.some(e => e.fx !== 1) ? ', converted to USD. ' + FX_NOTE : '.') + combinedTail + partialTail + (isYTD
-      // Sync fetches one month's date range per site, so it genuinely can't
-      // do anything for a 12-month Year-to-Date combine.
-      ? ' Sync isn’t available on Year-to-Date views — switch to a specific month to pull live Shopify numbers.'
+      // Fixed 2026-09-10 per Tomer — Sync now works on Year-to-Date too (see
+      // syncTargetMonth()/canSync() above): every earlier month in a YTD
+      // total is already closed/complete in the snapshot, so Sync just
+      // refreshes the current in-progress month, which is the only part of
+      // a YTD total that can meaningfully be "live" — this combined view
+      // then updates automatically since it reads that same live cache.
+      ? ' Click Sync above to pull live Shopify numbers for the current month (' + DATA.meta.current_month_full + ') across ND.COM, ND.EU, and ND.IL — the rest of this Year-to-Date total is already closed and won\'t change.'
       // Added 2026-09-03 — Sync now works from this tab too (see canSync()/
       // performSync() above): it pulls ND.COM, ND.EU, and ND.IL together in
       // one click, and this combined view updates automatically since it's
@@ -1650,12 +1666,14 @@ async function performSync() {
   if (!canSync()) return; // guarded by the disabled button too
   const btn = document.getElementById('sync-btn');
   const statusEl = document.getElementById('sync-status');
-  const month = state.month;
+  const isYTD = state.month === 'YTD';
+  const month = syncTargetMonth();
+  const monthTail = isYTD ? ' for ' + DATA.meta.month_full_names[month] + ' (the current month in this Year-to-Date total)' : '';
   const sites = Object.keys(DATA.sites);
   btn.disabled = true;
   btn.classList.add('syncing');
   statusEl.className = 'sync-status';
-  statusEl.textContent = 'Syncing ' + sites.map(s => siteMeta(s).name).join(', ') + ' with Shopify… (can take up to a minute or so, especially the first sync after a while)';
+  statusEl.textContent = 'Syncing ' + sites.map(s => siteMeta(s).name).join(', ') + monthTail + ' with Shopify… (can take up to a minute or so, especially the first sync after a while)';
   try {
     const results = await Promise.allSettled(sites.map(site => {
       const isCurrent = DATA.sites[site].months[month].is_current;
@@ -1676,13 +1694,13 @@ async function performSync() {
     });
     if (!failed.length) {
       statusEl.className = 'sync-status ok';
-      statusEl.textContent = 'Synced ' + succeeded.map(s => siteMeta(s).name).join(', ') + ' at ' + new Date().toLocaleTimeString('en-US', { hour: 'numeric', minute: '2-digit' });
+      statusEl.textContent = 'Synced ' + succeeded.map(s => siteMeta(s).name).join(', ') + monthTail + ' at ' + new Date().toLocaleTimeString('en-US', { hour: 'numeric', minute: '2-digit' });
     } else if (!succeeded.length) {
       statusEl.className = 'sync-status err';
-      statusEl.textContent = 'Sync failed for all sites — ' + failed.join('; ') + '. Showing snapshot data.';
+      statusEl.textContent = 'Sync failed for all sites' + monthTail + ' — ' + failed.join('; ') + '. Showing snapshot data.';
     } else {
       statusEl.className = 'sync-status err';
-      statusEl.textContent = 'Synced ' + succeeded.map(s => siteMeta(s).name).join(', ') + '. Failed: ' + failed.join('; ') + '.';
+      statusEl.textContent = 'Synced ' + succeeded.map(s => siteMeta(s).name).join(', ') + monthTail + '. Failed: ' + failed.join('; ') + '.';
     }
     render();
   } finally {
@@ -1694,23 +1712,23 @@ async function performSync() {
 function updateSyncStatus() {
   const btn = document.getElementById('sync-btn');
   const statusEl = document.getElementById('sync-status');
-  if (!canSync()) {
-    btn.disabled = true;
-    statusEl.className = 'sync-status';
-    statusEl.textContent = 'Sync isn’t available on Year-to-Date — pick a specific month';
-    return;
-  }
   btn.disabled = false;
-  const status = monthSyncStatus(state.month);
+  const isYTD = state.month === 'YTD';
+  const month = syncTargetMonth();
+  // On YTD, Sync targets/reads the current month's own liveCache entry (see
+  // syncTargetMonth()'s comment) — every other month in the YTD total is
+  // already closed, so there's nothing else for this status line to report.
+  const monthTail = isYTD ? ' for ' + DATA.meta.month_full_names[month] + ' — the rest of this Year-to-Date total is already closed/complete' : '';
+  const status = monthSyncStatus(month);
   if (!status) {
     statusEl.className = 'sync-status';
-    statusEl.textContent = 'Showing snapshot data — click Sync for live numbers (all sites)';
+    statusEl.textContent = 'Showing snapshot data — click Sync for live numbers (all sites)' + monthTail;
   } else if (status.cachedSites.length === status.total) {
     statusEl.className = 'sync-status ok';
-    statusEl.textContent = 'Synced all sites ' + status.fetchedAt.toLocaleTimeString('en-US', { hour: 'numeric', minute: '2-digit' });
+    statusEl.textContent = 'Synced all sites' + monthTail + ' ' + status.fetchedAt.toLocaleTimeString('en-US', { hour: 'numeric', minute: '2-digit' });
   } else {
     statusEl.className = 'sync-status ok';
-    statusEl.textContent = 'Synced ' + status.cachedSites.map(s => siteMeta(s).name).join(', ') + ' ' + status.fetchedAt.toLocaleTimeString('en-US', { hour: 'numeric', minute: '2-digit' }) + ' — click Sync to refresh the rest';
+    statusEl.textContent = 'Synced ' + status.cachedSites.map(s => siteMeta(s).name).join(', ') + monthTail + ' ' + status.fetchedAt.toLocaleTimeString('en-US', { hour: 'numeric', minute: '2-digit' }) + ' — click Sync to refresh the rest';
   }
 }
 
