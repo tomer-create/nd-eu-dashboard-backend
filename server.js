@@ -906,6 +906,27 @@ async function computeYotpoTierRevenue(site, start, end) {
   return revenueByTier;
 }
 
+// Net Sales-by-tier (computeYotpoTierRevenue) pages through EVERY order in
+// the requested range via fetchOrdersForTierRevenue's sequential, one-page-
+// at-a-time Shopify pagination — fine for a single month (the only window
+// this was ever built/tested against), but for a YTD-width range (~250+
+// days) that's potentially thousands of sequential paginated GraphQL calls,
+// each competing for the same per-shop rate-limit budget as everything else
+// this server fetches concurrently. Confirmed live 2026-09-10: a
+// site=com&start=2026-01-01&end=2026-09-11&include_revenue=1 request never
+// returned even after 25+ seconds with zero response (not an error — a
+// genuine hang), which is exactly why the dashboard's Yotpo Loyalty section
+// got stuck on "Loading Yotpo Loyalty data…" forever whenever Tomer switched
+// to Year to Date — that request has no overall time budget, so the
+// browser's fetch() just sat there waiting and the section never repainted.
+// Fix: skip the live Shopify revenue pull entirely for any range wider than
+// this, and degrade the same graceful way computeYotpoTierRevenue's own
+// catch block already does for a real fetch error (revenue_error set,
+// revenue_included left false, rest of Section 8 renders normally) — the
+// frontend (renderYotpoSection in public/index.html) already shows "—" for
+// Net Sales when revenue_included is false, no frontend change needed.
+const YOTPO_TIER_REVENUE_MAX_RANGE_DAYS = 35; // comfortably covers any single month + buffer
+
 // GET /api/yotpo/summary?site=com&start=2026-09-01&end=2026-09-06[&include_revenue=1]
 app.get('/api/yotpo/summary', async (req, res) => {
   const { site, start, end, include_revenue } = req.query;
@@ -917,31 +938,40 @@ app.get('/api/yotpo/summary', async (req, res) => {
     if (!summary) return res.json({ site, start, end, no_data: true });
 
     if (include_revenue === '1' && !summary.no_data) {
-      try {
-        const revenueByTier = await computeYotpoTierRevenue(site, start, end);
-        const seenTiers = new Set();
-        summary.redemptions_by_tier = summary.redemptions_by_tier.map((r) => {
-          seenTiers.add(r.tier);
-          return { ...r, net_sales: revenueByTier.get(r.tier) || 0 };
-        });
-        // A tier can have Net Sales this period with zero redemptions (a
-        // member who bought something but didn't redeem points) — don't let
-        // that revenue silently vanish just because it has no row yet.
-        for (const [tier, netSales] of revenueByTier.entries()) {
-          if (!seenTiers.has(tier)) {
-            summary.redemptions_by_tier.push({ tier, redemptions: 0, uses: 0, points_used: 0, points_value: 0, net_sales: netSales });
+      const rangeDays = (new Date(`${end}T00:00:00Z`) - new Date(`${start}T00:00:00Z`)) / 86400000;
+      if (rangeDays > YOTPO_TIER_REVENUE_MAX_RANGE_DAYS) {
+        summary.revenue_error =
+          `Net Sales by tier is only computed live for date ranges up to ${YOTPO_TIER_REVENUE_MAX_RANGE_DAYS} days ` +
+          `— this range is ${Math.round(rangeDays)} days (e.g. Year to Date), which would require paging through ` +
+          `every order in that window from Shopify and was hanging the dashboard. Showing the rest of the table ` +
+          `without Net Sales for this period.`;
+      } else {
+        try {
+          const revenueByTier = await computeYotpoTierRevenue(site, start, end);
+          const seenTiers = new Set();
+          summary.redemptions_by_tier = summary.redemptions_by_tier.map((r) => {
+            seenTiers.add(r.tier);
+            return { ...r, net_sales: revenueByTier.get(r.tier) || 0 };
+          });
+          // A tier can have Net Sales this period with zero redemptions (a
+          // member who bought something but didn't redeem points) — don't let
+          // that revenue silently vanish just because it has no row yet.
+          for (const [tier, netSales] of revenueByTier.entries()) {
+            if (!seenTiers.has(tier)) {
+              summary.redemptions_by_tier.push({ tier, redemptions: 0, uses: 0, points_used: 0, points_value: 0, net_sales: netSales });
+            }
           }
+          summary.revenue_included = true;
+        } catch (err) {
+          // Most likely cause right now: the store's Shopify access token
+          // predates the read_customers scope (added 2026-09-06 alongside
+          // this feature) and needs re-authorizing — see src/shopify.js's
+          // SCOPES comment. Degrade gracefully: the rest of Section 8 (which
+          // has nothing to do with Shopify) still renders normally, just
+          // without net_sales on each row.
+          console.error(`yotpo tier revenue (site=${site}) failed:`, err.message);
+          summary.revenue_error = err.message;
         }
-        summary.revenue_included = true;
-      } catch (err) {
-        // Most likely cause right now: the store's Shopify access token
-        // predates the read_customers scope (added 2026-09-06 alongside
-        // this feature) and needs re-authorizing — see src/shopify.js's
-        // SCOPES comment. Degrade gracefully: the rest of Section 8 (which
-        // has nothing to do with Shopify) still renders normally, just
-        // without net_sales on each row.
-        console.error(`yotpo tier revenue (site=${site}) failed:`, err.message);
-        summary.revenue_error = err.message;
       }
     }
 
