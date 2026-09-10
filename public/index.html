@@ -861,9 +861,32 @@ function mergeLiveIntoMonthData(monthData, live, site) {
     // Shop App added to this note 2026-09-03 alongside the matching
     // src/triplewhale.js backend fix (Tomer reported "Microsoft Ads and Shop
     // App and more are not pulling data") -- Shop App has real Pixel CV
-    // revenue in Triple Whale but, like impact.com, is never a paid channel,
-    // so it always shows $0/no spend and "—" ROAS by design, not as a sign
-    // it isn't syncing.
+    // revenue in Triple Whale, but Triple Whale itself never reports ad
+    // spend for it (Shopify's own on-platform "Shop" app/marketplace isn't
+    // one of the ad-spend tables Triple Whale queries).
+    //
+    // CORRECTED 2026-09-10 -- Tomer: "on ND.COM in Marketing & Sales Channel
+    // Performance you don't pull the spend for Shop app." The line this
+    // replaced claimed Shop App has NO ad spend at all, "by design" (like
+    // impact.com) -- that was wrong. Shop App DOES have a real spend figure;
+    // it just isn't tracked in Triple Whale. It comes from the P&L sheet's
+    // "Shop PPC" cost row instead (already used for the Blended ROAS KPI's
+    // marketing-cost total -- see MARKETING_COST_ROWS in src/googlesheets.js)
+    // -- confirmed by the embedded snapshot itself already showing a real,
+    // nonzero Shop App spend (e.g. $22,335.51 for ND.COM Aug) that every live
+    // Sync was silently clobbering back to Triple Whale's permanent $0 the
+    // moment this merge above ran (since Shop App already "has data" from
+    // Triple Whale's side, so the sheet-fallback path a few lines up never
+    // got a chance to fill in the correct number). Fixed server-side: after
+    // mergeChannelSources runs, server.js now patches Shop App's spend_actual
+    // from a new fetchPnlSheetShopPpc() read of the sheet's "Shop PPC" row,
+    // keeping Triple Whale's revenue (accurate) untouched. This file needed
+    // no code change for that half of the fix -- ROAS/revenue_ratio above are
+    // already recomputed from whatever spend_actual the live payload carries,
+    // so the corrected number flows through automatically. Applies to all 3
+    // sites (the underlying Triple-Whale-can't-see-Shop-spend limitation and
+    // the sheet's "Shop PPC" row are the same across ND.COM/EU/IL), not just
+    // the ND.COM Tomer happened to check.
     //
     // Second sentence added 2026-09-03 (same day) after Tomer reported the
     // Attentive channels, Microsoft Ads, Organic, and TikTok Affiliates +
@@ -887,7 +910,7 @@ function mergeLiveIntoMonthData(monthData, live, site) {
     // hardcoded list, so it already reads correctly now that ND.COM's
     // Microsoft Ads has real Triple Whale data (still sheet-sourced for
     // ND.EU/ND.IL, which have no 'bing' rows in Triple Whale yet).
-    merged.channels_note = 'Spend and CV for Google Ads, TikTok Ads, Meta Ads, Microsoft Ads, impact.com, Criteo, Pinterest, Snapchat, ChatGPT Ads, and Shop App are pulled live from Triple Whale (Pixel CV via Last-Click attribution, except Pinterest, Snapchat and impact.com which use Triple Whale\'s Channel CV — switched 2026-09-07 for Pinterest per Tomer, Snapchat/impact.com were already on Channel CV since this integration was built). Shop App, like impact.com, has no ad spend to report — its ROAS will always show "—". Attentive\'s 4 channels, Microsoft Ads, Pinterest, Organic, and TikTok Affiliates + Organic are read directly from the P&L Google Sheet instead when Triple Whale has no data for them — as current as the sheet\'s last update, not live-live like the channels above. Spend/goal figures for every other channel still come from the P&L sheet.';
+    merged.channels_note = 'Spend and CV for Google Ads, TikTok Ads, Meta Ads, Microsoft Ads, impact.com, Criteo, Pinterest, Snapchat, ChatGPT Ads, and Shop App are pulled live from Triple Whale (Pixel CV via Last-Click attribution, except Pinterest, Snapchat and impact.com which use Triple Whale\'s Channel CV — switched 2026-09-07 for Pinterest per Tomer, Snapchat/impact.com were already on Channel CV since this integration was built). Shop App\'s spend comes from the P&L sheet\'s "Shop PPC" row instead — Triple Whale doesn\'t track ad spend for Shopify\'s own on-platform Shop channel — so it\'s as current as the sheet\'s last update, not live-live like its revenue. impact.com has no ad spend to report — its ROAS will always show "—". Attentive\'s 4 channels, Microsoft Ads, Pinterest, Organic, and TikTok Affiliates + Organic are read directly from the P&L Google Sheet instead when Triple Whale has no data for them — as current as the sheet\'s last update, not live-live like the channels above. Spend/goal figures for every other channel still come from the P&L sheet.';
   }
 
   // Section 7 (Other Costs) live sync — added 2026-09-03 per Tomer: "fix
