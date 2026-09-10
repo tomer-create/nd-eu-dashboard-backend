@@ -1811,7 +1811,17 @@ function renderKPIs(monthData) {
       // goal is zero/negative (e.g. a loss-making profit target) — a ratio isn't meaningful
       progressHtml = `<div class="pbar-pct"><span class="pill ${k.met_goal ? 'good' : 'crit'}">${k.met_goal ? 'Met goal' : 'Below goal'}</span></div>`;
     } else {
-      const pctStr = monthData.is_current ? pctLabel(k.pct_of_goal) + ' MTD' : pctLabel(k.pct_of_goal) + ' of goal';
+      // "MTD" only makes sense for a single (in-progress) month. Year to
+      // Date rolls up 8-9 complete months plus one in-progress month, and
+      // monthData.is_current comes out true for that combine too (see
+      // combineMonthDatas: `is_current: entries.some(...)`), so without this
+      // check every KPI tile under YTD showed the plainly wrong "XX% MTD" —
+      // confirmed live 2026-09-10 as (part of) what Tomer meant by "year to
+      // date is not working": the header said "Year to Date" while every
+      // tile underneath contradicted it with "MTD". Use "YTD" there instead.
+      const pctStr = monthData.is_current
+        ? pctLabel(k.pct_of_goal) + (state.month === 'YTD' ? ' YTD' : ' MTD')
+        : pctLabel(k.pct_of_goal) + ' of goal';
       progressHtml = renderPBar(k.pct_of_goal, k.higher_is_better, monthData.is_current) + `<div class="pbar-pct">${pctStr}</div>`;
     }
     tile.innerHTML = `
@@ -2794,7 +2804,16 @@ function render() {
   document.getElementById('month-picker').value = state.month;
   updateSyncStatus();
 
-  const mtdBadge = monthData.is_current ? '<span class="mtd-flag">Month to date</span>' : '';
+  // Same "Month to date" mislabeling bug as the pctStr fix above (see that
+  // comment) — the Section 1/4/7 header badge has the identical problem:
+  // monthData.is_current is true for YTD too (the current month is always
+  // one of the 9 months rolled up), so this badge said "Month to date" even
+  // while the page title said "Year to Date". Fixed 2026-09-10.
+  const mtdBadge = monthData.is_current
+    ? (state.month === 'YTD'
+        ? '<span class="mtd-flag">Year to date — current month in progress</span>'
+        : '<span class="mtd-flag">Month to date</span>')
+    : '';
   document.getElementById('mtd-flag-1').innerHTML = mtdBadge;
   document.getElementById('mtd-flag-4').innerHTML = mtdBadge;
   document.getElementById('mtd-flag-7').innerHTML = mtdBadge;
