@@ -55,6 +55,20 @@ const DEFAULT_TAG_LABELS = {
   'DISCOUNT-1TL82': 'Bi-Annual Reward Sale Bronze',
   'DISCOUNT-EJ75N': 'Bi-Annual Reward Sale Glow',
   'DISCOUNT-JBD6Q': 'Bi-Annual Reward Sale Glam',
+  // ND.IL-specific "Free shipping" affiliate program, added 2026-09-10 per
+  // Tomer's request for Section 6 on ND.IL: "add also all the orders tagged
+  // with 'Free shipping' as a new discount line". Unlike every other entry
+  // above, this isn't a single fixed discount code — it's a Shopify price
+  // rule ("משלוח חינם אפיליאייט" / "Free shipping affiliate", price_rule_id
+  // 1360799367346, confirmed live via shopify_discount_codes on the IL
+  // store) that mints many individual single-use codes (24D2KT, 2F3SKS,
+  // 2W2C2C, ...), so matching by exact code like the rows above isn't
+  // workable here. Per Tomer, orders using any of these codes carry the
+  // literal order tag "Free shipping" (not the per-order code) — same
+  // matching mechanism as every other row here (aggregate() checks
+  // order.tags for an exact string match against this map's keys), just
+  // keyed on that shared descriptive tag instead of a discount code.
+  'Free shipping': 'Free Shipping',
 };
 
 // Tags that get merged into one combined "Free Shipping" row (OR logic, not
