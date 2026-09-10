@@ -929,7 +929,7 @@ app.get('/api/yotpo/summary', async (req, res) => {
         // that revenue silently vanish just because it has no row yet.
         for (const [tier, netSales] of revenueByTier.entries()) {
           if (!seenTiers.has(tier)) {
-            summary.redemptions_by_tier.push({ tier, redemptions: 0, points_used: 0, points_value: 0, net_sales: netSales });
+            summary.redemptions_by_tier.push({ tier, redemptions: 0, uses: 0, points_used: 0, points_value: 0, net_sales: netSales });
           }
         }
         summary.revenue_included = true;
