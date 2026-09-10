@@ -2104,8 +2104,9 @@ function combineYotpoSummaries(perSite) {
   collected.forEach((s) => {
     const fx = FX_TO_USD[s._site] != null ? FX_TO_USD[s._site] : 1;
     (s.redemptions_by_tier || []).forEach((r) => {
-      const cur = tierMap.get(r.tier) || { tier: r.tier, redemptions: 0, points_used: 0, points_value: 0, net_sales: 0 };
+      const cur = tierMap.get(r.tier) || { tier: r.tier, redemptions: 0, uses: 0, points_used: 0, points_value: 0, net_sales: 0 };
       cur.redemptions += r.redemptions;
+      cur.uses += (r.uses || 0);
       cur.points_used += r.points_used;
       cur.points_value += (r.points_value || 0) * fx;
       cur.net_sales += (r.net_sales || 0) * fx;
@@ -2286,12 +2287,19 @@ function renderYotpoSection(el, data, yoyData, momData, combined) {
   // new this period, or the comparison fetch itself failed/had no data)
   // shows "—" rather than a misleading ±100%/undefined.
   const rows = allTiers.map(tier => {
-    const cur = curMap.get(tier) || { redemptions: 0, points_used: 0, points_value: 0, net_sales: 0 };
+    const cur = curMap.get(tier) || { redemptions: 0, uses: 0, points_used: 0, points_value: 0, net_sales: 0 };
     const yoyRow = yoyMap.get(tier);
     const momRow = momMap.get(tier);
     return {
       tier,
       redemptions: cur.redemptions || 0,
+      // Uses (added 2026-09-10 per Tomer: "add how many uses was out of the
+      // redeemers") — total redemption EVENTS for the tier, shown alongside
+      // Redeemers (distinct customers) so it's visible at a glance how many
+      // times members redeem on average (uses ÷ redeemers), not just how
+      // many different people did. See the redemptionsRes query comment in
+      // src/yotpo.js for the backend side of this.
+      uses: cur.uses || 0,
       points_used: cur.points_used || 0,
       points_value: cur.points_value || 0,
       // net_sales (added 2026-09-06) is current-period-only — no YoY/MoM
@@ -2305,6 +2313,7 @@ function renderYotpoSection(el, data, yoyData, momData, combined) {
   const tierRows = rows.map(r => `<tr>
       <td>${r.tier}</td>
       <td>${r.redemptions.toLocaleString('en-US')}</td>
+      <td>${r.uses.toLocaleString('en-US')}</td>
       <td>${r.points_used.toLocaleString('en-US')}</td>
       <td>${sym()}${r.points_value.toLocaleString('en-US', { maximumFractionDigits: 0 })}</td>
       <td>${data.revenue_included ? sym() + r.net_sales.toLocaleString('en-US', { maximumFractionDigits: 0 }) : '<span style="color:var(--text-muted)">—</span>'}</td>
@@ -2319,6 +2328,7 @@ function renderYotpoSection(el, data, yoyData, momData, combined) {
   // % change, so a tier that existed only in the prior period still counts
   // against the total correctly.
   const totalRedemptions = rows.reduce((s, r) => s + r.redemptions, 0);
+  const totalUses = rows.reduce((s, r) => s + r.uses, 0);
   const totalPoints = rows.reduce((s, r) => s + r.points_used, 0);
   const totalValue = rows.reduce((s, r) => s + r.points_value, 0);
   const totalNetSales = rows.reduce((s, r) => s + r.net_sales, 0);
@@ -2333,6 +2343,7 @@ function renderYotpoSection(el, data, yoyData, momData, combined) {
   const totalRow = `<tr class="total-row">
       <td>Total</td>
       <td>${totalRedemptions.toLocaleString('en-US')}</td>
+      <td>${totalUses.toLocaleString('en-US')}</td>
       <td>${totalPoints.toLocaleString('en-US')}</td>
       <td>${sym()}${totalValue.toLocaleString('en-US', { maximumFractionDigits: 0 })}</td>
       <td>${data.revenue_included ? sym() + totalNetSales.toLocaleString('en-US', { maximumFractionDigits: 0 }) : '<span style="color:var(--text-muted)">—</span>'}</td>
@@ -2366,7 +2377,7 @@ function renderYotpoSection(el, data, yoyData, momData, combined) {
     </div>
     <div style="font-size:12.5px;font-weight:600;margin:4px 0 6px">Points redeemed by tier</div>
     <table class="dtable">
-      <thead><tr><th style="text-align:left">Tier</th><th>Redeemers</th><th>Points used</th><th>Value (${sym()})</th><th>Net Sales (${sym()})</th><th>YoY</th><th>MoM</th></tr></thead>
+      <thead><tr><th style="text-align:left">Tier</th><th>Redeemers</th><th>Uses</th><th>Points used</th><th>Value (${sym()})</th><th>Net Sales (${sym()})</th><th>YoY</th><th>MoM</th></tr></thead>
       <tbody>${tierRows}${totalRow}</tbody>
     </table>
     ${movementSection}
