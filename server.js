@@ -5,7 +5,7 @@ const cors = require('cors');
 const { fetchOrders, fetchOrdersLight, fetchOrdersForTierRevenue, fetchSalesReversals, fetchCostOfGoodsSold, fetchTopReturnsByProduct, fetchCountryBreakdown, fetchSalesSummary, fetchCustomerAcquisition, fetchProductRetailPrices, getAuthorizeUrl, exchangeCodeForToken } = require('./src/shopify');
 const { aggregate } = require('./src/aggregate');
 const { fetchChannelPerformance } = require('./src/triplewhale');
-const { fetchPnlSheetChannels, fetchPnlSheetOtherCosts, fetchPnlSheetTotalCost, fetchPnlSheetMarketingSpend } = require('./src/googlesheets');
+const { fetchPnlSheetChannels, fetchPnlSheetOtherCosts, fetchPnlSheetTotalCost, fetchPnlSheetMarketingSpend, fetchPnlSheetShopPpc } = require('./src/googlesheets');
 const { VALID_SITES: YOTPO_VALID_SITES, ensureYotpoSchema, recordYotpoEvent, getYotpoSummary, getYotpoCustomerTierMap, getPool: getYotpoPool } = require('./src/yotpo');
 const { registerYotpoWebhooksForSite } = require('./src/yotpo-setup');
 const { importYotpoHistory } = require('./src/yotpo-import');
@@ -359,6 +359,7 @@ async function buildDataResponse({ site, start, end, compare }) {
     pnlSheetTotalCostMom,
     pnlSheetMarketingSpend,
     pnlSheetMarketingSpendMom,
+    pnlSheetShopPpc,
   ] = await Promise.all([
     fetchOrders(site, start, end),
     wantYoy ? fetchOrdersLight(site, yoyRange.start, yoyRange.end) : Promise.resolve(null),
@@ -446,6 +447,18 @@ async function buildDataResponse({ site, start, end, compare }) {
           return null;
         })
       : Promise.resolve(null),
+    // pnlSheetShopPpc (added 2026-09-10) — see the big comment on
+    // fetchPnlSheetShopPpc in src/googlesheets.js for the full story: Triple
+    // Whale's "Shop App" channel (channelPerformance above) always reports
+    // $0 spend, which was silently overwriting Section 4's real Shop PPC
+    // spend on every sync. Only the current period is needed — Section 4
+    // channel rows show spend/revenue "actual" only, no MoM/YoY comparison
+    // view for this section. Same independent try/catch as every other
+    // sheet-backed call above.
+    fetchPnlSheetShopPpc(site, start).catch((err) => {
+      console.error(`fetchPnlSheetShopPpc threw for site=${site}:`, err.message);
+      return null;
+    }),
   ]);
 
   // fetchCountryBreakdown now returns { rows, groupedBy, fallbackReason? }
@@ -592,6 +605,29 @@ async function buildDataResponse({ site, start, end, compare }) {
   // P&L-sheet snapshot for Section 4, same as before either feature
   // existed.
   const mergedChannels = mergeChannelSources(channelPerformance, pnlSheetChannels);
+  // Shop App spend patch (added 2026-09-10) — mergeChannelSources above
+  // always keeps Triple Whale's "Shop App" row wholesale once it isn't
+  // no_data, so the sheet's real Shop PPC spend never gets a chance to fill
+  // in via the normal by-label merge (that only fires when the winning
+  // source left a label as no_data). Patch it in directly here instead: keep
+  // Triple Whale's live revenue (accurate), but replace its permanently-0
+  // spend field with the sheet's real Shop PPC actual whenever the sheet has
+  // one. Only `spend_actual` needs patching — no channel source (Triple
+  // Whale or the P&L sheet) ever sets `roas`/`revenue_ratio` at this layer;
+  // both are derived fields the frontend (mergeLiveIntoMonthData in
+  // dashboard_v2.html) always recomputes itself from spend_actual/
+  // revenue_actual, so they'll pick up the corrected spend automatically.
+  // See the big comment on fetchPnlSheetShopPpc in src/googlesheets.js for
+  // the full root-cause writeup.
+  if (mergedChannels && pnlSheetShopPpc && !pnlSheetShopPpc.no_data) {
+    const shopAppIdx = mergedChannels.findIndex((c) => c.label === 'Shop App' && !c.no_data);
+    if (shopAppIdx !== -1) {
+      mergedChannels[shopAppIdx] = {
+        ...mergedChannels[shopAppIdx],
+        spend_actual: pnlSheetShopPpc.actual,
+      };
+    }
+  }
   if (mergedChannels) {
     result.channels = mergedChannels;
   }
