@@ -2973,6 +2973,23 @@ renderTodayDate();
 renderMobileQuicknav();
 render();
 applyMobileTableLabels(document.querySelector('.wrap'));
+
+// Auto-sync on first load — added 2026-09-15 per Tomer: previously the
+// dashboard always opened showing the frozen snapshot/last-cached numbers
+// (liveCache starts empty on every fresh page load — it's an in-memory
+// object, not persisted across visits) and required a manual click of Sync
+// every single time to see live numbers, even though Sync itself has
+// worked from any tab (including Year-to-Date, see syncTargetMonth() above)
+// since earlier this same week. render() above still paints instantly from
+// the embedded snapshot first — this just kicks off the same Sync flow
+// automatically right after, in the background, so the page doesn't sit on
+// stale numbers until someone remembers to click the button. Uses the same
+// performSync() as the button (fire-and-forget: it manages its own
+// btn.disabled/status-text state and calls render() again when it
+// resolves). performSync() disables the button for its own duration, and a
+// disabled <button> doesn't dispatch click events, so a manual click during
+// this initial auto-sync is already safely a no-op — no separate lock needed.
+performSync();
 </script>
 </body>
 </html>
