@@ -69,6 +69,16 @@ const DEFAULT_TAG_LABELS = {
   // order.tags for an exact string match against this map's keys), just
   // keyed on that shared descriptive tag instead of a discount code.
   'Free shipping': 'Free Shipping',
+  // ND.COM and ND.EU "Natasha's Birthday" sale codes, added 2026-09-15 per
+  // Tomer's request for Section 6 on both stores. Each store mints its own
+  // distinct code for the same program — same non-collision logic as every
+  // other per-site pair above (Bi-Annual Reward Sale, etc.): a given site's
+  // orders only ever carry that site's own discount code, so COM orders
+  // will never match XU5AJ and EU orders will never match YAMQU — each
+  // site's Section 6 shows exactly one "Natasha's Birthday" row, via its
+  // own code.
+  'DISCOUNT-YAMQU': "Natasha's Birthday", // ND.COM
+  'DISCOUNT-XU5AJ': "Natasha's Birthday", // ND.EU
 };
 
 // Tags that get merged into one combined "Free Shipping" row (OR logic, not
