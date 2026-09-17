@@ -927,6 +927,22 @@ async function computeYotpoTierRevenue(site, start, end) {
 // Net Sales when revenue_included is false, no frontend change needed.
 const YOTPO_TIER_REVENUE_MAX_RANGE_DAYS = 35; // comfortably covers any single month + buffer
 
+// Even within the 35-day cap above, a single FULL past month (30-31 days of
+// orders) pages through far more Shopify orders than the current, still-in-
+// progress month does (e.g. 17 days of September vs. a complete August) —
+// confirmed live 2026-09-17 (Tomer: "it doesn't load data when i am
+// switching months"): a full-month site=com request took ~15s even on a
+// warm backend, and under concurrent load (current+YoY+MoM all competing for
+// the same per-shop Shopify rate-limit budget, see fetchOrdersForTierRevenue's
+// comment in src/shopify.js) or a cold Render instance, that stretches long
+// enough to look and feel exactly like the YTD hang this file already fixed
+// above — except nothing here was actually broken, it just had no time
+// budget. Same fix, same pattern: cap it and degrade gracefully instead of
+// leaving the frontend on "Loading Yotpo Loyalty data…" indefinitely (the
+// frontend's fetch() call has no timeout of its own here — see
+// fetchYotpoSummaryForSite in public/index.html).
+const YOTPO_TIER_REVENUE_TIMEOUT_MS = 25000;
+
 // GET /api/yotpo/summary?site=com&start=2026-09-01&end=2026-09-06[&include_revenue=1]
 app.get('/api/yotpo/summary', async (req, res) => {
   const { site, start, end, include_revenue } = req.query;
@@ -947,7 +963,17 @@ app.get('/api/yotpo/summary', async (req, res) => {
           `without Net Sales for this period.`;
       } else {
         try {
-          const revenueByTier = await computeYotpoTierRevenue(site, start, end);
+          const revenueByTier = await Promise.race([
+            computeYotpoTierRevenue(site, start, end),
+            new Promise((_, reject) => setTimeout(
+              () => reject(new Error(
+                `Net Sales by tier took longer than ${YOTPO_TIER_REVENUE_TIMEOUT_MS / 1000}s to compute for this ` +
+                `period (paging through every Shopify order in the range) — showing the rest of the table without ` +
+                `it rather than leaving the dashboard stuck loading. Try again in a moment.`
+              )),
+              YOTPO_TIER_REVENUE_TIMEOUT_MS
+            )),
+          ]);
           const seenTiers = new Set();
           summary.redemptions_by_tier = summary.redemptions_by_tier.map((r) => {
             seenTiers.add(r.tier);
