@@ -2433,6 +2433,8 @@ function renderTopProducts(monthData) {
     ? 'Pulled live via the Sync button (real-time Shopify order data for the selected date range). Net Sales is estimated using the store\'s overall net/gross ratio, not a per-product figure. YoY compares the same date range one year earlier; MoM compares the same date range one month earlier, matched by exact product title — a brand-new product, or one renamed since the comparison period, shows —.'
     : monthData.top_products_source === 'shopify_analytics'
     ? 'Pulled live from Shopify analytics (ShopifyQL, exact calendar-month-to-date range). Net Sales is estimated using the store\'s overall net/gross ratio for the month, not a per-product figure. YoY compares the same date range one year earlier; MoM compares the same date range one month earlier. A blank YoY/MoM/Units Sold means that comparison period (or per-product unit count) wasn\'t available from this pull — often because the product is a new launch.'
+    : monthData.top_products_source === 'combined'
+    ? (monthData.top_products_combined_note || 'Combined from the underlying periods/sites client-side.')
     : `Pulled live from Shopify (best-sellers by revenue, last ${monthData.top_products_window_days} days ≈ month-to-date). Net Sales is estimated using the store's overall net/gross ratio for the month, not a per-product figure. YoY / MoM aren't available from this tool — it only returns a rolling window from today, not arbitrary past periods.`;
   const rows = monthData.top_products.map((p, i) => `<tr>
       <td>${i+1}. ${p.title}</td>
