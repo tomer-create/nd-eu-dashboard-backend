@@ -2508,19 +2508,19 @@ const PLACEHOLDERS = {
     ]
   },
   'section-5': {
-    title: 'Awaiting Shopify sales-by-country export',
+    title: 'No sales-by-country data yet for this site/month',
     items: [
-      'Export: Analytics → Reports → Sales by shipping country (or Sales by customer location), for the selected month.',
-      'Needed columns: country, orders, gross sales, net sales, units returned (if available).',
-      'For YoY / MoM, same approach as Section 2 — include comparison periods or send as separate files.'
+      'Click "Sync" above to pull this live from Shopify \u2014 works for any site and any month, not just the current one.',
+      'A full past month on a busy site (e.g. ND.COM) can take up to a minute to sync, since it pulls the current period plus YoY/MoM comparisons together \u2014 the status line above will say "Synced all sites" once it\u2019s done.',
+      'Grouped by shipping country where Shopify supports it for this query (falls back to billing country otherwise), exact selected date range.'
     ]
   },
   'section-6': {
-    title: 'Awaiting Shopify order-tag export',
+    title: 'No discount breakdown yet for this site/month',
     items: [
-      'Export: Orders → Export → "Orders and line items" (CSV) with the Tags and Discount Code columns included, storefront (web) orders only.',
-      'I already have the tag → program mapping (DISCOUNT-36SLV → HY-GLAM Collection Bundle, DISCOUNT-KB24C → Natasha\u2019s Recommended Sets, DISCOUNT-COLLECTIONBUNDLES → Collection Bundles, DISCOUNT-FREE_SAMPLE → Free Sample, DISCOUNT-FT9ZL → Glam Tier Free Gift, DISCOUNT-8B2DX → Free Shipping Glam Tier, DISCOUNT-ZWKHZ → Discount Shipping For Glow Tier, DISCOUNT-PRO-ARTIST → Pro-Artist, DISCOUNT-BA_DISCOUNT → BA Discount, DISCOUNT-OA5WN → Glow Tier Free Gift, Collabs_Affiliate → Collabs Affiliate) — plus a combined "Free Shipping" row summing the Glam Tier + Glow Tier free-shipping tags.',
-      'Once the export arrives I\u2019ll tag-match each order, compute Total Discount $, order count, % of total discounts, and Effective Discount % per program.'
+      'Click "Sync" above to pull this live from Shopify \u2014 works for any site and any month, not just the current one.',
+      'A full past month on a busy site (e.g. ND.COM) can take up to a minute to sync, since it pulls the current period plus YoY/MoM comparisons together \u2014 the status line above will say "Synced all sites" once it\u2019s done.',
+      'Matched by order tag against the known discount-code \u2192 program mapping for this site; storefront (web) orders only.'
     ]
   }
 };
@@ -2529,7 +2529,6 @@ function renderPlaceholder(id) {
   document.getElementById(id).innerHTML = `<div class="placeholder">
     <div class="ph-title">${p.title}</div>
     <ul>${p.items.map(i => `<li>${i}</li>`).join('')}</ul>
-    <div class="ph-note">Upload the file(s) in chat, or re-authorize the Shopify connector, and I\u2019ll wire this section up with real data.</div>
   </div>`;
 }
 
