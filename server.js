@@ -9,6 +9,7 @@ const { fetchPnlSheetChannels, fetchPnlSheetOtherCosts, fetchPnlSheetTotalCost, 
 const { VALID_SITES: YOTPO_VALID_SITES, ensureYotpoSchema, recordYotpoEvent, getYotpoSummary, getYotpoCustomerTierMap, getPool: getYotpoPool } = require('./src/yotpo');
 const { registerYotpoWebhooksForSite } = require('./src/yotpo-setup');
 const { importYotpoHistory } = require('./src/yotpo-import');
+const { ensureMonthCacheSchema, getWithMonthCache } = require('./src/month-cache');
 const multer = require('multer');
 const yotpoUpload = multer({ storage: multer.memoryStorage(), limits: { fileSize: 25 * 1024 * 1024 } });
 
@@ -23,6 +24,12 @@ const PORT = process.env.PORT || 3000;
 ensureYotpoSchema().then((ok) => {
   if (ok) console.log('yotpo: schema ready');
   else console.log('yotpo: DATABASE_URL not configured yet — Section 8 will report no_data until it is');
+});
+
+// Closed-month cache (added 2026-10-04) — see src/month-cache.js. Same
+// database as the Yotpo section; a harmless no-op without DATABASE_URL.
+ensureMonthCacheSchema().then((ok) => {
+  if (ok) console.log('month-cache: schema ready');
 });
 
 // Render sits behind a proxy — trust its X-Forwarded-Proto so req.protocol
@@ -791,14 +798,23 @@ function applySalesReversals(aggResult, salesReversals) {
 }
 
 // GET /api/data?site=com&start=2026-08-01&end=2026-08-21&compare=yoy,mom
+// Optional &refresh=1 forces a fresh Shopify pull for a closed month instead
+// of the cached copy (see src/month-cache.js — added 2026-10-04 so a month
+// that just ended is never left empty and doesn't take ~100s on every load).
 app.get('/api/data', async (req, res) => {
   const compare = String(req.query.compare || '')
     .split(',')
     .map((s) => s.trim())
     .filter(Boolean);
+  const refresh = req.query.refresh === '1' || req.query.refresh === 'true';
   try {
-    const result = await buildDataResponse({ ...req.query, compare });
-    res.json(result);
+    const { payload, cache, fetchedAt } = await getWithMonthCache(
+      { site: req.query.site, start: req.query.start, end: req.query.end, compare, refresh },
+      () => buildDataResponse({ ...req.query, compare })
+    );
+    res.set('X-Month-Cache', cache);
+    if (fetchedAt) res.set('X-Month-Cache-Fetched-At', new Date(fetchedAt).toISOString());
+    res.json(payload);
   } catch (err) {
     console.error(err);
     res.status(err.status || 502).json({ error: err.message });
