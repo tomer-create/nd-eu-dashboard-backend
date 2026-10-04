@@ -467,9 +467,14 @@ function monthDateRange(month, isCurrent) {
   return { start: isoDate(start), end: isoDate(end) };
 }
 
-async function fetchLiveData(site, month, isCurrent) {
+// opts.refresh (added 2026-10-04): ask the backend to skip its closed-month
+// cache and pull fresh from Shopify (see src/month-cache.js). The Sync button
+// always sends it — a manual Sync should mean "fresh numbers"; the automatic
+// closed-month fill below doesn't, so it gets the cached copy instantly.
+async function fetchLiveData(site, month, isCurrent, opts) {
   const { start, end } = monthDateRange(month, isCurrent);
-  const url = `${BACKEND_URL}/api/data?site=${encodeURIComponent(site)}&start=${start}&end=${end}&compare=yoy,mom`;
+  const refreshParam = opts && opts.refresh ? '&refresh=1' : '';
+  const url = `${BACKEND_URL}/api/data?site=${encodeURIComponent(site)}&start=${start}&end=${end}&compare=yoy,mom${refreshParam}`;
   const controller = new AbortController();
   // 90s: the backend runs on Render's free tier, which spins the service
   // down after ~15 min idle — a cold start alone can take 30-50s. On top of
@@ -1682,7 +1687,7 @@ async function performSync() {
   try {
     const results = await Promise.allSettled(sites.map(site => {
       const isCurrent = DATA.sites[site].months[month].is_current;
-      return fetchLiveData(site, month, isCurrent);
+      return fetchLiveData(site, month, isCurrent, { refresh: true });
     }));
     const succeeded = [];
     const failed = [];
@@ -2995,7 +3000,45 @@ applyMobileTableLabels(document.querySelector('.wrap'));
 // resolves). performSync() disables the button for its own duration, and a
 // disabled <button> doesn't dispatch click events, so a manual click during
 // this initial auto-sync is already safely a no-op — no separate lock needed.
-performSync();
+performSync().finally(autoFillClosedMonths);
+
+// Closed-month auto-fill — added 2026-10-04 (Tomer: "let's build a solution
+// for this" — every month that just ended was left as an empty placeholder
+// in the embedded snapshot, so it showed no results and dropped out of the
+// Year-to-Date totals until someone hand-baked it into this file).
+//
+// After the current-month auto-sync above finishes, any month before the
+// current one whose embedded snapshot has no real data (has_actual false)
+// is pulled from the backend for all 3 sites and cached in liveCache, then
+// the page re-renders — so that month's own view AND every YTD / All Sites
+// total include it automatically. The backend stores each closed month in
+// its database (src/month-cache.js), so only the very first pull after a
+// month ends takes the full ~100s; every later page load gets it instantly.
+// Months that are already baked into the snapshot are left untouched.
+async function autoFillClosedMonths() {
+  const current = DATA.meta.current_month;
+  const sites = Object.keys(DATA.sites);
+  const missing = DATA.meta.months_available.filter(m =>
+    m !== current && sites.some(s => !DATA.sites[s].months[m].has_actual && !liveCache[s + '|' + m]));
+  if (!missing.length) return;
+  const statusEl = document.getElementById('sync-status');
+  const btn = document.getElementById('sync-btn');
+  const names = missing.map(m => DATA.meta.month_full_names[m]).join(', ');
+  const setStatus = (cls, text) => { if (!btn.disabled) { statusEl.className = cls; statusEl.textContent = text; } };
+  setStatus('sync-status', 'Loading ' + names + ' (closed month) from Shopify… the first load after a month ends can take up to 2 minutes; after that it\'s instant.');
+  const failed = [];
+  for (const month of missing) {
+    const results = await Promise.allSettled(sites.map(site =>
+      (DATA.sites[site].months[month].has_actual || liveCache[site + '|' + month])
+        ? Promise.resolve(null)
+        : fetchLiveData(site, month, false).then(data => { liveCache[site + '|' + month] = { data, fetchedAt: new Date() }; })
+    ));
+    results.forEach((r, i) => { if (r.status === 'rejected') failed.push(siteMeta(sites[i]).name + ' ' + DATA.meta.month_full_names[month]); });
+    render();
+  }
+  if (failed.length) setStatus('sync-status err', 'Couldn\'t load closed-month data for: ' + failed.join('; ') + '. Select that month and click Sync to retry.');
+  else setStatus('sync-status ok', 'Loaded ' + names + ' (closed month) for all sites at ' + new Date().toLocaleTimeString('en-US', { hour: 'numeric', minute: '2-digit' }));
+}
 </script>
 </body>
 </html>
