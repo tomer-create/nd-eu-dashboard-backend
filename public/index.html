@@ -1157,9 +1157,36 @@ function ytdLabel() {
   return 'Year to Date (' + DATA.meta.month_full_names[months[0]] + '–' + DATA.meta.month_full_names[months[months.length - 1]] + ' 2026)';
 }
 function monthLabelText() {
-  return state.month === 'YTD' ? ytdLabel() : (DATA.meta.month_full_names[state.month] + ' 2026');
+  if (state.month === 'YTD') return ytdLabel();
+  if (isQuarter(state.month)) return quarterLabel(state.month);
+  return DATA.meta.month_full_names[state.month] + ' 2026';
 }
-function isCombinedView() { return state.month === 'YTD' || state.site === 'all'; }
+function isCombinedView() { return isMultiMonth(state.month) || state.site === 'all'; }
+
+// Quarters — added 2026-10-05 per Tomer ("i want to add the option to
+// compare between Q's"). A quarter is a multi-month combined view exactly
+// like Year to Date (same combineMonthDatas() summing, every section), just
+// over 3 months, and its "MoM" slot becomes QoQ: the quarter vs. the
+// previous quarter (see applyQoQ). Only quarters that have started appear
+// in the period menu; an in-progress quarter covers the months so far.
+const QUARTERS = { Q1: ['Jan', 'Feb', 'Mar'], Q2: ['Apr', 'May', 'Jun'], Q3: ['Jul', 'Aug', 'Sep'], Q4: ['Oct', 'Nov', 'Dec'] };
+const PREV_QUARTER = { Q2: 'Q1', Q3: 'Q2', Q4: 'Q3' }; // Q1's previous quarter is Q4 2025, which isn't in the data
+function isQuarter(p) { return Object.prototype.hasOwnProperty.call(QUARTERS, p); }
+function isMultiMonth(p) { return p === 'YTD' || isQuarter(p); }
+function quarterMonths(q) { return QUARTERS[q].filter(m => DATA.meta.months_available.includes(m)); }
+function availableQuarters() { return Object.keys(QUARTERS).filter(q => quarterMonths(q).length); }
+function isQuarterInProgress(q) { return quarterMonths(q).includes(DATA.meta.current_month); }
+function periodMonths(p) {
+  if (p === 'YTD') return DATA.meta.months_available.slice();
+  if (isQuarter(p)) return quarterMonths(p);
+  return [p];
+}
+function quarterLabel(q) {
+  const ms = QUARTERS[q];
+  return q + ' 2026 (' + DATA.meta.month_full_names[ms[0]].slice(0, 3) + '–' + DATA.meta.month_full_names[ms[2]].slice(0, 3) + (isQuarterInProgress(q) ? ', in progress' : '') + ')';
+}
+// The label for the period-over-period slot: QoQ on a quarter, MoM otherwise.
+function momLabel() { return isQuarter(state.month) ? 'QoQ' : 'MoM'; }
 
 // Added 2026-09-03 per Tomer: "when i will press the sync button i will
 // sync the data for all together ND.COM, ND.EU, ND.IL, ALL sites (USD) and
@@ -1185,6 +1212,24 @@ function isCombinedView() { return state.month === 'YTD' || state.site === 'all'
 // updates the YTD (and All Sites + YTD) views automatically, exactly like
 // it already does for that month's own single-site tab.
 function syncTargetMonth() { return state.month === 'YTD' ? DATA.meta.current_month : state.month; }
+// Months one Sync click pulls (added 2026-10-05 with quarters): YTD and an
+// in-progress quarter sync just the current month (everything else in them
+// is already closed); a closed quarter syncs its own 3 months; a single
+// month syncs itself.
+function syncTargetMonths() {
+  if (state.month === 'YTD') return [DATA.meta.current_month];
+  if (isQuarter(state.month)) return isQuarterInProgress(state.month) ? [DATA.meta.current_month] : quarterMonths(state.month);
+  return [state.month];
+}
+function syncTail(months) {
+  if (state.month === 'YTD') return ' for ' + DATA.meta.month_full_names[months[0]] + ' (the current month in this Year-to-Date total)';
+  if (isQuarter(state.month)) {
+    return isQuarterInProgress(state.month)
+      ? ' for ' + DATA.meta.month_full_names[months[0]] + ' (the current month in ' + state.month + ')'
+      : ' for ' + state.month + ' (' + months.map(m => DATA.meta.month_full_names[m]).join(', ') + ')';
+  }
+  return '';
+}
 function canSync() { return true; }
 
 // Reports how "in sync" a given month is across all 3 sites' live caches —
@@ -1616,7 +1661,9 @@ function combineMonthDatas(entries, opts) {
     discounts: dd.list, discounts_total_gross: discTotalGross, discounts_total_abs: discTotalAbs, discounts_total_orders: discTotalOrders,
     discounts_note: dd.list ? ('Combined for ' + label + '.' + combinedTail + (dd.partial ? ' Only ' + dd.sourcesCount + ' of ' + dd.totalSources + ' site/period combination(s) had discount-level data to merge.' : '')) : undefined,
     combined_label: label,
-    combined_footer_note: 'Section 1 goals/actuals, Section 4 channels, and Section 7 other costs are true sums across ' + label + (entries.length > 1 && entries.some(e => e.fx !== 1) ? ', converted to USD. ' + FX_NOTE : '.') + combinedTail + partialTail + (isYTD
+    combined_footer_note: 'Section 1 goals/actuals, Section 4 channels, and Section 7 other costs are true sums across ' + label + (entries.length > 1 && entries.some(e => e.fx !== 1) ? ', converted to USD. ' + FX_NOTE : '.') + combinedTail + partialTail + (opts.periodKind === 'quarter'
+      ? ' Click Sync above to pull live Shopify numbers for ' + (isQuarter(state.month) && isQuarterInProgress(state.month) ? 'the current month (' + DATA.meta.current_month_full + ')' : 'this quarter\'s months') + ' across ND.COM, ND.EU, and ND.IL.'
+      : '') + (opts.periodKind === 'quarter' ? '' : isYTD
       // Fixed 2026-09-10 per Tomer — Sync now works on Year-to-Date too (see
       // syncTargetMonth()/canSync() above): every earlier month in a YTD
       // total is already closed/complete in the snapshot, so Sync just
@@ -1637,12 +1684,84 @@ function getSiteYTDData(site) {
   return combineMonthDatas(entries, { label: ytdLabel() + ' — ' + siteMeta(site).name, isYTD: true });
 }
 
+// One site's combined data for a list of months (a quarter). Same combine
+// as Year to Date — isYTD:true is what marks it as "several different
+// months" (YoY sums cleanly, MoM doesn't; QoQ is applied afterwards).
+function getSitePeriodData(site, months, label) {
+  const entries = months.map(mon => ({ monthData: getSingleSiteMonthData(site, mon), fx: 1 }));
+  return combineMonthDatas(entries, { label: label + ' — ' + siteMeta(site).name, isYTD: true, periodKind: 'quarter' });
+}
+
+// Combined data for a quarter on the current site tab (one site, or All
+// Sites converted to USD).
+function getQuarterData(q, sites) {
+  const months = quarterMonths(q);
+  const label = quarterLabel(q);
+  if (sites.length === 1) return getSitePeriodData(sites[0], months, label);
+  const entries = sites.map(s => ({ monthData: getSitePeriodData(s, months, label), fx: FX_TO_USD[s], site: s }));
+  return combineMonthDatas(entries, { label: label + ', all sites', isYTD: true, periodKind: 'quarter' });
+}
+
+// QoQ — fills each figure's "mom" slot with the change vs. the previous
+// quarter (added 2026-10-05). Shown only when BOTH quarters are complete:
+// an in-progress quarter (e.g. Q4 with only October so far) compared with a
+// full previous quarter would read as a huge fake drop, so its QoQ stays
+// "—" until the quarter closes. Q1 has no previous quarter in the data
+// (Q4 2025), so it stays "—" too. Ratio KPIs (AOV, the % ratios, Profit
+// Margin, ROAS) compare the ratio itself, the same relative-change
+// convention the MoM tiles already use. List sections (Top Products, Sales
+// by Country) get a per-row QoQ by matching the row against the previous
+// quarter's full, uncapped list.
+function sumByKey(qData, field, keyFn) {
+  const m = new Map();
+  (qData && qData[field] || []).forEach(it => m.set(keyFn(it), (m.get(keyFn(it)) || 0) + (it.gross_sales || 0)));
+  return m;
+}
+function fullListByKey(q, sites, field, keyFn) {
+  // Uncapped previous-quarter totals (the combined top_products list is
+  // capped at 15, which would hide most rows' previous value).
+  const m = new Map();
+  sites.forEach(s => quarterMonths(q).forEach(mon => {
+    const md = getSingleSiteMonthData(s, mon);
+    const fx = sites.length > 1 ? FX_TO_USD[s] : 1;
+    (md[field] || []).forEach(it => m.set(keyFn(it), (m.get(keyFn(it)) || 0) + (it.gross_sales || 0) * fx));
+  }));
+  return m;
+}
+function applyQoQ(q, sites, cur) {
+  const prevQ = PREV_QUARTER[q];
+  const usable = prevQ && !isQuarterInProgress(q) && quarterMonths(prevQ).length === 3 && quarterMonths(q).length === 3;
+  const pct = (a, b) => (a === null || a === undefined || !b) ? null : (a - b) / Math.abs(b);
+  if (!usable) {
+    cur.kpis.forEach(k => { k.mom = null; });
+    (cur.top_products || []).forEach(p => { p.mom = null; });
+    (cur.by_country || []).forEach(c => { c.mom = null; });
+    cur.qoq_note = prevQ ? (isQuarterInProgress(q) ? q + ' is still in progress — QoQ is shown once the quarter closes (comparing a partial quarter with a full one would be misleading).' : '') : 'QoQ isn\'t available for Q1 — the previous quarter (Q4 2025) isn\'t in this dashboard\'s data.';
+    if (cur.qoq_note) cur.combined_footer_note = cur.qoq_note + ' ' + (cur.combined_footer_note || '');
+    return cur;
+  }
+  const prev = getQuarterData(prevQ, sites);
+  const prevByLabel = Object.fromEntries(prev.kpis.map(k => [k.label, k]));
+  cur.kpis.forEach(k => {
+    const pk = prevByLabel[k.label];
+    k.mom = (pk && !pk.no_data && !k.no_data) ? pct(k.actual, pk.actual) : null;
+  });
+  const prevProducts = fullListByKey(prevQ, sites, 'top_products', p => p.title);
+  (cur.top_products || []).forEach(p => { p.mom = prevProducts.has(p.title) ? pct(p.gross_sales, prevProducts.get(p.title)) : null; });
+  const prevCountries = fullListByKey(prevQ, sites, 'by_country', c => c.country);
+  (cur.by_country || []).forEach(c => { c.mom = prevCountries.has(c.country) ? pct(c.gross_sales, prevCountries.get(c.country)) : null; });
+  cur.qoq_note = 'QoQ compares ' + q + ' with ' + prevQ + ' 2026 (same site, same sections).';
+  cur.combined_footer_note = cur.qoq_note + ' ' + (cur.combined_footer_note || '');
+  return cur;
+}
+
 // Returns the monthData to render for the current state — a single
 // site+month (optionally live-synced), a single site's Year-to-Date, all
 // sites for one month (converted to USD), or all sites' Year-to-Date.
 function getMonthData() {
   const sites = state.site === 'all' ? Object.keys(DATA.sites) : [state.site];
   const isYTD = state.month === 'YTD';
+  if (isQuarter(state.month)) return applyQoQ(state.month, sites, getQuarterData(state.month, sites));
 
   // Single site: return getSiteYTDData/getSingleSiteMonthData directly —
   // wrapping either in another (single-entry) combineMonthDatas pass would
@@ -1676,32 +1795,43 @@ async function performSync() {
   if (!canSync()) return; // guarded by the disabled button too
   const btn = document.getElementById('sync-btn');
   const statusEl = document.getElementById('sync-status');
-  const isYTD = state.month === 'YTD';
-  const month = syncTargetMonth();
-  const monthTail = isYTD ? ' for ' + DATA.meta.month_full_names[month] + ' (the current month in this Year-to-Date total)' : '';
+  const months = syncTargetMonths();
+  const monthTail = syncTail(months);
   const sites = Object.keys(DATA.sites);
   btn.disabled = true;
   btn.classList.add('syncing');
   statusEl.className = 'sync-status';
-  statusEl.textContent = 'Syncing ' + sites.map(s => siteMeta(s).name).join(', ') + monthTail + ' with Shopify… (can take up to a minute or so, especially the first sync after a while)';
+  const baseText = 'Syncing ' + sites.map(s => siteMeta(s).name).join(', ') + monthTail + ' with Shopify… (can take up to a minute or so, especially the first sync after a while)';
+  statusEl.textContent = baseText;
   try {
-    const results = await Promise.allSettled(sites.map(site => {
-      const isCurrent = DATA.sites[site].months[month].is_current;
-      return fetchLiveData(site, month, isCurrent, { refresh: true });
-    }));
-    const succeeded = [];
+    const succeededSet = new Set();
     const failed = [];
-    results.forEach((r, i) => {
-      const site = sites[i];
-      if (r.status === 'fulfilled') {
-        liveCache[site + '|' + month] = { data: r.value, fetchedAt: new Date() };
-        succeeded.push(site);
-      } else {
-        const err = r.reason;
-        const msg = (err && err.name === 'AbortError') ? 'timed out' : (err.message || String(err));
-        failed.push(siteMeta(site).name + ' (' + msg + ')');
-      }
-    });
+    // One month at a time (all 3 sites in parallel within a month) so a
+    // closed quarter's 3-month sync doesn't fire 9 heavy Shopify pulls at
+    // once. A closed month is read through the backend's month cache (no
+    // forced refresh) — its numbers are already final and instant once
+    // cached; the current month always gets a fresh pull.
+    for (let mi = 0; mi < months.length; mi++) {
+      const month = months[mi];
+      if (months.length > 1) statusEl.textContent = baseText + ' — ' + DATA.meta.month_full_names[month] + ' (' + (mi + 1) + ' of ' + months.length + ')';
+      const isCurrentMonth = month === DATA.meta.current_month;
+      const results = await Promise.allSettled(sites.map(site => {
+        const isCurrent = DATA.sites[site].months[month].is_current;
+        return fetchLiveData(site, month, isCurrent, { refresh: isCurrentMonth || months.length === 1 });
+      }));
+      results.forEach((r, i) => {
+        const site = sites[i];
+        if (r.status === 'fulfilled') {
+          liveCache[site + '|' + month] = { data: r.value, fetchedAt: new Date() };
+          succeededSet.add(site);
+        } else {
+          const err = r.reason;
+          const msg = (err && err.name === 'AbortError') ? 'timed out' : (err.message || String(err));
+          failed.push(siteMeta(site).name + (months.length > 1 ? ' ' + DATA.meta.month_full_names[month] : '') + ' (' + msg + ')');
+        }
+      });
+    }
+    const succeeded = sites.filter(s => succeededSet.has(s));
     if (!failed.length) {
       statusEl.className = 'sync-status ok';
       statusEl.textContent = 'Synced ' + succeeded.map(s => siteMeta(s).name).join(', ') + monthTail + ' at ' + new Date().toLocaleTimeString('en-US', { hour: 'numeric', minute: '2-digit' });
@@ -1723,13 +1853,21 @@ function updateSyncStatus() {
   const btn = document.getElementById('sync-btn');
   const statusEl = document.getElementById('sync-status');
   btn.disabled = false;
-  const isYTD = state.month === 'YTD';
-  const month = syncTargetMonth();
-  // On YTD, Sync targets/reads the current month's own liveCache entry (see
-  // syncTargetMonth()'s comment) — every other month in the YTD total is
-  // already closed, so there's nothing else for this status line to report.
-  const monthTail = isYTD ? ' for ' + DATA.meta.month_full_names[month] + ' — the rest of this Year-to-Date total is already closed/complete' : '';
-  const status = monthSyncStatus(month);
+  const months = syncTargetMonths();
+  // On YTD (and an in-progress quarter), Sync targets/reads the current
+  // month's own liveCache entry — every other month in the total is already
+  // closed. A closed quarter reports on its own months together.
+  let monthTail;
+  if (state.month === 'YTD') monthTail = ' for ' + DATA.meta.month_full_names[months[0]] + ' — the rest of this Year-to-Date total is already closed/complete';
+  else if (isQuarter(state.month) && isQuarterInProgress(state.month)) monthTail = ' for ' + DATA.meta.month_full_names[months[0]] + ' (the current month in ' + state.month + ')';
+  else if (isQuarter(state.month)) monthTail = ' for ' + state.month;
+  else monthTail = '';
+  const statuses = months.map(m => monthSyncStatus(m));
+  let status = null;
+  if (statuses.every(Boolean)) {
+    const cachedSites = Object.keys(DATA.sites).filter(s => statuses.every(st => st.cachedSites.includes(s)));
+    status = { cachedSites, total: statuses[0].total, fetchedAt: statuses.reduce((min, st) => (st.fetchedAt < min ? st.fetchedAt : min), statuses[0].fetchedAt) };
+  }
   if (!status) {
     statusEl.className = 'sync-status';
     statusEl.textContent = 'Showing snapshot data — click Sync for live numbers (all sites)' + monthTail;
@@ -1848,7 +1986,7 @@ function renderKPIs(monthData) {
       // date is not working": the header said "Year to Date" while every
       // tile underneath contradicted it with "MTD". Use "YTD" there instead.
       const pctStr = monthData.is_current
-        ? pctLabel(k.pct_of_goal) + (state.month === 'YTD' ? ' YTD' : ' MTD')
+        ? pctLabel(k.pct_of_goal) + (state.month === 'YTD' ? ' YTD' : isQuarter(state.month) ? ' QTD' : ' MTD')
         : pctLabel(k.pct_of_goal) + ' of goal';
       progressHtml = renderPBar(k.pct_of_goal, k.higher_is_better, monthData.is_current) + `<div class="pbar-pct">${pctStr}</div>`;
     }
@@ -1858,7 +1996,7 @@ function renderKPIs(monthData) {
         <span class="kpi-yoy ${yoyStr === null ? 'flat' : yoyDir}">${yoyStr === null ? 'YoY —' : 'YoY ' + yoyStr}</span>
       </div>
       <div class="kpi-mom-row">
-        <span class="kpi-yoy ${momStr === null ? 'flat' : momDir}">${momStr === null ? 'MoM —' : 'MoM ' + momStr}</span>
+        <span class="kpi-yoy ${momStr === null ? 'flat' : momDir}">${momStr === null ? momLabel() + ' —' : momLabel() + ' ' + momStr}</span>
       </div>
       <div class="kpi-value">${fmtVal(k.actual, k.fmt)}</div>
       <div class="kpi-goal-line">Goal: ${fmtVal(k.goal, k.fmt)}</div>
@@ -2001,6 +2139,15 @@ function renderOtherCosts(monthData) {
 // Yotpo events aren't bucketed into the embedded DATA snapshot's months at
 // all — there's nothing to look up an `is_current` flag from here.
 function yotpoDateRange(month) {
+  if (isQuarter(month)) {
+    const ms = QUARTERS[month];
+    const start = isoDate(new Date(Date.UTC(2026, MONTH_INDEX[ms[0]], 1)));
+    if (isQuarterInProgress(month)) {
+      const now = new Date();
+      return { start, end: isoDate(new Date(Date.UTC(now.getUTCFullYear(), now.getUTCMonth(), now.getUTCDate() + 1))) };
+    }
+    return { start, end: isoDate(new Date(Date.UTC(2026, MONTH_INDEX[ms[2]] + 1, 1))) };
+  }
   if (month === 'YTD') {
     const start = isoDate(new Date(Date.UTC(2026, 0, 1)));
     const now = new Date();
@@ -2177,7 +2324,7 @@ async function renderYotpoLoyalty() {
   if (state.site === 'all') {
     const { start, end } = yotpoDateRange(state.month);
     const yoyRange = yotpoShiftDateRange(start, end, { years: 1 });
-    const momRange = yotpoShiftDateRange(start, end, { months: 1 });
+    const momRange = yotpoShiftDateRange(start, end, { months: isQuarter(state.month) ? 3 : 1 });
     const sites = Object.keys(DATA.sites);
     const keys = sites.map((s) => s + '|' + state.month);
     const yoyKeys = keys.map((k) => k + '|yoy');
@@ -2252,7 +2399,7 @@ async function renderYotpoLoyalty() {
   yotpoCache[momKey] = 'loading';
   const { start, end } = yotpoDateRange(state.month);
   const yoyRange = yotpoShiftDateRange(start, end, { years: 1 });
-  const momRange = yotpoShiftDateRange(start, end, { months: 1 });
+  const momRange = yotpoShiftDateRange(start, end, { months: isQuarter(state.month) ? 3 : 1 });
   const requestedSite = state.site, requestedMonth = state.month;
   await Promise.all([
     fetchYotpoSummaryForSite(state.site, start, end, 0, true)
@@ -2415,7 +2562,7 @@ function renderYotpoSection(el, data, yoyData, momData, combined) {
     </div>
     <div style="font-size:12.5px;font-weight:600;margin:4px 0 6px">Points redeemed by tier</div>
     <table class="dtable">
-      <thead><tr><th style="text-align:left">Tier</th><th>Redeemers</th><th>Uses</th><th>Points used</th><th>Value (${sym()})</th><th>Net Sales (${sym()})</th><th>YoY</th><th>MoM</th></tr></thead>
+      <thead><tr><th style="text-align:left">Tier</th><th>Redeemers</th><th>Uses</th><th>Points used</th><th>Value (${sym()})</th><th>Net Sales (${sym()})</th><th>YoY</th><th>${momLabel()}</th></tr></thead>
       <tbody>${tierRows}${totalRow}</tbody>
     </table>
     ${movementSection}
@@ -2501,7 +2648,7 @@ function renderTopProducts(monthData) {
       <td>${yoyCell(totalMom)}</td>
     </tr>` : '';
   el.innerHTML = `<table class="dtable">
-    <thead><tr><th style="text-align:left">Product</th><th>Gross Sales</th><th>Net Sales (est.)</th><th>Units Sold</th><th>% of Total Sales</th><th>YoY</th><th>MoM</th></tr></thead>
+    <thead><tr><th style="text-align:left">Product</th><th>Gross Sales</th><th>Net Sales (est.)</th><th>Units Sold</th><th>% of Total Sales</th><th>YoY</th><th>${momLabel()}</th></tr></thead>
     <tbody>${rows}${totalRow}</tbody>
   </table>
   <div style="margin-top:10px;font-size:11px;color:var(--text-muted)">${srcNote}</div>`;
@@ -2558,7 +2705,7 @@ function renderReturns(monthData) {
   }
   const monthLabel = monthLabelText();
   const isLive = monthData.top_returns_source === 'live_backend';
-  if (badgeEl) badgeEl.innerHTML = isLive ? '<span class="mtd-flag">Live \u00b7 ' + monthLabel + '</span>' : '<span class="mtd-flag">Year to date</span>';
+  if (badgeEl) badgeEl.innerHTML = isLive ? '<span class="mtd-flag">Live \u00b7 ' + monthLabel + '</span>' : '<span class="mtd-flag">' + (isQuarter(state.month) ? quarterLabel(state.month) : 'Year to date') + '</span>';
   // Two data sources feed this table:
   // 1) The ND.COM embedded snapshot — a one-time YTD (Jan 1-today) ShopifyQL
   //    pull baked in 2026-08-24 ("show the return ratio year to date"). Gross
@@ -2578,7 +2725,7 @@ function renderReturns(monthData) {
   //    against a separate Jan-1-through-period-end pull by title (see
   //    server.js). Ranking itself still stays period-based, not YTD — only
   //    the ratio column's scope changed.
-  const scopeLabel = isLive ? monthLabel : 'YTD';
+  const scopeLabel = isLive ? monthLabel : (isQuarter(state.month) ? state.month : 'YTD');
   // Excludes Samples (per Tomer's 2026-09-02 request) -- free/trial items,
   // not real sellable products, that skew the return ranking (a $0-cost
   // sample "returned" shows up disproportionately in ratio terms). Filtered
@@ -2626,7 +2773,7 @@ function renderReturns(monthData) {
       <td>${totalPctOfTotalReturns !== null ? fmtVal(totalPctOfTotalReturns, 'percent') : '—'}</td>
     </tr>` : '';
   document.getElementById('section-3').innerHTML = `<table class="dtable">
-    <thead><tr><th style="text-align:left">Product</th><th>Gross Sales (${scopeLabel})</th><th>Return $ Value (${scopeLabel})</th><th>Return Ratio (${monthLabel})</th><th>Return Ratio (YTD)</th><th>% of Total Returns (${scopeLabel})</th></tr></thead>
+    <thead><tr><th style="text-align:left">Product</th><th>Gross Sales (${scopeLabel})</th><th>Return $ Value (${scopeLabel})</th><th>Return Ratio (${monthLabel})</th><th>Return Ratio (${isLive ? 'YTD' : scopeLabel})</th><th>% of Total Returns (${scopeLabel})</th></tr></thead>
     <tbody>${rows}${totalRow}</tbody>
   </table>
   <div style="margin-top:10px;font-size:11px;color:var(--text-muted)">${monthData.top_returns_note || (isLive ? `Pulled live via the Sync button (real-time Shopify sales-reversals data, grouped by product, for the selected date range). Ranked by dollar return value for ${monthLabel} specifically — not year-to-date like the ND.COM embedded snapshot. Return Ratio (YTD) reflects Jan 1 through the end of ${monthLabel} for each product (same Shopify sales-reversals ÷ gross-sales calculation, just a longer window) — shows "—" only for a product with no matching year-to-date data, e.g. one first sold this period; % of Total Returns is this period's share of ${monthLabel}'s Shopify-reported Returns total (Section 1).` : `Pulled from Shopify analytics. Ranked by year-to-date (Jan 1 – today) dollar return value — Gross Sales, Return $ Value, Return Ratio (YTD), and % of Total Returns all reflect that same Jan 1–today window, so they're internally consistent with each other even though they don't match ${monthLabel}'s own totals. Return Ratio (${monthLabel}) additionally shows how each of these 15 products performed in just the currently-selected month, for a more recent read alongside the steadier YTD figure. Shopify\u2019s analytics query surface doesn\u2019t expose a units-returned dimension at the per-product level, so this table ranks by dollar return value rather than unit counts — the store-wide total of ${monthData.top_returns_units_total_ytd !== undefined ? monthData.top_returns_units_total_ytd.toLocaleString('en-US') : '—'} units returned year-to-date (${monthData.top_returns_units_total !== undefined ? monthData.top_returns_units_total.toLocaleString('en-US') : '—'} in ${monthLabel} alone) is shown in Section 1.`)} Samples are excluded from this list.</div>`;
@@ -2729,7 +2876,7 @@ function renderCountry(monthData) {
     </tr>`;
 
   document.getElementById('section-5').innerHTML = `<table class="dtable">
-    <thead><tr><th style="text-align:left">Country</th><th>Orders</th><th>Gross Sales</th><th>Net Sales</th><th>AOV</th><th>% of Total</th><th>Return Rate</th><th>YoY</th><th>MoM</th></tr></thead>
+    <thead><tr><th style="text-align:left">Country</th><th>Orders</th><th>Gross Sales</th><th>Net Sales</th><th>AOV</th><th>% of Total</th><th>Return Rate</th><th>YoY</th><th>${momLabel()}</th></tr></thead>
     <tbody>${rows}${showMoreRow}${totalRow}</tbody>
   </table>
   <div style="margin-top:10px;font-size:11px;color:var(--text-muted)">${monthData.by_country_note || 'Pulled live from Shopify analytics, grouped by shipping country where Shopify supports it for this query (falls back to billing country otherwise), exact calendar-month-to-date range.'}</div>`;
@@ -2810,6 +2957,13 @@ function renderMonthPicker() {
   ytdOpt.value = 'YTD';
   ytdOpt.textContent = ytdLabel();
   el.appendChild(ytdOpt);
+  // Quarters (added 2026-10-05) — only ones that have started.
+  availableQuarters().forEach(q => {
+    const opt = document.createElement('option');
+    opt.value = q;
+    opt.textContent = quarterLabel(q);
+    el.appendChild(opt);
+  });
   DATA.meta.months_available.forEach(mon => {
     const opt = document.createElement('option');
     opt.value = mon;
@@ -2841,7 +2995,9 @@ function render() {
   const mtdBadge = monthData.is_current
     ? (state.month === 'YTD'
         ? '<span class="mtd-flag">Year to date — current month in progress</span>'
-        : '<span class="mtd-flag">Month to date</span>')
+        : isQuarter(state.month)
+          ? '<span class="mtd-flag">Quarter to date — current month in progress</span>'
+          : '<span class="mtd-flag">Month to date</span>')
     : '';
   document.getElementById('mtd-flag-1').innerHTML = mtdBadge;
   document.getElementById('mtd-flag-4').innerHTML = mtdBadge;
