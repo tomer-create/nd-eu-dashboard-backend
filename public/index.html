@@ -2131,48 +2131,80 @@ function renderTikTokShop(monthData) {
     tile('New-Customer Orders', tt.new_customer_orders, 'number', 'new_customer_orders', true, tt.orders ? fmtVal(tt.new_customer_orders / tt.orders, 'percent') + ' of orders' : ''),
   ].join('');
 
-  // Revenue by source
+  // Revenue by source — updated 2026-10-07 per Tomer: TTS Ads conversion
+  // value (Triple Whale), Affiliate-driven GMV (TikTok finance data via
+  // Windsor, see src/windsor-tiktok.js), and Organic GMV as a formula:
+  //   Organic GMV = Gross Sales TikTok − (Affiliate-driven GMV + Ads conversion value)
+  // The affiliate figure arrives with the Seller Center data in the
+  // background; until then the Affiliate + Organic total is shown combined.
   const gmv = tt.gross_sales || 0;
-  const adsShare = gmv ? tt.ads_revenue / gmv : 0;
-  const affShare = gmv ? tt.affiliate_organic_revenue / gmv : 0;
+  const sc = ttSellerCenterEntry();
+  const aff = sc && sc.status === 'ok' && sc.data && sc.data.affiliate && !sc.data.affiliate.error ? sc.data.affiliate : null;
+  const smp = sc && sc.status === 'ok' && sc.data && sc.data.samples && !sc.data.samples.error ? sc.data.samples : null;
+  const scPending = !sc || sc.status === 'loading';
+  const scFailMsg = sc && sc.status === 'error' ? sc.error : (sc && sc.status === 'ok' && sc.data && sc.data.affiliate && sc.data.affiliate.error ? sc.data.affiliate.error : null);
+  const adsCV = tt.ads_revenue || 0;
+  const affGmv = aff ? aff.gmv : null;
+  const organicGmv = aff ? gmv - (affGmv + adsCV) : null;
+  const adsShare = gmv ? adsCV / gmv : 0;
+  const affShare = gmv && aff ? affGmv / gmv : 0;
+  const orgShare = gmv && aff ? organicGmv / gmv : 0;
+  const comboShare = gmv ? tt.affiliate_organic_revenue / gmv : 0;
   const ch = (key, hib) => { const c = ttChange(tt.yoy ? tt.yoy[key] : null, hib); return `<span class="kpi-yoy ${c.dir}">${c.str === null ? '—' : c.str}</span>`; };
   const chM = (key, hib) => { const c = ttChange(tt.mom ? tt.mom[key] : null, hib); return `<span class="kpi-yoy ${c.dir}">${c.str === null ? '—' : c.str}</span>`; };
-  const adsRoas = tt.ads_spend ? tt.ads_revenue / tt.ads_spend : null;
+  const adsRoas = tt.ads_spend ? adsCV / tt.ads_spend : null;
+  const pctW = v => Math.max(0, v * 100).toFixed(2);
+  const C1 = 'var(--series-1)', C2 = 'var(--series-2, #c97a3d)', C3 = 'var(--series-3, #5b9a6b)';
+  const shareBar = aff
+    ? `<div class="tt-share" role="img" aria-label="TikTok Shop Ads ${fmtVal(adsShare,'percent')}, affiliate ${fmtVal(affShare,'percent')}, organic ${fmtVal(orgShare,'percent')} of GMV">
+        <span style="width:${pctW(adsShare)}%;background:${C1}"></span><span style="width:${pctW(affShare)}%;background:${C2}"></span><span style="width:${pctW(orgShare)}%;background:${C3}"></span>
+      </div>
+      <div class="tt-legend"><span><i style="background:${C1}"></i>TTS Ads ${fmtVal(adsShare,'percent')}</span><span><i style="background:${C2}"></i>Affiliate ${fmtVal(affShare,'percent')}</span><span><i style="background:${C3}"></i>Organic ${fmtVal(orgShare,'percent')}</span></div>`
+    : `<div class="tt-share" role="img" aria-label="TikTok Shop Ads ${fmtVal(adsShare,'percent')} of GMV, affiliate and organic ${fmtVal(comboShare,'percent')}">
+        <span style="width:${pctW(adsShare)}%;background:${C1}"></span><span style="width:${pctW(comboShare)}%;background:${C2}"></span>
+      </div>
+      <div class="tt-legend"><span><i style="background:${C1}"></i>TTS Ads ${fmtVal(adsShare,'percent')}</span><span><i style="background:${C2}"></i>Affiliate + Organic ${fmtVal(comboShare,'percent')}</span></div>`;
+  const splitRows = aff
+    ? `<tr><td>Affiliate-driven GMV <span style="color:var(--text-muted)">(${fmtVal(aff.orders,'number')} orders)</span></td><td>${fmtVal(affGmv,'currency-full')}</td><td>${fmtVal(affShare,'percent')}</td><td>—</td><td>—</td></tr>
+        <tr><td>Organic GMV <span style="color:var(--text-muted)">(GMV − Affiliate − Ads CV)</span></td><td>${fmtVal(organicGmv,'currency-full')}</td><td>${fmtVal(orgShare,'percent')}</td><td>—</td><td>—</td></tr>`
+    : `<tr><td>Affiliate + Organic GMV <span style="color:var(--text-muted)">(combined)</span></td><td>${fmtVal(tt.affiliate_organic_revenue,'currency-full')}</td><td>${fmtVal(comboShare,'percent')}</td><td>${ch('affiliate_organic_revenue', true)}</td><td>${chM('affiliate_organic_revenue', true)}</td></tr>
+        <tr class="no-data-row"><td>&nbsp;&nbsp;↳ Affiliate / Organic split</td><td colspan="4">${scPending ? '<span class="tt-loading" aria-hidden="true"></span>Loading Affiliate-driven GMV from TikTok Shop…' : ('Affiliate-driven GMV unavailable' + (scFailMsg ? ': ' + String(scFailMsg).replace(/</g, '&lt;') : ''))}</td></tr>`;
   const revenueTable = `
-    <div class="tt-share" role="img" aria-label="TikTok Ads ${fmtVal(adsShare,'percent')} of GMV, affiliate and organic ${fmtVal(affShare,'percent')}">
-      <span style="width:${(adsShare*100).toFixed(2)}%;background:var(--series-1)"></span>
-      <span style="width:${(affShare*100).toFixed(2)}%;background:var(--series-2, #c97a3d)"></span>
-    </div>
-    <div class="tt-legend"><span><i style="background:var(--series-1)"></i>TikTok Ads ${fmtVal(adsShare,'percent')}</span><span><i style="background:var(--series-2, #c97a3d)"></i>Affiliate + Organic ${fmtVal(affShare,'percent')}</span></div>
+    ${shareBar}
     <table class="dtable" style="margin-top:10px">
       <thead><tr><th style="text-align:left">Revenue source</th><th>Revenue</th><th>% of GMV</th><th>YoY</th><th>${mLabel}</th></tr></thead>
       <tbody>
-        <tr><td>TikTok Ads revenue <span style="color:var(--text-muted)">(ROAS ${adsRoas !== null ? fmtVal(adsRoas,'ratio') : '—'})</span></td><td>${fmtVal(tt.ads_revenue,'currency-full')}</td><td>${fmtVal(adsShare,'percent')}</td><td>${ch('ads_revenue', true)}</td><td>${chM('ads_revenue', true)}</td></tr>
-        <tr><td>Affiliate + Organic revenue</td><td>${fmtVal(tt.affiliate_organic_revenue,'currency-full')}</td><td>${fmtVal(affShare,'percent')}</td><td>${ch('affiliate_organic_revenue', true)}</td><td>${chM('affiliate_organic_revenue', true)}</td></tr>
-        <tr class="no-data-row"><td>&nbsp;&nbsp;↳ Affiliate / Organic split</td><td colspan="4">Not available — TikTok's data connection doesn't include Affiliate Center analytics, so these stay combined</td></tr>
-        <tr class="total-row"><td>TikTok Shop GMV</td><td>${fmtVal(gmv,'currency-full')}</td><td>100%</td><td>${ch('gross_sales', true)}</td><td>${chM('gross_sales', true)}</td></tr>
+        <tr><td>Conversion Value for TTS Ads <span style="color:var(--text-muted)">(ROAS ${adsRoas !== null ? fmtVal(adsRoas,'ratio') : '—'})</span></td><td>${fmtVal(adsCV,'currency-full')}</td><td>${fmtVal(adsShare,'percent')}</td><td>${ch('ads_revenue', true)}</td><td>${chM('ads_revenue', true)}</td></tr>
+        ${splitRows}
+        <tr class="total-row"><td>Gross Sales TikTok (GMV)</td><td>${fmtVal(gmv,'currency-full')}</td><td>100%</td><td>${ch('gross_sales', true)}</td><td>${chM('gross_sales', true)}</td></tr>
       </tbody>
-    </table>`;
+    </table>
+    ${aff ? `<div class="tt-note">Affiliate-driven GMV = gross sales (before discounts) of TikTok Shop orders placed in this period that carried an affiliate commission, from TikTok's settled + unsettled order transactions (${fmtVal(aff.orders_seen,'number')} orders found${aff.affiliate_ads_only_gmv ? '; ' + fmtVal(aff.affiliate_ads_only_gmv,'currency-full') + ' from orders whose only creator charge was an affiliate ads commission is left in TTS Ads, not double-counted' : ''}). Organic GMV = Gross Sales TikTok − (Affiliate-driven GMV + Conversion Value for TTS Ads).</div>` : ''}`;
 
   // Costs
+  const sampleShip = smp ? smp.cost : null;
   const costRows = [
     ['TikTok Ads spend', tt.ads_spend, 'Triple Whale (TikTok Ads)'],
     ['Affiliate commission', commission, 'P&L sheet — Commission row'],
     ['Samples (TikTok Gifting)', samples, 'P&L sheet — TikTok Gifting row'],
+    ['Sample shipping cost', sampleShip, smp ? `${fmtVal(smp.creators,'number')} creators with ≥1 sample shipped × $${smp.per_creator}` : ''],
   ];
   const known = costRows.filter(r => r[1] !== null && r[1] !== undefined);
   const totalCost = known.reduce((a, r) => a + r[1], 0);
+  const missingRow = (r) => r[0] === 'Sample shipping cost' && scPending
+    ? `<tr class="no-data-row"><td>${r[0]}</td><td colspan="3"><span class="tt-loading" aria-hidden="true"></span>Loading sample data from TikTok Shop…</td></tr>`
+    : `<tr class="no-data-row"><td>${r[0]}</td><td colspan="3">No data for this period</td></tr>`;
   const costTable = `
     <table class="dtable">
       <thead><tr><th style="text-align:left">Cost</th><th>Amount</th><th>% of GMV</th><th>Source</th></tr></thead>
       <tbody>
         ${costRows.map(r => r[1] === null || r[1] === undefined
-          ? `<tr class="no-data-row"><td>${r[0]}</td><td colspan="3">No data for this period</td></tr>`
+          ? missingRow(r)
           : `<tr><td>${r[0]}</td><td>${fmtVal(r[1],'currency-full')}</td><td>${gmv ? fmtVal(r[1]/gmv,'percent') : '—'}</td><td style="color:var(--text-muted)">${r[2]}</td></tr>`).join('')}
         <tr class="total-row"><td>Total TikTok costs</td><td>${fmtVal(totalCost,'currency-full')}</td><td>${gmv ? fmtVal(totalCost/gmv,'percent') : '—'}</td><td></td></tr>
       </tbody>
     </table>
-    <div class="tt-note">Return on TikTok costs: ${totalCost ? fmtVal(gmv / totalCost, 'ratio') : '—'} GMV per $1 of ads + commission + samples. Product cost (COGS ${fmtVal(tt.cogs,'currency-full')}) and platform fees aren't included.</div>`;
+    <div class="tt-note">Return on TikTok costs: ${totalCost ? fmtVal(gmv / totalCost, 'ratio') : '—'} GMV per $1 of ads + commission + samples + sample shipping. Product cost (COGS ${fmtVal(tt.cogs,'currency-full')}) and platform fees aren't included. Sample shipping = creators who had at least one sample shipped in this period (TikTok sample orders placed in the period) × $11.</div>`;
 
   // Top products
   const prods = (tt.top_products || []);
@@ -2194,7 +2226,7 @@ function renderTikTokShop(monthData) {
     ${prodTable}
     <div class="tt-subhead">Seller Center Shop Analytics</div>
     <div id="tt-seller-center"></div>
-    <div class="tt-note">Source: Triple Whale's TikTok Shop integration (TikTok's own order records; refunds by refund date; TikTok Ads revenue = TikTok's own Shop conversion value for its ads). Affiliate + Organic = GMV − TikTok Ads revenue, the same definition as the P&amp;L sheet's "TikTok Organic + Affiliates" row. TikTok Shop orders also sync into Shopify, so they're already included in ND.COM's Gross Sales in Section 1 — this section is a breakdown and isn't added to any total.${partial}</div>`;
+    <div class="tt-note">Source: Triple Whale's TikTok Shop integration (TikTok's own order records; refunds by refund date; Conversion Value for TTS Ads = TikTok's own Shop conversion value for its ads). Gross Sales TikTok − Conversion Value for TTS Ads equals the P&amp;L sheet's "TikTok Organic + Affiliates" row; Affiliate-driven GMV and Organic GMV split it. TikTok Shop orders also sync into Shopify, so they're already included in ND.COM's Gross Sales in Section 1 — this section is a breakdown and isn't added to any total.${partial}</div>`;
   if (typeof applyMobileTableLabels === 'function') applyMobileTableLabels(el);
   renderSellerCenter();
 }
@@ -2205,6 +2237,10 @@ function renderTikTokShop(monthData) {
 // Sync — a Windsor pull takes 1–3 minutes the first time; after that the
 // backend serves it from its cache. Keyed by the period's date range.
 const sellerCenterCache = {};
+function ttSellerCenterEntry() {
+  const r = ttPeriodRange();
+  return r ? sellerCenterCache[r.start + '|' + r.end] : undefined;
+}
 function ttPeriodRange() {
   const months = periodMonths(state.month);
   if (!months.length) return null;
@@ -2213,7 +2249,7 @@ function ttPeriodRange() {
 }
 async function fetchSellerCenter(start, end, attempt = 0) {
   const controller = new AbortController();
-  const timer = setTimeout(() => controller.abort(), 240000);
+  const timer = setTimeout(() => controller.abort(), 300000);
   try {
     const res = await fetch(`${BACKEND_URL}/api/tiktok-shop/seller-center?start=${start}&end=${end}`, { signal: controller.signal });
     const text = await res.text();
@@ -2241,12 +2277,14 @@ function renderSellerCenter() {
       .catch(err => { sellerCenterCache[key] = { status: 'error', error: err.message }; })
       .finally(() => {
         const now = ttPeriodRange();
-        if (state.site === 'com' && now && now.start + '|' + now.end === key) renderSellerCenter();
+        // Re-render the whole TikTok section: Affiliate-driven GMV and sample
+        // shipping feed the Revenue-by-source and Costs tables too.
+        if (state.site === 'com' && now && now.start + '|' + now.end === key) renderTikTokShop(getMonthData());
       });
     return renderSellerCenter();
   }
   if (entry.status === 'loading') {
-    el.innerHTML = `<div class="tt-pending"><span class="tt-loading" aria-hidden="true"></span>Loading Seller Center data from TikTok Shop (via Windsor.ai)… the first load of a period can take 1–3 minutes; after that it's instant.</div>`;
+    el.innerHTML = `<div class="tt-pending"><span class="tt-loading" aria-hidden="true"></span>Loading Seller Center data from TikTok Shop (via Windsor.ai)… the first load of a period can take a few minutes; after that it's instant.</div>`;
     return;
   }
   if (entry.status === 'error') {
@@ -2258,6 +2296,13 @@ function renderSellerCenter() {
   el.innerHTML = sellerCenterHtml(entry.data);
   if (typeof applyMobileTableLabels === 'function') applyMobileTableLabels(el);
 }
+// Trimmed 2026-10-07 per Tomer: removed the impressions / page views / avg
+// daily visitors / buyers tiles, the "GMV & traffic by content type" table,
+// and the referral / smart promotion / refund administration / other fee
+// rows. Only the affiliate fee lines remain (TT_SC_FEE_KEYS), and the
+// total is the sum of those lines. The backend still returns everything,
+// so any of it can be brought back without a new data pull.
+const TT_SC_FEE_KEYS = ['affiliate_commission', 'affiliate_ads_commission', 'affiliate_partner_commission', 'external_affiliate_marketing_fee'];
 function sellerCenterHtml(d) {
   if (!d || !d.days_with_data) {
     return `<div class="tt-pending">No Seller Center data for this period.</div>`;
@@ -2268,40 +2313,23 @@ function sellerCenterHtml(d) {
   const stat = (l, v, sub) => `<div class="tt-sc-stat"><div class="l">${l}</div><div class="v">${v}</div>${sub ? `<div class="s">${sub}</div>` : ''}</div>`;
   const stats = [
     stat('Seller Center GMV', cur(d.gmv), n(d.orders) + ' orders · ' + n(d.units) + ' units'),
-    stat('Product impressions', n(d.impressions), ''),
-    stat('Product page views', n(d.page_views), pct(d.page_views, d.impressions) + ' of impressions'),
-    stat('Avg daily visitors', n(d.avg_daily_visitors), 'unique product-page visitors per day'),
-    stat('Buyers', n(d.buyers), pct(d.orders, d.page_views) + ' orders per page view'),
     stat('Refunds (Seller Center)', cur(d.refunds), pct(d.refunds, d.gmv) + ' of GMV'),
   ].join('');
-  const types = [['LIVE', 'live'], ['Video', 'video'], ['Product card', 'product_card']];
-  const g = d.gmv_by_type || {}, im = d.impressions_by_type || {}, pv = d.page_views_by_type || {}, bu = d.buyers_by_type || {};
-  const typeRows = types.map(([label, k]) => `<tr><td>${label}</td><td>${cur(g[k])}</td><td>${pct(g[k], d.gmv)}</td><td>${n(im[k])}</td><td>${n(pv[k])}</td><td>${n(bu[k])}</td><td>${pct(bu[k], pv[k])}</td></tr>`).join('');
-  const typeTable = `
-    <table class="dtable">
-      <thead><tr><th style="text-align:left">Content type</th><th>GMV</th><th>% of GMV</th><th>Impressions</th><th>Page views</th><th>Buyers</th><th>Buyers / views</th></tr></thead>
-      <tbody>${typeRows}
-        <tr class="total-row"><td>Total</td><td>${cur(d.gmv)}</td><td>100%</td><td>${n(d.impressions)}</td><td>${n(d.page_views)}</td><td>${n(d.buyers)}</td><td>${pct(d.buyers, d.page_views)}</td></tr>
-      </tbody>
-    </table>`;
   const f = d.fees || { lines: [] };
-  const feeRows = (f.lines || []).slice().sort((a, b) => b.amount - a.amount).map(l => `<tr><td>${l.label}</td><td>${cur(l.amount)}</td><td>${pct(l.amount, f.statement_revenue)}</td></tr>`).join('')
-    + (f.other > 0.5 ? `<tr><td>Other TikTok fees</td><td>${cur(f.other)}</td><td>${pct(f.other, f.statement_revenue)}</td></tr>` : '');
+  const lines = (f.lines || []).filter(l => TT_SC_FEE_KEYS.includes(l.key)).sort((a, b) => b.amount - a.amount);
+  const total = lines.reduce((a, l) => a + l.amount, 0);
+  const feeRows = lines.map(l => `<tr><td>${l.label}</td><td>${cur(l.amount)}</td><td>${pct(l.amount, f.statement_revenue)}</td></tr>`).join('');
   const feeTable = `
     <table class="dtable">
       <thead><tr><th style="text-align:left">TikTok fee (settled)</th><th>Amount</th><th>% of settled revenue</th></tr></thead>
-      <tbody>${feeRows || '<tr class="no-data-row"><td colspan="3">No fees settled in this period</td></tr>'}
-        <tr class="total-row"><td>Total TikTok fees</td><td>${cur(f.total)}</td><td>${pct(f.total, f.statement_revenue)}</td></tr>
-        <tr><td style="color:var(--text-muted)">Settled revenue · payout</td><td>${cur(f.statement_revenue)}</td><td style="color:var(--text-muted)">payout ${cur(f.payout)}</td></tr>
+      <tbody>${feeRows || '<tr class="no-data-row"><td colspan="3">No affiliate fees settled in this period</td></tr>'}
+        <tr class="total-row"><td>Total affiliate fees</td><td>${cur(total)}</td><td>${pct(total, f.statement_revenue)}</td></tr>
       </tbody>
     </table>`;
   const when = d.fetched_at ? new Date(d.fetched_at).toLocaleString('en-US', { month: 'short', day: 'numeric', hour: 'numeric', minute: '2-digit' }) : '';
   return `
-    <div class="tt-sc-stats">${stats}</div>
-    <div class="tt-grid">
-      <div><div class="tt-subhead" style="margin-top:4px">GMV &amp; traffic by content type</div>${typeTable}</div>
-      <div><div class="tt-subhead" style="margin-top:4px">TikTok fees</div>${feeTable}</div>
-    </div>
+    <div class="tt-sc-stats" style="grid-template-columns: repeat(auto-fit, minmax(200px, 1fr)); max-width: 560px">${stats}</div>
+    <div class="tt-subhead" style="margin-top:4px">TikTok fees</div>${feeTable}
     <div class="tt-note">Source: TikTok Shop Seller Center via Windsor.ai${when ? ' (pulled ' + when + ')' : ''}. Seller Center GMV is TikTok's own GMV figure, so it differs from the Triple Whale GMV above (gross product sales before discounts). Fees come from TikTok's payout statements and are counted by statement date, so they cover orders settled in this period, not necessarily orders placed in it. Affiliate commission here is what TikTok actually deducted; the Affiliate commission row in TikTok costs above is the P&amp;L sheet's estimate.</div>`;
 }
 
