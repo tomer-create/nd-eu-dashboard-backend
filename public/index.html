@@ -2151,28 +2151,45 @@ function renderTikTokShop(monthData) {
   const scFailMsg = sc && sc.status === 'error' ? sc.error : (sc && sc.status === 'ok' && sc.data && sc.data.affiliate && sc.data.affiliate.error ? sc.data.affiliate.error : null);
   const adsCV = tt.ads_revenue || 0;
   const affGmv = aff ? aff.gmv : null;
-  const organicGmv = aff ? gmv - (affGmv + adsCV) : null;
-  const adsShare = gmv ? adsCV / gmv : 0;
+  // Overlap removal (2026-10-07, Tomer chose "Remove overlap"): TikTok's Ads
+  // conversion value also includes affiliate orders whose ads ran on the
+  // creator's content, so subtracting both double-counts them. Measured
+  // overlap = affiliate orders that also paid an affiliate ADS commission
+  // (from TikTok's order data). If Ads CV + Affiliate still exceed GMV, the
+  // overlap is raised just enough that Organic is $0 (shown as estimated).
+  // TTS Ads (net) + Affiliate + Organic = Gross Sales TikTok, always.
+  const overlapMeasured = aff ? Math.min(adsCV, aff.affiliate_with_ads_gmv || 0) : 0;
+  const overlapFloor = aff ? Math.max(0, adsCV + affGmv - gmv) : 0;
+  const overlap = aff ? Math.min(adsCV, Math.max(overlapMeasured, overlapFloor)) : 0;
+  const overlapEstimated = aff && overlapFloor > overlapMeasured + 0.5;
+  const adsNet = adsCV - overlap;
+  const organicGmv = aff ? Math.max(0, gmv - affGmv - adsNet) : null;
+  const adsShare = gmv ? (aff ? adsNet : adsCV) / gmv : 0;
   const affShare = gmv && aff ? affGmv / gmv : 0;
   const orgShare = gmv && aff ? organicGmv / gmv : 0;
   const comboShare = gmv ? tt.affiliate_organic_revenue / gmv : 0;
   const ch = (key, hib) => { const c = ttChange(tt.yoy ? tt.yoy[key] : null, hib); return `<span class="kpi-yoy ${c.dir}">${c.str === null ? '—' : c.str}</span>`; };
   const chM = (key, hib) => { const c = ttChange(tt.mom ? tt.mom[key] : null, hib); return `<span class="kpi-yoy ${c.dir}">${c.str === null ? '—' : c.str}</span>`; };
   const adsRoas = tt.ads_spend ? adsCV / tt.ads_spend : null;
+  const adsRow = aff
+    ? `<tr><td>Conversion Value for TTS Ads <span style="color:var(--text-muted)">(TikTok-reported ${fmtVal(adsCV,'currency-full')}, ROAS ${adsRoas !== null ? fmtVal(adsRoas,'ratio') : '—'})</span></td><td>${fmtVal(adsCV,'currency-full')}</td><td>${fmtVal(gmv ? adsCV / gmv : 0,'percent')}</td><td>${ch('ads_revenue', true)}</td><td>${chM('ads_revenue', true)}</td></tr>
+        <tr><td>&nbsp;&nbsp;↳ less overlap with affiliate orders${overlapEstimated ? ' <span style="color:var(--text-muted)">(estimated)</span>' : ''}</td><td>−${fmtVal(overlap,'currency-full')}</td><td>${fmtVal(gmv ? -overlap / gmv : 0,'percent')}</td><td>—</td><td>—</td></tr>
+        <tr><td><strong>TTS Ads GMV (net of overlap)</strong></td><td><strong>${fmtVal(adsNet,'currency-full')}</strong></td><td>${fmtVal(adsShare,'percent')}</td><td>—</td><td>—</td></tr>`
+    : `<tr><td>Conversion Value for TTS Ads <span style="color:var(--text-muted)">(ROAS ${adsRoas !== null ? fmtVal(adsRoas,'ratio') : '—'})</span></td><td>${fmtVal(adsCV,'currency-full')}</td><td>${fmtVal(adsShare,'percent')}</td><td>${ch('ads_revenue', true)}</td><td>${chM('ads_revenue', true)}</td></tr>`;
   const pctW = v => Math.max(0, v * 100).toFixed(2);
   const C1 = 'var(--series-1)', C2 = 'var(--series-2, #c97a3d)', C3 = 'var(--series-3, #5b9a6b)';
   const shareBar = aff
     ? `<div class="tt-share" role="img" aria-label="TikTok Shop Ads ${fmtVal(adsShare,'percent')}, affiliate ${fmtVal(affShare,'percent')}, organic ${fmtVal(orgShare,'percent')} of GMV">
         <span style="width:${pctW(adsShare)}%;background:${C1}"></span><span style="width:${pctW(affShare)}%;background:${C2}"></span><span style="width:${pctW(orgShare)}%;background:${C3}"></span>
       </div>
-      <div class="tt-legend"><span><i style="background:${C1}"></i>TTS Ads ${fmtVal(adsShare,'percent')}</span><span><i style="background:${C2}"></i>Affiliate ${fmtVal(affShare,'percent')}</span><span><i style="background:${C3}"></i>Organic ${fmtVal(orgShare,'percent')}</span></div>`
+      <div class="tt-legend"><span><i style="background:${C1}"></i>TTS Ads (net) ${fmtVal(adsShare,'percent')}</span><span><i style="background:${C2}"></i>Affiliate ${fmtVal(affShare,'percent')}</span><span><i style="background:${C3}"></i>Organic ${fmtVal(orgShare,'percent')}</span></div>`
     : `<div class="tt-share" role="img" aria-label="TikTok Shop Ads ${fmtVal(adsShare,'percent')} of GMV, affiliate and organic ${fmtVal(comboShare,'percent')}">
         <span style="width:${pctW(adsShare)}%;background:${C1}"></span><span style="width:${pctW(comboShare)}%;background:${C2}"></span>
       </div>
       <div class="tt-legend"><span><i style="background:${C1}"></i>TTS Ads ${fmtVal(adsShare,'percent')}</span><span><i style="background:${C2}"></i>Affiliate + Organic ${fmtVal(comboShare,'percent')}</span></div>`;
   const splitRows = aff
     ? `<tr><td>Affiliate-driven GMV <span style="color:var(--text-muted)">(${fmtVal(aff.orders,'number')} orders)</span></td><td>${fmtVal(affGmv,'currency-full')}</td><td>${fmtVal(affShare,'percent')}</td><td>—</td><td>—</td></tr>
-        <tr><td>Organic GMV <span style="color:var(--text-muted)">(GMV − Affiliate − Ads CV)</span>${organicGmv < 0 ? ' <span class="kpi-yoy down" title="Affiliate-driven GMV + Ads conversion value exceed GMV">⚠ overlap</span>' : ''}</td><td>${fmtVal(organicGmv,'currency-full')}</td><td>${fmtVal(orgShare,'percent')}</td><td>—</td><td>—</td></tr>`
+        <tr><td>Organic GMV <span style="color:var(--text-muted)">(GMV − Affiliate − TTS Ads net)</span></td><td>${fmtVal(organicGmv,'currency-full')}</td><td>${fmtVal(orgShare,'percent')}</td><td>—</td><td>—</td></tr>`
     : `<tr><td>Affiliate + Organic GMV <span style="color:var(--text-muted)">(combined)</span></td><td>${fmtVal(tt.affiliate_organic_revenue,'currency-full')}</td><td>${fmtVal(comboShare,'percent')}</td><td>${ch('affiliate_organic_revenue', true)}</td><td>${chM('affiliate_organic_revenue', true)}</td></tr>
         <tr class="no-data-row"><td>&nbsp;&nbsp;↳ Affiliate / Organic split</td><td colspan="4">${scPending ? '<span class="tt-loading" aria-hidden="true"></span>Loading Affiliate-driven GMV from TikTok Shop…' : (lowCoverageMsg || ('Affiliate-driven GMV unavailable' + (scFailMsg ? ': ' + String(scFailMsg).replace(/</g, '&lt;') : '')))}</td></tr>`;
   const revenueTable = `
@@ -2180,12 +2197,12 @@ function renderTikTokShop(monthData) {
     <table class="dtable" style="margin-top:10px">
       <thead><tr><th style="text-align:left">Revenue source</th><th>Revenue</th><th>% of GMV</th><th>YoY</th><th>${mLabel}</th></tr></thead>
       <tbody>
-        <tr><td>Conversion Value for TTS Ads <span style="color:var(--text-muted)">(ROAS ${adsRoas !== null ? fmtVal(adsRoas,'ratio') : '—'})</span></td><td>${fmtVal(adsCV,'currency-full')}</td><td>${fmtVal(adsShare,'percent')}</td><td>${ch('ads_revenue', true)}</td><td>${chM('ads_revenue', true)}</td></tr>
+        ${adsRow}
         ${splitRows}
         <tr class="total-row"><td>Gross Sales TikTok (GMV)</td><td>${fmtVal(gmv,'currency-full')}</td><td>100%</td><td>${ch('gross_sales', true)}</td><td>${chM('gross_sales', true)}</td></tr>
       </tbody>
     </table>
-    ${aff ? `<div class="tt-note">Affiliate-driven GMV = gross sales (before discounts) of TikTok Shop orders placed in this period that carried an affiliate commission, from TikTok's settled + unsettled order transactions (${fmtVal(aff.orders_seen,'number')} orders found${aff.affiliate_ads_only_gmv ? '; ' + fmtVal(aff.affiliate_ads_only_gmv,'currency-full') + ' from orders whose only creator charge was an affiliate ads commission is left in TTS Ads, not double-counted' : ''}). Organic GMV = Gross Sales TikTok − (Affiliate-driven GMV + Conversion Value for TTS Ads).${organicGmv < 0 ? ' <strong>Organic is negative here:</strong> some orders are counted in both the TikTok Ads conversion value and Affiliate-driven GMV (e.g. ads run on a creator\'s video that also earns that creator a commission), and in this period that overlap is larger than the true organic sales.' : ''}</div>` : ''}`;
+    ${aff ? `<div class="tt-note">Affiliate-driven GMV = gross sales (before discounts) of TikTok Shop orders placed in this period that carried an affiliate commission, from TikTok's settled + unsettled order transactions (${fmtVal(aff.orders_seen,'number')} orders found${aff.affiliate_ads_only_gmv ? '; ' + fmtVal(aff.affiliate_ads_only_gmv,'currency-full') + ' from orders whose only creator charge was an affiliate ads commission is left in TTS Ads, not double-counted' : ''}). Overlap: TikTok's Ads conversion value also counts affiliate orders whose ads ran on the creator's content; those are taken out of TTS Ads so they aren't counted twice — measured from orders that paid both a creator commission and an affiliate-ads commission (${fmtVal(aff.affiliate_with_ads_gmv || 0,'currency-full')})${overlapEstimated ? `, raised to ${fmtVal(overlap,'currency-full')} (estimated) because TikTok's reported Ads conversion value + Affiliate GMV exceed this period's GMV` : ''}. Organic GMV = Gross Sales TikTok − (Affiliate-driven GMV + TTS Ads net). TTS Ads (net) + Affiliate + Organic = Gross Sales TikTok.</div>` : ''}`;
 
   // Costs
   const sampleShip = smp ? smp.cost : null;
