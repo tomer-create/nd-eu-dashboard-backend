@@ -480,7 +480,13 @@ function combinePayloads(start, end, parts) {
   const affErr = parts.find((p) => !p.affiliate || p.affiliate.error);
   out.affiliate = affErr
     ? { error: (affErr.affiliate && affErr.affiliate.error) || 'Affiliate data missing for part of this period' }
-    : sumKeys(parts.map((p) => p.affiliate), ['gmv', 'orders', 'affiliate_ads_only_gmv', 'affiliate_ads_only_orders', 'affiliate_with_ads_gmv', 'affiliate_with_ads_orders', 'orders_seen', 'orders_settled', 'gross_seen']);
+    : {
+      ...sumKeys(parts.map((p) => p.affiliate), ['gmv', 'orders', 'affiliate_ads_only_gmv', 'affiliate_ads_only_orders', 'affiliate_with_ads_gmv', 'affiliate_with_ads_orders', 'orders_seen', 'orders_settled', 'gross_seen']),
+      // Per-month figures so the dashboard can work out the Ads/Affiliate
+      // overlap month by month — a quarter's Organic GMV then equals the sum
+      // of its months' Organic GMV (audit 2026-10-07).
+      by_month: parts.map((p) => ({ start: p.start, gmv: num(p.affiliate.gmv), with_ads: num(p.affiliate.affiliate_with_ads_gmv) })),
+    };
   // A month with no TikTok sample history ("No TikTok sample data…") counts as 0;
   // any other sample error makes the period's total unavailable.
   const smpErr = parts.find((p) => !p.samples || (p.samples.error && !/^No TikTok sample data/.test(p.samples.error)));
