@@ -42,9 +42,12 @@ const { getPool } = require('./yotpo');
 
 const WINDSOR_URL = 'https://connectors.windsor.ai/tiktok_shop';
 const WINDSOR_ACCOUNT = 'USLCMMEW2K';
-const REQUEST_TIMEOUT_MS = 170000;
+const REQUEST_TIMEOUT_MS = 240000;
 const STALE_AFTER_HOURS = 3;
 const STABLE_AFTER_DAYS = 45;
+// Bump when the payload shape changes, so older cached copies are re-pulled.
+// v2 (2026-10-07): added affiliate (Affiliate-driven GMV) and samples.
+const PAYLOAD_VERSION = 2;
 
 const PERF_FIELDS = [
   'date',
@@ -106,7 +109,7 @@ function addDays(iso, n) {
 }
 function todayISO() { return new Date().toISOString().slice(0, 10); }
 
-async function windsorQuery(fields, dateFrom, dateTo) {
+async function windsorQuery(fields, dateFrom, dateTo, filter) {
   const key = process.env.WINDSOR_API_KEY;
   const qs = new URLSearchParams({
     api_key: key,
@@ -116,6 +119,7 @@ async function windsorQuery(fields, dateFrom, dateTo) {
     select_accounts: WINDSOR_ACCOUNT,
     _renderer: 'json',
   });
+  if (filter) qs.set('filter', JSON.stringify(filter));
   const controller = new AbortController();
   const timer = setTimeout(() => controller.abort(), REQUEST_TIMEOUT_MS);
   try {
@@ -133,15 +137,132 @@ async function windsorQuery(fields, dateFrom, dateTo) {
   }
 }
 
+// ---- Affiliate-driven GMV + sample shipping (added 2026-10-07 per Tomer) ----
+// Affiliate-driven GMV: TikTok doesn't expose Affiliate Center analytics, but
+// every order a creator drove carries an affiliate commission in TikTok's
+// finance data. So: take every TikTok Shop order placed in the period, from
+// the settled statement transactions (order already paid out) plus the
+// unsettled transactions (not paid out yet), and sum the gross product
+// sales (subtotal before discounts — same basis as Triple Whale's "Gross
+// Sales TikTok") of the orders with a non-zero affiliate or affiliate-
+// partner commission. Orders whose only affiliate charge is an affiliate ADS
+// commission are reported separately (affiliate_ads_only_gmv) — those are
+// creator-content ads, so they're already inside the TikTok Ads conversion
+// value and would otherwise be counted twice in the Organic formula.
+// Order dates are taken in America/New_York, Triple Whale's shop timezone for
+// ND.COM, so periods line up with the Triple Whale GMV they're subtracted from.
+// Validated 2026-10-07, Sep 2026 settled orders: 3,848 orders, $254,582 gross;
+// $143,307 of it affiliate (2,139 orders).
+//
+// Sample shipping cost, per Tomer's method (Affiliate Center → Analytics →
+// Samples): count the creators with at least one sample shipped in the
+// period, × $11. Taken from sample orders (order_is_sample_order) placed in
+// the period whose status shows they shipped; the creator is the sample
+// order's buyer (order_user_id). Validated Sep 2026: 249 sample orders, all
+// shipped, to 205 creators → 205 × $11 = $2,255.
+const SAMPLE_SHIPPING_PER_CREATOR = 11;
+const ORDER_TZ = 'America/New_York';
+const SHIPPED_STATUSES = new Set(['AWAITING_COLLECTION', 'IN_TRANSIT', 'DELIVERED', 'COMPLETED']);
+const SETTLED_FIELDS = [
+  'statement_transaction_order_id',
+  'statement_transaction_order_create_datetime',
+  'statement_transaction_type',
+  'statement_transaction_revenue_subtotal_before_discount_amount',
+  'statement_transaction_fee_affiliate_commission_amount',
+  'statement_transaction_fee_affiliate_partner_commission_amount',
+  'statement_transaction_fee_affiliate_ads_commission_amount',
+];
+const UNSETTLED_FIELDS = [
+  'unsettled_transaction_order_id',
+  'unsettled_transaction_order_create_datetime',
+  'unsettled_transaction_type',
+  'unsettled_transaction_revenue_subtotal_before_discount_amount',
+  'unsettled_transaction_fee_affiliate_commission_amount',
+  'unsettled_transaction_fee_affiliate_partner_commission_amount',
+  'unsettled_transaction_fee_affiliate_ads_commission_amount',
+];
+const SAMPLE_FIELDS = ['order_id', 'order_create_datetime', 'order_is_sample_order', 'order_user_id', 'order_status', 'order_rts_datetime'];
+
+const tzDay = new Intl.DateTimeFormat('en-CA', { timeZone: ORDER_TZ, year: 'numeric', month: '2-digit', day: '2-digit' });
+function orderDay(dt) {
+  if (!dt) return null;
+  const d = new Date(dt);
+  return isNaN(d) ? null : tzDay.format(d); // YYYY-MM-DD
+}
+const truthy = (v) => v === true || v === 'True' || v === 'true' || v === 1 || v === '1';
+
+async function pullAffiliateGmv(start, end) {
+  const today = todayISO();
+  const [settled, unsettled] = await Promise.all([
+    windsorQuery(SETTLED_FIELDS, start, today),
+    windsorQuery(UNSETTLED_FIELDS, addDays(start, -7), today),
+  ]);
+  const orders = new Map(); // order id -> { gross, aff, affAds, settled }
+  const add = (prefix, rows, isSettled) => {
+    rows.forEach((r) => {
+      if (String(r[prefix + 'type'] || 'ORDER') !== 'ORDER') return;
+      const id = String(r[prefix + 'order_id'] || '');
+      const day = orderDay(r[prefix + 'order_create_datetime']);
+      if (!id || !day || day < start || day >= end) return;
+      if (!isSettled && orders.has(id) && orders.get(id).settled) return; // settled copy wins
+      const cur = (orders.get(id) && orders.get(id).settled === isSettled) ? orders.get(id) : { gross: 0, aff: 0, affAds: 0, settled: isSettled };
+      cur.gross += num(r[prefix + 'revenue_subtotal_before_discount_amount']);
+      cur.aff += Math.abs(num(r[prefix + 'fee_affiliate_commission_amount'])) + Math.abs(num(r[prefix + 'fee_affiliate_partner_commission_amount']));
+      cur.affAds += Math.abs(num(r[prefix + 'fee_affiliate_ads_commission_amount']));
+      orders.set(id, cur);
+    });
+  };
+  add('statement_transaction_', settled, true);
+  add('unsettled_transaction_', unsettled, false);
+  let gmv = 0, n = 0, adsOnly = 0, adsOnlyN = 0, total = 0, settledN = 0;
+  orders.forEach((o) => {
+    total += o.gross;
+    if (o.settled) settledN++;
+    if (o.aff > 0) { gmv += o.gross; n++; } else if (o.affAds > 0) { adsOnly += o.gross; adsOnlyN++; }
+  });
+  return {
+    gmv, orders: n,
+    affiliate_ads_only_gmv: adsOnly, affiliate_ads_only_orders: adsOnlyN,
+    orders_seen: orders.size, orders_settled: settledN, gross_seen: total,
+  };
+}
+
+async function pullSampleShipping(start, end) {
+  // date_to = end (one extra day): an order placed late in the evening New York
+  // time on the last day is already the next day in UTC. Filtered by the
+  // New York order date below.
+  const rows = await windsorQuery(SAMPLE_FIELDS, start, end, [['order_is_sample_order', 'eq', true]]);
+  const creators = new Map();
+  let shipped = 0;
+  rows.forEach((r) => {
+    if (!truthy(r.order_is_sample_order)) return;
+    const day = orderDay(r.order_create_datetime);
+    if (!day || day < start || day >= end) return;
+    const isShipped = SHIPPED_STATUSES.has(String(r.order_status || '').toUpperCase()) || (!!r.order_rts_datetime && String(r.order_status).toUpperCase() !== 'CANCELLED');
+    if (!isShipped || !r.order_user_id) return;
+    shipped++;
+    creators.set(r.order_user_id, (creators.get(r.order_user_id) || 0) + 1);
+  });
+  return {
+    creators: creators.size,
+    samples_shipped: shipped,
+    per_creator: SAMPLE_SHIPPING_PER_CREATOR,
+    cost: creators.size * SAMPLE_SHIPPING_PER_CREATOR,
+  };
+}
+
 function sumRows(rows, field) { return rows.reduce((a, r) => a + num(r[field]), 0); }
 
 // [start, end) — end exclusive like everywhere else in this app.
 async function pullSellerCenter(start, end) {
   const dateTo = addDays(end, -1);
-  const [perf, fees, statements] = await Promise.all([
+  const soft = (p, what) => p.catch((err) => { console.error(`windsor-tiktok: ${what} failed:`, err.message); return { error: err.message }; });
+  const [perf, fees, statements, affiliate, samples] = await Promise.all([
     windsorQuery(PERF_FIELDS, start, dateTo),
     windsorQuery(['date', ...Object.keys(FEE_FIELDS)], start, dateTo),
     windsorQuery(STATEMENT_FIELDS, start, dateTo),
+    soft(pullAffiliateGmv(start, end), 'affiliate GMV'),
+    soft(pullSampleShipping(start, end), 'sample shipping'),
   ]);
   const s = (f) => sumRows(perf, 'shop_performance_' + f);
   const days = perf.length;
@@ -158,6 +279,7 @@ async function pullSellerCenter(start, end) {
   const listed = feeLines.reduce((a, l) => a + l.amount, 0);
   return {
     source: 'windsor_tiktok_shop',
+    version: PAYLOAD_VERSION,
     start,
     end,
     days_with_data: days,
@@ -186,6 +308,8 @@ async function pullSellerCenter(start, end) {
       payout: sumRows(statements, 'statement_settlement_amount'),
       statements: statements.length,
     },
+    affiliate,
+    samples,
     fetched_at: new Date().toISOString(),
   };
 }
@@ -262,7 +386,7 @@ async function getSellerCenter(start, end, { refresh } = {}) {
   }
   if (!refresh) {
     const row = await readCache(start, end);
-    if (row) {
+    if (row && row.payload && row.payload.version === PAYLOAD_VERSION) {
       const ageHours = (Date.now() - new Date(row.fetched_at).getTime()) / 3600000;
       const stable = end <= todayISO() && (Date.now() - new Date(end + 'T00:00:00Z').getTime()) / 86400000 > STABLE_AFTER_DAYS;
       if (!stable && ageHours > STALE_AFTER_HOURS) {
