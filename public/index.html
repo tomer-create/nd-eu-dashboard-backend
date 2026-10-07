@@ -2191,10 +2191,10 @@ function renderTikTokShop(monthData) {
   const chM = (key, hib) => { const c = ttChange(tt.mom ? tt.mom[key] : null, hib); return `<span class="kpi-yoy ${c.dir}">${c.str === null ? '—' : c.str}</span>`; };
   const adsRoas = tt.ads_spend ? adsCV / tt.ads_spend : null;
   const adsRow = aff
-    ? `<tr><td>Conversion Value for TTS Ads <span style="color:var(--text-muted)">(TikTok-reported ${fmtVal(adsCV,'currency-full')}, ROAS ${adsRoas !== null ? fmtVal(adsRoas,'ratio') : '—'})</span></td><td>${fmtVal(adsCV,'currency-full')}</td><td>${fmtVal(gmv ? adsCV / gmv : 0,'percent')}</td><td>${ch('ads_revenue', true)}</td><td>${chM('ads_revenue', true)}</td></tr>
+    ? `<tr><td>TikTok Ads <span style="color:var(--text-muted)">(TikTok-reported ${fmtVal(adsCV,'currency-full')}, ROAS ${adsRoas !== null ? fmtVal(adsRoas,'ratio') : '—'})</span></td><td>${fmtVal(adsCV,'currency-full')}</td><td>${fmtVal(gmv ? adsCV / gmv : 0,'percent')}</td><td>${ch('ads_revenue', true)}</td><td>${chM('ads_revenue', true)}</td></tr>
         <tr><td>&nbsp;&nbsp;↳ less overlap with affiliate orders${overlapEstimated ? ' <span style="color:var(--text-muted)">(estimated)</span>' : ''}</td><td>−${fmtVal(overlap,'currency-full')}</td><td>${fmtVal(gmv ? -overlap / gmv : 0,'percent')}</td><td>—</td><td>—</td></tr>
         <tr><td><strong>TTS Ads GMV (net of overlap)</strong></td><td><strong>${fmtVal(adsNet,'currency-full')}</strong></td><td>${fmtVal(adsShare,'percent')}</td><td>—</td><td>—</td></tr>`
-    : `<tr><td>Conversion Value for TTS Ads <span style="color:var(--text-muted)">(ROAS ${adsRoas !== null ? fmtVal(adsRoas,'ratio') : '—'})</span></td><td>${fmtVal(adsCV,'currency-full')}</td><td>${fmtVal(adsShare,'percent')}</td><td>${ch('ads_revenue', true)}</td><td>${chM('ads_revenue', true)}</td></tr>`;
+    : `<tr><td>TikTok Ads <span style="color:var(--text-muted)">(ROAS ${adsRoas !== null ? fmtVal(adsRoas,'ratio') : '—'})</span></td><td>${fmtVal(adsCV,'currency-full')}</td><td>${fmtVal(adsShare,'percent')}</td><td>${ch('ads_revenue', true)}</td><td>${chM('ads_revenue', true)}</td></tr>`;
   const pctW = v => Math.max(0, v * 100).toFixed(2);
   const C1 = 'var(--series-1)', C2 = 'var(--series-2, #c97a3d)', C3 = 'var(--series-3, #5b9a6b)';
   const shareBar = aff
@@ -2271,7 +2271,7 @@ function renderTikTokShop(monthData) {
     ${prodTable}
     <div class="tt-subhead">Seller Center Shop Analytics</div>
     <div id="tt-seller-center"></div>
-    <div class="tt-note">Source: Triple Whale's TikTok Shop integration (TikTok's own order records; refunds by refund date; Conversion Value for TTS Ads = TikTok's own Shop conversion value for its ads). Gross Sales TikTok − Conversion Value for TTS Ads equals the P&amp;L sheet's "TikTok Organic + Affiliates" row; Affiliate-driven GMV and Organic GMV split it. TikTok Shop orders also sync into Shopify, so they're already included in ND.COM's Gross Sales in Section 1 — this section is a breakdown and isn't added to any total.${partial}</div>`;
+    <div class="tt-note">Source: Triple Whale's TikTok Shop integration (TikTok's own order records; refunds by refund date; TikTok Ads = TikTok's own Shop conversion value for its ads). Gross Sales TikTok − TikTok Ads equals the P&amp;L sheet's "TikTok Organic + Affiliates" row; Affiliate-driven GMV and Organic GMV split it. TikTok Shop orders also sync into Shopify, so they're already included in ND.COM's Gross Sales in Section 1 — this section is a breakdown and isn't added to any total.${partial}</div>`;
   if (typeof applyMobileTableLabels === 'function') applyMobileTableLabels(el);
   renderSellerCenter();
 }
