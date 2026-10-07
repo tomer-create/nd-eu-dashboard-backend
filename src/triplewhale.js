@@ -231,6 +231,13 @@ async function fetchChannelPerformance(site, start, end) {
   // dated 2026-09-03 for the full before/after numbers. Do not reintroduce
   // TVF arguments here without re-validating against the MCP connector's
   // pixel-attribution tool for a known date range first.
+  // Fixed 2026-10-07: `end` is EXCLUSIVE everywhere in this app (the
+  // dashboard sends e.g. start=2026-09-01&end=2026-10-01 for September), but
+  // this used `event_date <= end`, so every Section 4 Triple Whale figure
+  // silently included the first day of the NEXT month. Found while building
+  // the TikTok Shop section: ND.COM's September TikTok Ads spend came back
+  // $40,293.92 instead of $38,380.66 (Oct 1 added $1,913.26) and revenue
+  // $78,259.68 instead of $73,815.93. Now `event_date < end`.
   const query = `
     SELECT
       channel,
@@ -238,7 +245,7 @@ async function fetchChannelPerformance(site, start, end) {
       SUM(channel_reported_conversion_value) AS channel_cv,
       SUM(order_revenue) AS pixel_cv
     FROM pixel_joined_tvf()
-    WHERE event_date >= '${start}' AND event_date <= '${end}'
+    WHERE event_date >= '${start}' AND event_date < '${end}'
       AND model = 'Last Click'
       AND channel IN (${ALL_CHANNEL_IDS.map((id) => `'${id}'`).join(',')})
     GROUP BY channel
