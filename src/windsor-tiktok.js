@@ -50,7 +50,8 @@ const STABLE_AFTER_DAYS = 45;
 // v3 (2026-10-07 audit): perf_from / perf_error, per-month sample creators,
 // bounded statement window.
 // v4 (2026-10-07): statement window end+90 days; multi-month periods built from months.
-const PAYLOAD_VERSION = 4;
+// v5 (2026-10-07): affiliate_with_ads_gmv (measured Ads/Affiliate overlap).
+const PAYLOAD_VERSION = 5;
 
 const PERF_FIELDS = [
   'date',
@@ -221,15 +222,21 @@ async function pullAffiliateGmv(start, end) {
   };
   add('statement_transaction_', settled, true);
   add('unsettled_transaction_', unsettled, false);
-  let gmv = 0, n = 0, adsOnly = 0, adsOnlyN = 0, total = 0, settledN = 0;
+  // affiliate_with_ads_gmv (added 2026-10-07, per Tomer's choice "Remove
+  // overlap"): affiliate orders that ALSO paid an affiliate ADS commission —
+  // i.e. ads run on the creator's content. TikTok counts these in its Ads
+  // conversion value too, so the dashboard takes them out of TTS Ads to stop
+  // them being subtracted twice in Organic GMV.
+  let gmv = 0, n = 0, adsOnly = 0, adsOnlyN = 0, total = 0, settledN = 0, both = 0, bothN = 0;
   orders.forEach((o) => {
     total += o.gross;
     if (o.settled) settledN++;
-    if (o.aff > 0) { gmv += o.gross; n++; } else if (o.affAds > 0) { adsOnly += o.gross; adsOnlyN++; }
+    if (o.aff > 0) { gmv += o.gross; n++; if (o.affAds > 0) { both += o.gross; bothN++; } } else if (o.affAds > 0) { adsOnly += o.gross; adsOnlyN++; }
   });
   return {
     gmv, orders: n,
     affiliate_ads_only_gmv: adsOnly, affiliate_ads_only_orders: adsOnlyN,
+    affiliate_with_ads_gmv: both, affiliate_with_ads_orders: bothN,
     orders_seen: orders.size, orders_settled: settledN, gross_seen: total,
   };
 }
@@ -473,7 +480,7 @@ function combinePayloads(start, end, parts) {
   const affErr = parts.find((p) => !p.affiliate || p.affiliate.error);
   out.affiliate = affErr
     ? { error: (affErr.affiliate && affErr.affiliate.error) || 'Affiliate data missing for part of this period' }
-    : sumKeys(parts.map((p) => p.affiliate), ['gmv', 'orders', 'affiliate_ads_only_gmv', 'affiliate_ads_only_orders', 'orders_seen', 'orders_settled', 'gross_seen']);
+    : sumKeys(parts.map((p) => p.affiliate), ['gmv', 'orders', 'affiliate_ads_only_gmv', 'affiliate_ads_only_orders', 'affiliate_with_ads_gmv', 'affiliate_with_ads_orders', 'orders_seen', 'orders_settled', 'gross_seen']);
   // A month with no TikTok sample history ("No TikTok sample data…") counts as 0;
   // any other sample error makes the period's total unavailable.
   const smpErr = parts.find((p) => !p.samples || (p.samples.error && !/^No TikTok sample data/.test(p.samples.error)));
