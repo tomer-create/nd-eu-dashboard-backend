@@ -49,7 +49,8 @@ const STABLE_AFTER_DAYS = 45;
 // v2 (2026-10-07): added affiliate (Affiliate-driven GMV) and samples.
 // v3 (2026-10-07 audit): perf_from / perf_error, per-month sample creators,
 // bounded statement window.
-const PAYLOAD_VERSION = 3;
+// v4 (2026-10-07): statement window end+90 days; multi-month periods built from months.
+const PAYLOAD_VERSION = 4;
 
 const PERF_FIELDS = [
   'date',
@@ -196,9 +197,9 @@ const truthy = (v) => v === true || v === 'True' || v === 'true' || v === 1 || v
 async function pullAffiliateGmv(start, end) {
   const today = todayISO();
   // Orders settle a few weeks after delivery, so statements from the period
-  // start to 60 days after its end cover them. (Audit 2026-10-07: scanning
+  // start to 90 days after its end cover them (60 days missed ~1% of July). (Audit 2026-10-07: scanning
   // every statement up to today made May/Jun time out at 240 s.)
-  const settledTo = addDays(end, 60) < today ? addDays(end, 60) : today;
+  const settledTo = addDays(end, 90) < today ? addDays(end, 90) : today;
   const [settled, unsettled] = await Promise.all([
     windsorQuery(SETTLED_FIELDS, start, settledTo),
     windsorQuery(UNSETTLED_FIELDS, addDays(start, -7), today),
@@ -430,12 +431,74 @@ function pullAndStore(start, end) {
 }
 
 // Returns { payload, cache } or throws { status, message }.
+// ---- multi-month periods (quarters, YTD) --------------------------------
+// Audit 2026-10-07: one Windsor request spanning Jan→Oct came back incomplete
+// (TikTok order data covered $772K of the $1.5M YTD GMV), and small
+// boundary differences meant a quarter didn't exactly equal its months. So a
+// period longer than one calendar month is built from its months: each
+// month is pulled (and cached) on its own and the results are added up — a
+// quarter / YTD equals the sum of its months by construction.
+function monthSlices(start, end) {
+  const out = [];
+  let cur = start;
+  while (cur < end) {
+    const d = new Date(cur + 'T00:00:00Z');
+    const next = new Date(Date.UTC(d.getUTCFullYear(), d.getUTCMonth() + 1, 1)).toISOString().slice(0, 10);
+    out.push([cur, next < end ? next : end]);
+    cur = next;
+  }
+  return out;
+}
+const sumKeys = (arr, keys) => Object.fromEntries(keys.map((k) => [k, arr.reduce((a, x) => a + num(x && x[k]), 0)]));
+function combinePayloads(start, end, parts) {
+  const withPerf = parts.filter((p) => p.days_with_data);
+  const out = {
+    source: 'windsor_tiktok_shop', version: PAYLOAD_VERSION, start, end, combined_months: parts.length,
+    ...sumKeys(parts, ['days_with_data', 'gmv', 'orders', 'units', 'sku_orders', 'buyers', 'impressions', 'page_views', 'refunds', 'cancellations_and_returns']),
+    perf_from: (withPerf[0] && withPerf[0].perf_from) || null,
+    perf_error: withPerf.length ? null : ((parts.find((p) => p.perf_error) || {}).perf_error || null),
+    fetched_at: parts.map((p) => p.fetched_at).filter(Boolean).sort()[0] || new Date().toISOString(),
+  };
+  const days = out.days_with_data;
+  out.avg_daily_visitors = days ? withPerf.reduce((a, p) => a + num(p.avg_daily_visitors) * num(p.days_with_data), 0) / days : null;
+  ['gmv_by_type', 'buyers_by_type', 'impressions_by_type', 'page_views_by_type'].forEach((k) => {
+    out[k] = sumKeys(parts.map((p) => p[k] || {}), ['live', 'video', 'product_card']);
+  });
+  const lines = new Map();
+  parts.forEach((p) => ((p.fees && p.fees.lines) || []).forEach((l) => {
+    const cur = lines.get(l.key) || { key: l.key, label: l.label, amount: 0 };
+    cur.amount += num(l.amount); lines.set(l.key, cur);
+  }));
+  out.fees = { basis: 'statement_date', lines: [...lines.values()], ...sumKeys(parts.map((p) => p.fees || {}), ['other', 'total', 'statement_revenue', 'shipping', 'adjustments', 'payout', 'statements']) };
+  const affErr = parts.find((p) => !p.affiliate || p.affiliate.error);
+  out.affiliate = affErr
+    ? { error: (affErr.affiliate && affErr.affiliate.error) || 'Affiliate data missing for part of this period' }
+    : sumKeys(parts.map((p) => p.affiliate), ['gmv', 'orders', 'affiliate_ads_only_gmv', 'affiliate_ads_only_orders', 'orders_seen', 'orders_settled', 'gross_seen']);
+  // A month with no TikTok sample history ("No TikTok sample data…") counts as 0;
+  // any other sample error makes the period's total unavailable.
+  const smpErr = parts.find((p) => !p.samples || (p.samples.error && !/^No TikTok sample data/.test(p.samples.error)));
+  const smpOk = parts.filter((p) => p.samples && !p.samples.error);
+  out.samples = smpErr ? { error: (smpErr.samples && smpErr.samples.error) || 'Sample data missing for part of this period' }
+    : smpOk.length ? { ...sumKeys(smpOk, []), ...sumKeys(smpOk.map((p) => p.samples), ['creators', 'samples_shipped', 'cost']), per_creator: SAMPLE_SHIPPING_PER_CREATOR }
+    : { error: 'No TikTok sample data for this period' };
+  return out;
+}
+
 async function getSellerCenter(start, end, { refresh } = {}) {
   if (!process.env.WINDSOR_API_KEY) {
     const e = new Error('WINDSOR_API_KEY is not set on the server'); e.status = 503; throw e;
   }
   if (!isoOk(start) || !isoOk(end) || end <= start) {
     const e = new Error('start and end must be YYYY-MM-DD with end after start'); e.status = 400; throw e;
+  }
+  const slices = monthSlices(start, end);
+  if (slices.length > 1) {
+    const results = new Array(slices.length);
+    let i = 0;
+    const worker = async () => { while (i < slices.length) { const k = i++; results[k] = await getSellerCenter(slices[k][0], slices[k][1], { refresh }); } };
+    await Promise.all([worker(), worker(), worker()]);
+    const caches = results.map((r) => r.cache);
+    return { payload: combinePayloads(start, end, results.map((r) => r.payload)), cache: caches.every((c) => c === 'hit') ? 'hit' : caches.join(',') };
   }
   if (!refresh) {
     const row = await readCache(start, end);
