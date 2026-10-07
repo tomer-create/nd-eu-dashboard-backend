@@ -41,17 +41,14 @@
 // Dates: `end` is EXCLUSIVE everywhere in this app, so every query here uses
 // event_date < end (see the matching fix in src/triplewhale.js).
 
-const { TW_SHOP_ID } = require('./triplewhale');
+const { TW_SHOP_ID, twSqlRequest } = require('./triplewhale');
 
-const TRIPLEWHALE_SQL_URL = 'https://api.triplewhale.com/api/v2/orcabase/api/sql';
 const SITES_WITH_TIKTOK_SHOP = ['com'];
 
+// Goes through the shared Triple Whale queue in src/triplewhale.js (max 2 in
+// flight + retry on 429) — see the note there (added 2026-10-07).
 async function twSql(shopId, query, start, end) {
-  const res = await fetch(TRIPLEWHALE_SQL_URL, {
-    method: 'POST',
-    headers: { 'Content-Type': 'application/json', 'x-api-key': process.env.TRIPLEWHALE_API_KEY },
-    body: JSON.stringify({ shopId, query, period: { startDate: start, endDate: end } }),
-  });
+  const res = await twSqlRequest(shopId, query, start, end);
   if (!res.ok) {
     const body = await res.text().catch(() => '');
     throw new Error(`Triple Whale SQL ${res.status}: ${body.slice(0, 300)}`);
