@@ -47,7 +47,9 @@ const STALE_AFTER_HOURS = 3;
 const STABLE_AFTER_DAYS = 45;
 // Bump when the payload shape changes, so older cached copies are re-pulled.
 // v2 (2026-10-07): added affiliate (Affiliate-driven GMV) and samples.
-const PAYLOAD_VERSION = 2;
+// v3 (2026-10-07 audit): perf_from / perf_error, per-month sample creators,
+// bounded statement window.
+const PAYLOAD_VERSION = 3;
 
 const PERF_FIELDS = [
   'date',
@@ -193,8 +195,12 @@ const truthy = (v) => v === true || v === 'True' || v === 'true' || v === 1 || v
 
 async function pullAffiliateGmv(start, end) {
   const today = todayISO();
+  // Orders settle a few weeks after delivery, so statements from the period
+  // start to 60 days after its end cover them. (Audit 2026-10-07: scanning
+  // every statement up to today made May/Jun time out at 240 s.)
+  const settledTo = addDays(end, 60) < today ? addDays(end, 60) : today;
   const [settled, unsettled] = await Promise.all([
-    windsorQuery(SETTLED_FIELDS, start, today),
+    windsorQuery(SETTLED_FIELDS, start, settledTo),
     windsorQuery(UNSETTLED_FIELDS, addDays(start, -7), today),
   ]);
   const orders = new Map(); // order id -> { gross, aff, affAds, settled }
@@ -232,7 +238,13 @@ async function pullSampleShipping(start, end) {
   // time on the last day is already the next day in UTC. Filtered by the
   // New York order date below.
   const rows = await windsorQuery(SAMPLE_FIELDS, start, end, [['order_is_sample_order', 'eq', true]]);
-  const creators = new Map();
+  // Creators are counted per calendar month (New York time) and summed, so a
+  // quarter / YTD equals the sum of its months — a creator who received
+  // samples in July and again in August is two shipments, $11 each. (Audit
+  // 2026-10-07: counting distinct creators across Q3 gave 419 vs 511 for the
+  // three months added up.)
+  const creators = new Map(); // creator -> samples (whole period)
+  const creatorMonths = new Set(); // 'YYYY-MM|creator'
   let shipped = 0;
   rows.forEach((r) => {
     if (!truthy(r.order_is_sample_order)) return;
@@ -242,28 +254,67 @@ async function pullSampleShipping(start, end) {
     if (!isShipped || !r.order_user_id) return;
     shipped++;
     creators.set(r.order_user_id, (creators.get(r.order_user_id) || 0) + 1);
+    creatorMonths.add(day.slice(0, 7) + '|' + r.order_user_id);
   });
   return {
-    creators: creators.size,
+    creators: creatorMonths.size,
+    creators_distinct: creators.size,
     samples_shipped: shipped,
     per_creator: SAMPLE_SHIPPING_PER_CREATOR,
-    cost: creators.size * SAMPLE_SHIPPING_PER_CREATOR,
+    cost: creatorMonths.size * SAMPLE_SHIPPING_PER_CREATOR,
   };
 }
 
 function sumRows(rows, field) { return rows.reduce((a, r) => a + num(r[field]), 0); }
 
+// Shop Performance + statement fees. Windsor refuses the whole request when
+// it starts before the TikTok shop's "start of operations" (audit 2026-10-07:
+// Jan–Apr 2026 all failed, May onward worked), so on that error retry from
+// the 1st of each following month until one works, and report perf_from.
+// Any other error is returned as perfError — affiliate GMV and samples are
+// pulled separately and still load.
+const START_OF_OPS_RE = /start of operations/i;
+async function pullShopPerformance(start, dateTo) {
+  const tryFrom = async (from) => {
+    const [perf, fees, statements] = await Promise.all([
+      windsorQuery(PERF_FIELDS, from, dateTo),
+      windsorQuery(['date', ...Object.keys(FEE_FIELDS)], from, dateTo),
+      windsorQuery(STATEMENT_FIELDS, from, dateTo),
+    ]);
+    return { perf, fees, statements, perfFrom: from, perfError: null };
+  };
+  let from = start;
+  for (let i = 0; i < 13; i++) {
+    try {
+      return await tryFrom(from);
+    } catch (err) {
+      if (!START_OF_OPS_RE.test(err.message)) {
+        console.error('windsor-tiktok: shop performance failed:', err.message);
+        return { perf: [], fees: [], statements: [], perfFrom: null, perfError: err.message };
+      }
+      const d = new Date(from + 'T00:00:00Z');
+      const next = new Date(Date.UTC(d.getUTCFullYear(), d.getUTCMonth() + 1, 1)).toISOString().slice(0, 10);
+      if (next > dateTo) break;
+      from = next;
+    }
+  }
+  return { perf: [], fees: [], statements: [], perfFrom: null, perfError: 'TikTok Shop performance data isn\'t available for this period (before the shop\'s start of operations in Windsor).' };
+}
+
 // [start, end) — end exclusive like everywhere else in this app.
 async function pullSellerCenter(start, end) {
   const dateTo = addDays(end, -1);
   const soft = (p, what) => p.catch((err) => { console.error(`windsor-tiktok: ${what} failed:`, err.message); return { error: err.message }; });
-  const [perf, fees, statements, affiliate, samples] = await Promise.all([
-    windsorQuery(PERF_FIELDS, start, dateTo),
-    windsorQuery(['date', ...Object.keys(FEE_FIELDS)], start, dateTo),
-    windsorQuery(STATEMENT_FIELDS, start, dateTo),
+  const [sc, affiliate, samples] = await Promise.all([
+    pullShopPerformance(start, dateTo),
     soft(pullAffiliateGmv(start, end), 'affiliate GMV'),
     soft(pullSampleShipping(start, end), 'sample shipping'),
   ]);
+  const { perf, fees, statements, perfFrom, perfError } = sc;
+  // No shop data at all for the period AND no sample orders: TikTok simply has
+  // no history that far back — report samples as unavailable, not as $0.
+  const samplesOut = (!perf.length && perfError && samples && !samples.error && samples.samples_shipped === 0)
+    ? { error: 'No TikTok sample data for this period' } : samples;
   const s = (f) => sumRows(perf, 'shop_performance_' + f);
   const days = perf.length;
   const byType = (base) => ({
@@ -283,6 +334,8 @@ async function pullSellerCenter(start, end) {
     start,
     end,
     days_with_data: days,
+    perf_from: perfFrom,
+    perf_error: perfError,
     gmv: s('gmv_amount'),
     gmv_by_type: byType('gmv_breakdowns'),
     orders: s('orders'),
@@ -309,7 +362,7 @@ async function pullSellerCenter(start, end) {
       statements: statements.length,
     },
     affiliate,
-    samples,
+    samples: samplesOut,
     fetched_at: new Date().toISOString(),
   };
 }
