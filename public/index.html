@@ -2158,12 +2158,31 @@ function renderTikTokShop(monthData) {
   // (from TikTok's order data). If Ads CV + Affiliate still exceed GMV, the
   // overlap is raised just enough that Organic is $0 (shown as estimated).
   // TTS Ads (net) + Affiliate + Organic = Gross Sales TikTok, always.
-  const overlapMeasured = aff ? Math.min(adsCV, aff.affiliate_with_ads_gmv || 0) : 0;
-  const overlapFloor = aff ? Math.max(0, adsCV + affGmv - gmv) : 0;
-  const overlap = aff ? Math.min(adsCV, Math.max(overlapMeasured, overlapFloor)) : 0;
-  const overlapEstimated = aff && overlapFloor > overlapMeasured + 0.5;
+  // Worked out month by month for quarters / YTD (audit 2026-10-07), so a
+  // period's overlap — and therefore its Organic GMV — is the sum of its
+  // months'. Falls back to the whole-period calculation if a month's figures
+  // aren't available.
+  const ovlCalc = (g, cv, a, measured) => {
+    const m = Math.min(cv, measured || 0), floor = Math.max(0, cv + a - g);
+    return { v: Math.min(cv, Math.max(m, floor)), est: floor > m + 0.5, measured: m };
+  };
+  let ovl = aff ? ovlCalc(gmv, adsCV, affGmv, aff.affiliate_with_ads_gmv) : { v: 0, est: false, measured: 0 };
+  if (aff && aff.by_month && aff.by_month.length > 1) {
+    const MONTH_KEYS = Object.keys(MONTH_INDEX);
+    let tot = 0, est = false, meas = 0, ok = true;
+    aff.by_month.forEach(bm => {
+      const key = MONTH_KEYS[Number(String(bm.start).slice(5, 7)) - 1];
+      const mt = key && DATA.sites.com.months[key] ? getSingleSiteMonthData('com', key).tiktok_shop : null;
+      if (!mt) { ok = false; return; }
+      const r = ovlCalc(mt.gross_sales || 0, mt.ads_revenue || 0, bm.gmv, bm.with_ads);
+      tot += r.v; est = est || r.est; meas += r.measured;
+    });
+    if (ok) ovl = { v: Math.min(adsCV, tot), est, measured: meas };
+  }
+  const overlap = ovl.v;
+  const overlapEstimated = ovl.est;
   const adsNet = adsCV - overlap;
-  const organicGmv = aff ? Math.max(0, gmv - affGmv - adsNet) : null;
+  const organicGmv = aff ? Math.max(0, gmv - affGmv - adsNet) : null; // ≥ 0 by construction; max() only guards rounding
   const adsShare = gmv ? (aff ? adsNet : adsCV) / gmv : 0;
   const affShare = gmv && aff ? affGmv / gmv : 0;
   const orgShare = gmv && aff ? organicGmv / gmv : 0;
@@ -2202,7 +2221,7 @@ function renderTikTokShop(monthData) {
         <tr class="total-row"><td>Gross Sales TikTok (GMV)</td><td>${fmtVal(gmv,'currency-full')}</td><td>100%</td><td>${ch('gross_sales', true)}</td><td>${chM('gross_sales', true)}</td></tr>
       </tbody>
     </table>
-    ${aff ? `<div class="tt-note">Affiliate-driven GMV = gross sales (before discounts) of TikTok Shop orders placed in this period that carried an affiliate commission, from TikTok's settled + unsettled order transactions (${fmtVal(aff.orders_seen,'number')} orders found${aff.affiliate_ads_only_gmv ? '; ' + fmtVal(aff.affiliate_ads_only_gmv,'currency-full') + ' from orders whose only creator charge was an affiliate ads commission is left in TTS Ads, not double-counted' : ''}). Overlap: TikTok's Ads conversion value also counts affiliate orders whose ads ran on the creator's content; those are taken out of TTS Ads so they aren't counted twice — measured from orders that paid both a creator commission and an affiliate-ads commission (${fmtVal(aff.affiliate_with_ads_gmv || 0,'currency-full')})${overlapEstimated ? `, raised to ${fmtVal(overlap,'currency-full')} (estimated) because TikTok's reported Ads conversion value + Affiliate GMV exceed this period's GMV` : ''}. Organic GMV = Gross Sales TikTok − (Affiliate-driven GMV + TTS Ads net). TTS Ads (net) + Affiliate + Organic = Gross Sales TikTok.</div>` : ''}`;
+    ${aff ? `<div class="tt-note">Affiliate-driven GMV = gross sales (before discounts) of TikTok Shop orders placed in this period that carried an affiliate commission, from TikTok's settled + unsettled order transactions (${fmtVal(aff.orders_seen,'number')} orders found${aff.affiliate_ads_only_gmv ? '; ' + fmtVal(aff.affiliate_ads_only_gmv,'currency-full') + ' from orders whose only creator charge was an affiliate ads commission is left in TTS Ads, not double-counted' : ''}). Overlap: TikTok's Ads conversion value also counts affiliate orders whose ads ran on the creator's content; those are taken out of TTS Ads so they aren't counted twice — measured from orders that paid both a creator commission and an affiliate-ads commission (${fmtVal(aff.affiliate_with_ads_gmv || 0,'currency-full')})${overlapEstimated ? `, raised to ${fmtVal(overlap,'currency-full')} (estimated) because TikTok's reported Ads conversion value + Affiliate GMV exceed GMV${aff.by_month && aff.by_month.length > 1 ? ' in some months — worked out month by month' : ''}` : ''}. Organic GMV = Gross Sales TikTok − (Affiliate-driven GMV + TTS Ads net). TTS Ads (net) + Affiliate + Organic = Gross Sales TikTok.</div>` : ''}`;
 
   // Costs
   const sampleShip = smp ? smp.cost : null;
@@ -2213,7 +2232,7 @@ function renderTikTokShop(monthData) {
     ['TikTok Ads spend', tt.ads_spend, 'Triple Whale (TikTok Ads)'],
     ['Affiliate commission', commission, 'P&L sheet — Commission row'],
     ['Samples (TikTok Gifting)', samples, 'P&L sheet — TikTok Gifting row'],
-    ['Sample shipping cost', sampleShip, smp ? `${fmtVal(smp.creators,'number')} creators with ≥1 sample shipped × $${smp.per_creator}${scFrom ? ' (TikTok data from ' + scFrom + ')' : ''}` : ''],
+    ['Sample shipping cost', sampleShip, smp ? `${fmtVal(smp.creators,'number')} creators with ≥1 sample shipped × $${smp.per_creator}` : ''],
   ];
   const known = costRows.filter(r => r[1] !== null && r[1] !== undefined);
   const totalCost = known.reduce((a, r) => a + r[1], 0);
