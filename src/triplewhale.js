@@ -133,6 +133,50 @@
 
 const TRIPLEWHALE_SQL_URL = 'https://api.triplewhale.com/api/v2/orcabase/api/sql';
 
+// Shared request queue for EVERY Triple Whale SQL call in this backend (this
+// file's Section 4 channel pull and src/tiktokshop.js) — added 2026-10-07.
+// Why: once the TikTok Shop section was added, one Sync fired ~13 Triple
+// Whale queries at the same moment (3 sites' channel pulls + ND.COM's TikTok
+// Shop totals for current / YoY / MoM + top products), and Triple Whale
+// answered "429 Too Many Requests". Render logs showed it on every Sync from
+// 12:13 UTC that day, and none in the weeks before. The 429s blanked both the
+// TikTok Shop block AND Section 4's Triple Whale channels for COM/EU/IL.
+// Fix: at most TW_MAX_CONCURRENT requests in flight, and a 429 (or 5xx) is
+// retried after a growing wait instead of failing the section.
+const TW_MAX_CONCURRENT = 2;
+const TW_RETRY_DELAYS_MS = [1500, 3000, 6000, 12000];
+let twActive = 0;
+const twWaiting = [];
+function twAcquire() {
+  if (twActive < TW_MAX_CONCURRENT) { twActive++; return Promise.resolve(); }
+  return new Promise((resolve) => twWaiting.push(resolve));
+}
+function twRelease() {
+  const next = twWaiting.shift();
+  if (next) next(); else twActive--;
+}
+// POSTs one SQL query; resolves to the fetch Response of the final attempt.
+async function twSqlRequest(shopId, query, start, end) {
+  for (let attempt = 0; ; attempt++) {
+    await twAcquire();
+    let res;
+    try {
+      res = await fetch(TRIPLEWHALE_SQL_URL, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json', 'x-api-key': process.env.TRIPLEWHALE_API_KEY },
+        body: JSON.stringify({ shopId, query, period: { startDate: start, endDate: end } }),
+      });
+    } finally {
+      twRelease();
+    }
+    const retryable = res.status === 429 || res.status >= 500;
+    if (!retryable || attempt >= TW_RETRY_DELAYS_MS.length) return res;
+    const ra = Number(res.headers && res.headers.get && res.headers.get('retry-after'));
+    const wait = Number.isFinite(ra) && ra > 0 ? Math.min(ra * 1000, 20000) : TW_RETRY_DELAYS_MS[attempt];
+    await new Promise((r) => setTimeout(r, wait));
+  }
+}
+
 // Maps this app's internal site key to the Triple Whale shop identifier
 // (same domains used throughout this project's Triple Whale research).
 const TW_SHOP_ID = {
@@ -253,18 +297,7 @@ async function fetchChannelPerformance(site, start, end) {
 
   let json;
   try {
-    const res = await fetch(TRIPLEWHALE_SQL_URL, {
-      method: 'POST',
-      headers: {
-        'Content-Type': 'application/json',
-        'x-api-key': apiKey,
-      },
-      body: JSON.stringify({
-        shopId,
-        query,
-        period: { startDate: start, endDate: end },
-      }),
-    });
+    const res = await twSqlRequest(shopId, query, start, end);
     if (!res.ok) {
       const body = await res.text().catch(() => '');
       console.error(`Triple Whale SQL request failed for site=${site} (${res.status}): ${body.slice(0, 500)}`);
@@ -301,4 +334,4 @@ async function fetchChannelPerformance(site, start, end) {
   });
 }
 
-module.exports = { fetchChannelPerformance, CHANNEL_MAP, TW_SHOP_ID };
+module.exports = { fetchChannelPerformance, CHANNEL_MAP, TW_SHOP_ID, twSqlRequest };
