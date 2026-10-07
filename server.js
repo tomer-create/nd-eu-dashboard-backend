@@ -5,6 +5,8 @@ const cors = require('cors');
 const { fetchOrders, fetchOrdersLight, fetchOrdersForTierRevenue, fetchSalesReversals, fetchCostOfGoodsSold, fetchTopReturnsByProduct, fetchCountryBreakdown, fetchSalesSummary, fetchCustomerAcquisition, fetchProductRetailPrices, getAuthorizeUrl, exchangeCodeForToken } = require('./src/shopify');
 const { aggregate } = require('./src/aggregate');
 const { fetchChannelPerformance } = require('./src/triplewhale');
+const { fetchTikTokShop } = require('./src/tiktokshop');
+const { getSellerCenter } = require('./src/windsor-tiktok');
 const { fetchPnlSheetChannels, fetchPnlSheetOtherCosts, fetchPnlSheetTotalCost, fetchPnlSheetMarketingSpend, fetchPnlSheetShopPpc } = require('./src/googlesheets');
 const { VALID_SITES: YOTPO_VALID_SITES, ensureYotpoSchema, recordYotpoEvent, getYotpoSummary, getYotpoCustomerTierMap, getPool: getYotpoPool } = require('./src/yotpo');
 const { registerYotpoWebhooksForSite } = require('./src/yotpo-setup');
@@ -206,6 +208,14 @@ async function buildDataResponse({ site, start, end, compare }) {
   const wantMom = compare.includes('mom');
   const yoyRange = wantYoy ? shiftDateRange(start, end, { years: 1 }) : null;
   const momRange = wantMom ? shiftDateRange(start, end, { months: 1 }) : null;
+
+  // TikTok Shop section (ND.COM only, added 2026-10-07 — see
+  // src/tiktokshop.js). Started here so it runs alongside the Shopify pulls
+  // below; resolves to null for other sites or on any Triple Whale error.
+  const tiktokShopPromise = fetchTikTokShop(site, start, end, { yoyRange, momRange }).catch((err) => {
+    console.error(`fetchTikTokShop threw for site=${site}:`, err.message);
+    return null;
+  });
 
   // YTD range for Section 3's "Return Ratio (YTD)" column — added 2026-08-25
   // per Tomer's request to fix it for ND.EU. Until now the live-sync path
@@ -682,6 +692,8 @@ async function buildDataResponse({ site, start, end, compare }) {
     result.kpis.blended_marketing_spend = pnlSheetMarketingSpend.actual;
   }
 
+  const tiktokShop = await tiktokShopPromise;
+  if (tiktokShop) result.tiktok_shop = tiktokShop;
   return result;
 }
 
@@ -960,6 +972,22 @@ const YOTPO_TIER_REVENUE_MAX_RANGE_DAYS = 35; // comfortably covers any single m
 const YOTPO_TIER_REVENUE_TIMEOUT_MS = 25000;
 
 // GET /api/yotpo/summary?site=com&start=2026-09-01&end=2026-09-06[&include_revenue=1]
+// TikTok Shop Seller Center breakdown (ND.COM, phase 2 — added 2026-10-07).
+// Pulled from Windsor.ai (src/windsor-tiktok.js). Separate from /api/data on
+// purpose: a Windsor pull takes 1–3 minutes, so the dashboard loads this in
+// the background after the section renders instead of making Sync wait.
+// start/end are YYYY-MM-DD, end exclusive. refresh=1 skips the cache.
+app.get('/api/tiktok-shop/seller-center', async (req, res) => {
+  try {
+    const { start, end } = req.query;
+    const out = await getSellerCenter(String(start || ''), String(end || ''), { refresh: req.query.refresh === '1' });
+    res.json({ ...out.payload, cache: out.cache });
+  } catch (err) {
+    console.error('seller-center failed:', err.message);
+    res.status(err.status || 502).json({ error: err.message });
+  }
+});
+
 app.get('/api/yotpo/summary', async (req, res) => {
   const { site, start, end, include_revenue } = req.query;
   if (!YOTPO_VALID_SITES.includes(site)) {
