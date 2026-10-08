@@ -2,7 +2,7 @@ require('dotenv').config();
 const path = require('path');
 const express = require('express');
 const cors = require('cors');
-const { fetchOrders, fetchOrdersLight, fetchOrdersForTierRevenue, fetchSalesReversals, fetchCostOfGoodsSold, fetchTopReturnsByProduct, fetchCountryBreakdown, fetchSalesSummary, fetchCustomerAcquisition, fetchProductRetailPrices, getAuthorizeUrl, exchangeCodeForToken } = require('./src/shopify');
+const { fetchOrders, fetchOrdersLight, fetchOrdersForTierRevenue, fetchSalesReversals, fetchCostOfGoodsSold, fetchTopReturnsByProduct, fetchCountryBreakdown, fetchUsStateBreakdown, fetchSalesSummary, fetchCustomerAcquisition, fetchProductRetailPrices, getAuthorizeUrl, exchangeCodeForToken } = require('./src/shopify');
 const { aggregate } = require('./src/aggregate');
 const { fetchChannelPerformance } = require('./src/triplewhale');
 const { fetchTikTokShop } = require('./src/tiktokshop');
@@ -904,6 +904,57 @@ app.post('/api/yotpo/webhook/:site', async (req, res) => {
 // YOTPO_TIER_REVENUE_WAIT_MS; if a month is still being computed the
 // response carries revenue_pending and the dashboard asks again shortly.
 const YOTPO_TIER_REVENUE_WAIT_MS = 15000;
+
+// GET /api/us-states?site=com&start=&end=[&yoy_start=&yoy_end=][&prev_start=&prev_end=]
+// US sales by state for Section 5's United States row (added 2026-10-08).
+// One ShopifyQL query per range (about a second), so any period works —
+// month, quarter or YTD — with no snapshot to bake. The dashboard passes the
+// comparison ranges it already uses elsewhere (same dates last year; prior
+// month / prior quarter). All dates YYYY-MM-DD, end exclusive. Cached in
+// memory: 6 h for ranges that have ended, 15 min for one still in progress.
+const usStatesCache = new Map();
+const US_STATES_DATE = /^\d{4}-\d{2}-\d{2}$/;
+app.get('/api/us-states', async (req, res) => {
+  const { site, start, end, yoy_start, yoy_end, prev_start, prev_end } = req.query;
+  if (!['com', 'eu', 'il'].includes(site)) return res.status(400).json({ error: `Unknown or missing site "${site}"` });
+  const ranges = { cur: [start, end], yoy: [yoy_start, yoy_end], prev: [prev_start, prev_end] };
+  for (const [k, [a, b]] of Object.entries(ranges)) {
+    if (k === 'cur' ? !(US_STATES_DATE.test(start || '') && US_STATES_DATE.test(end || '')) : ((a || b) && !(US_STATES_DATE.test(a || '') && US_STATES_DATE.test(b || '')))) {
+      return res.status(400).json({ error: `Invalid ${k} date range` });
+    }
+  }
+  const key = [site, start, end, yoy_start, yoy_end, prev_start, prev_end].join('|');
+  const hit = usStatesCache.get(key);
+  if (hit && hit.expires > Date.now()) return res.json(hit.payload);
+  try {
+    const [cur, yoy, prev] = await Promise.all([
+      fetchUsStateBreakdown(site, start, end),
+      yoy_start ? fetchUsStateBreakdown(site, yoy_start, yoy_end) : Promise.resolve(null),
+      prev_start ? fetchUsStateBreakdown(site, prev_start, prev_end) : Promise.resolve(null),
+    ]);
+    const prior = (list) => (list ? new Map(list.map((r) => [r.state, r.gross_sales])) : null);
+    const yoyMap = prior(yoy), prevMap = prior(prev);
+    const change = (m, s, g) => (m && m.get(s) ? (g - m.get(s)) / Math.abs(m.get(s)) : null);
+    const states = cur.map((r) => ({
+      state: r.state,
+      orders: r.orders,
+      gross_sales: r.gross_sales,
+      net_sales: r.net_sales,
+      aov: r.orders ? r.net_sales / r.orders : null,
+      return_rate: r.gross_sales ? r.return_value / r.gross_sales : null,
+      yoy: change(yoyMap, r.state, r.gross_sales),
+      mom: change(prevMap, r.state, r.gross_sales),
+    }));
+    const payload = { site, start, end, states, has_yoy: !!yoy, has_prev: !!prev };
+    const ended = new Date(`${end}T00:00:00Z`).getTime() + 86400000 <= Date.now();
+    usStatesCache.set(key, { payload, expires: Date.now() + (ended ? 6 * 3600 : 15 * 60) * 1000 });
+    if (usStatesCache.size > 500) usStatesCache.delete(usStatesCache.keys().next().value);
+    res.json(payload);
+  } catch (err) {
+    console.error(`us-states (site=${site}) failed:`, err.message);
+    res.status(502).json({ error: err.message });
+  }
+});
 
 // GET /api/yotpo/summary?site=com&start=2026-09-01&end=2026-09-06[&include_revenue=1]
 // TikTok Shop Seller Center breakdown (ND.COM, phase 2 — added 2026-10-07).
