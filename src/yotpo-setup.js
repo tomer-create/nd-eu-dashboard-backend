@@ -53,7 +53,13 @@ const TOPICS = [
   'swell/tier/status/changed',
   'swell/redemption/created',
   'swell/account/created',
+  'loyalty/opt_in', // added 2026-10-08 — see addYotpoTopicsForSite below
 ];
+
+// Topics added after the original Sep 6 registration. addYotpoTopicsForSite
+// subscribes the EXISTING target to a NEW filter holding only these, so the
+// events already being delivered are never duplicated.
+const ADDED_TOPICS = ['loyalty/opt_in'];
 
 async function callYotpo(url, { method = 'POST', token, body } = {}) {
   const headers = { 'Content-Type': 'application/json' };
@@ -141,4 +147,48 @@ async function registerYotpoWebhooksForSite(site, { storeId, secret, callbackUrl
   return steps;
 }
 
-module.exports = { registerYotpoWebhooksForSite, TOPICS };
+// Walks any JSON value and returns every object that has the given key.
+function findObjects(value, key, out = []) {
+  if (Array.isArray(value)) value.forEach((v) => findObjects(v, key, out));
+  else if (value && typeof value === 'object') {
+    if (key in value) out.push(value);
+    Object.values(value).forEach((v) => findObjects(v, key, out));
+  }
+  return out;
+}
+
+// 2026-10-08: adds ADDED_TOPICS (loyalty/opt_in) for a site that's already
+// registered. Steps: find our existing webhook target (by its callback URL),
+// skip if a filter with these topics already exists, otherwise create a new
+// filter with ONLY these topics and subscribe the existing target to it.
+// Uses the same create-filter / create-subscription calls as the original
+// registration (known to work), so no guessing at Yotpo's update schema.
+async function addYotpoTopicsForSite(site, { storeId, secret }) {
+  if (!storeId || !secret) {
+    throw new Error(`Missing YOTPO_STORE_ID_${site.toUpperCase()} / YOTPO_SECRET_${site.toUpperCase()} env vars`);
+  }
+  const steps = { topics: ADDED_TOPICS };
+  const token = await generateAccessToken(storeId, secret);
+  const get = (path) => callYotpo(`${CORE_API_BASE}/stores/${storeId}/webhooks/${path}`, { method: 'GET', token });
+
+  const targetsRes = await get('targets');
+  const target = findObjects(targetsRes, 'url').find((o) => typeof o.url === 'string' && o.url.includes(`/api/yotpo/webhook/${site}`) && o.id != null);
+  if (!target) {
+    throw new Error(`No existing webhook target for /api/yotpo/webhook/${site} — run /admin/yotpo/register-webhooks first. Targets response: ${JSON.stringify(targetsRes).slice(0, 800)}`);
+  }
+  steps.target_id = target.id;
+
+  const filtersRes = await get('filters').catch((err) => ({ _error: err.message }));
+  const already = JSON.stringify(filtersRes).includes(ADDED_TOPICS[0]);
+  if (already) {
+    steps.already_subscribed = true;
+    steps.note = `A filter containing ${ADDED_TOPICS.join(', ')} already exists — nothing changed.`;
+    return steps;
+  }
+  const filterId = await createFilter(storeId, token, ADDED_TOPICS);
+  steps.filter_id = filterId;
+  steps.subscription = await createSubscription(storeId, token, target.id, filterId);
+  return steps;
+}
+
+module.exports = { registerYotpoWebhooksForSite, addYotpoTopicsForSite, TOPICS, ADDED_TOPICS };
