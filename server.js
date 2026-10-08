@@ -12,6 +12,7 @@ const { VALID_SITES: YOTPO_VALID_SITES, ensureYotpoSchema, recordYotpoEvent, get
 const { registerYotpoWebhooksForSite } = require('./src/yotpo-setup');
 const { importYotpoHistory } = require('./src/yotpo-import');
 const { ensureMonthCacheSchema, getWithMonthCache } = require('./src/month-cache');
+const { getTierRevenue: getYotpoTierRevenue, prewarm: prewarmYotpoTierRevenue } = require('./src/yotpo-tier-revenue');
 const multer = require('multer');
 const yotpoUpload = multer({ storage: multer.memoryStorage(), limits: { fileSize: 25 * 1024 * 1024 } });
 
@@ -890,86 +891,19 @@ app.post('/api/yotpo/webhook/:site', async (req, res) => {
   }
 });
 
-// Joins Shopify order revenue against Yotpo tier membership for Section 8's
-// Net Sales-by-tier column — added 2026-09-06 per Tomer ("add to the Yotpo
-// Loyalty another column with the Revenue of the tier on Net sales").
+// Net Sales by Yotpo tier (Section 8) — added 2026-09-06 per Tomer, only
+// requested by the current-period fetch (include_revenue=1).
 //
-// Deliberately NOT folded into getYotpoSummary (src/yotpo.js) — that
-// function is a pure DB read with no Shopify dependency, and this needs a
-// live Shopify order fetch (fetchOrdersForTierRevenue), which is real extra
-// API cost per call. Gated behind the `include_revenue` query param below so
-// the YoY/MoM fetches the frontend already makes for this same endpoint
-// (see fetchYotpoSummaryForSite in public/index.html) don't ALSO pay for a
-// Shopify order fetch every time — only the current-period fetch requests
-// it, since Tomer only asked for one column, not YoY/MoM on it too.
-//
-// Only counts orders whose customer email matches a KNOWN yotpo_customers
-// row for this site (see getYotpoCustomerTierMap's own comment for why a
-// non-member order must be excluded entirely rather than folded into
-// BRONZE). Net Sales per order = sum(lineItems.originalTotalSet) -
-// totalDiscountsSet — the exact same definition src/aggregate.js uses
-// store-wide, just computed per order here so it can be split by tier.
-async function computeYotpoTierRevenue(site, start, end) {
-  const [orders, tierByEmail] = await Promise.all([
-    fetchOrdersForTierRevenue(site, start, end),
-    getYotpoCustomerTierMap(site),
-  ]);
-
-  const revenueByTier = new Map();
-  for (const order of orders) {
-    const email = order.customer && order.customer.email ? order.customer.email.toLowerCase() : null;
-    if (!email) continue; // guest checkout / no email on the order at all
-    const tier = tierByEmail.get(email);
-    if (!tier) continue; // not a known Yotpo member — excluded, not folded into BRONZE
-
-    const gross = order.lineItems.edges.reduce(
-      (sum, e) => sum + Number((e.node.originalTotalSet && e.node.originalTotalSet.shopMoney && e.node.originalTotalSet.shopMoney.amount) || 0),
-      0
-    );
-    const discount = Number((order.totalDiscountsSet && order.totalDiscountsSet.shopMoney && order.totalDiscountsSet.shopMoney.amount) || 0);
-    const netSales = gross - discount;
-
-    revenueByTier.set(tier, (revenueByTier.get(tier) || 0) + netSales);
-  }
-  return revenueByTier;
-}
-
-// Net Sales-by-tier (computeYotpoTierRevenue) pages through EVERY order in
-// the requested range via fetchOrdersForTierRevenue's sequential, one-page-
-// at-a-time Shopify pagination — fine for a single month (the only window
-// this was ever built/tested against), but for a YTD-width range (~250+
-// days) that's potentially thousands of sequential paginated GraphQL calls,
-// each competing for the same per-shop rate-limit budget as everything else
-// this server fetches concurrently. Confirmed live 2026-09-10: a
-// site=com&start=2026-01-01&end=2026-09-11&include_revenue=1 request never
-// returned even after 25+ seconds with zero response (not an error — a
-// genuine hang), which is exactly why the dashboard's Yotpo Loyalty section
-// got stuck on "Loading Yotpo Loyalty data…" forever whenever Tomer switched
-// to Year to Date — that request has no overall time budget, so the
-// browser's fetch() just sat there waiting and the section never repainted.
-// Fix: skip the live Shopify revenue pull entirely for any range wider than
-// this, and degrade the same graceful way computeYotpoTierRevenue's own
-// catch block already does for a real fetch error (revenue_error set,
-// revenue_included left false, rest of Section 8 renders normally) — the
-// frontend (renderYotpoSection in public/index.html) already shows "—" for
-// Net Sales when revenue_included is false, no frontend change needed.
-const YOTPO_TIER_REVENUE_MAX_RANGE_DAYS = 35; // comfortably covers any single month + buffer
-
-// Even within the 35-day cap above, a single FULL past month (30-31 days of
-// orders) pages through far more Shopify orders than the current, still-in-
-// progress month does (e.g. 17 days of September vs. a complete August) —
-// confirmed live 2026-09-17 (Tomer: "it doesn't load data when i am
-// switching months"): a full-month site=com request took ~15s even on a
-// warm backend, and under concurrent load (current+YoY+MoM all competing for
-// the same per-shop Shopify rate-limit budget, see fetchOrdersForTierRevenue's
-// comment in src/shopify.js) or a cold Render instance, that stretches long
-// enough to look and feel exactly like the YTD hang this file already fixed
-// above — except nothing here was actually broken, it just had no time
-// budget. Same fix, same pattern: cap it and degrade gracefully instead of
-// leaving the frontend on "Loading Yotpo Loyalty data…" indefinitely (the
-// frontend's fetch() call has no timeout of its own here — see
-// fetchYotpoSummaryForSite in public/index.html).
-const YOTPO_TIER_REVENUE_TIMEOUT_MS = 25000;
+// 2026-10-08 (Tomer: "Yotpo Loyalty section not showing net sales"): a full
+// month now takes 45–50 s to page through every Shopify order, past the old
+// 25 s budget, so closed months always showed "—", and quarters / YTD were
+// never computed (old 35-day cap). Now handled by src/yotpo-tier-revenue.js:
+// each calendar month is computed once in the background and cached in
+// Postgres, quarters / YTD are the sum of their months, and closed months
+// are pre-computed at startup. The request waits up to
+// YOTPO_TIER_REVENUE_WAIT_MS; if a month is still being computed the
+// response carries revenue_pending and the dashboard asks again shortly.
+const YOTPO_TIER_REVENUE_WAIT_MS = 15000;
 
 // GET /api/yotpo/summary?site=com&start=2026-09-01&end=2026-09-06[&include_revenue=1]
 // TikTok Shop Seller Center breakdown (ND.COM, phase 2 — added 2026-10-07).
@@ -998,26 +932,10 @@ app.get('/api/yotpo/summary', async (req, res) => {
     if (!summary) return res.json({ site, start, end, no_data: true });
 
     if (include_revenue === '1' && !summary.no_data) {
-      const rangeDays = (new Date(`${end}T00:00:00Z`) - new Date(`${start}T00:00:00Z`)) / 86400000;
-      if (rangeDays > YOTPO_TIER_REVENUE_MAX_RANGE_DAYS) {
-        summary.revenue_error =
-          `Net Sales by tier is only computed live for date ranges up to ${YOTPO_TIER_REVENUE_MAX_RANGE_DAYS} days ` +
-          `— this range is ${Math.round(rangeDays)} days (e.g. Year to Date), which would require paging through ` +
-          `every order in that window from Shopify and was hanging the dashboard. Showing the rest of the table ` +
-          `without Net Sales for this period.`;
-      } else {
-        try {
-          const revenueByTier = await Promise.race([
-            computeYotpoTierRevenue(site, start, end),
-            new Promise((_, reject) => setTimeout(
-              () => reject(new Error(
-                `Net Sales by tier took longer than ${YOTPO_TIER_REVENUE_TIMEOUT_MS / 1000}s to compute for this ` +
-                `period (paging through every Shopify order in the range) — showing the rest of the table without ` +
-                `it rather than leaving the dashboard stuck loading. Try again in a moment.`
-              )),
-              YOTPO_TIER_REVENUE_TIMEOUT_MS
-            )),
-          ]);
+      try {
+        const rev = await getYotpoTierRevenue(site, start, end, { waitMs: YOTPO_TIER_REVENUE_WAIT_MS });
+        if (rev.complete) {
+          const revenueByTier = new Map(Object.entries(rev.by_tier));
           const seenTiers = new Set();
           summary.redemptions_by_tier = summary.redemptions_by_tier.map((r) => {
             seenTiers.add(r.tier);
@@ -1032,16 +950,19 @@ app.get('/api/yotpo/summary', async (req, res) => {
             }
           }
           summary.revenue_included = true;
-        } catch (err) {
-          // Most likely cause right now: the store's Shopify access token
-          // predates the read_customers scope (added 2026-09-06 alongside
-          // this feature) and needs re-authorizing — see src/shopify.js's
-          // SCOPES comment. Degrade gracefully: the rest of Section 8 (which
-          // has nothing to do with Shopify) still renders normally, just
-          // without net_sales on each row.
-          console.error(`yotpo tier revenue (site=${site}) failed:`, err.message);
-          summary.revenue_error = err.message;
+          summary.revenue_computed_at = rev.computed_at;
+        } else if (rev.error) {
+          summary.revenue_error = rev.error;
+          summary.revenue_pending = true; // the failed month is retried on the next request
+        } else {
+          summary.revenue_pending = true;
+          summary.revenue_error =
+            `Net Sales by tier is still being calculated for this period (${rev.ready} of ${rev.total} ` +
+            `month${rev.total === 1 ? '' : 's'} ready) — it will appear here automatically in a minute or two.`;
         }
+      } catch (err) {
+        console.error(`yotpo tier revenue (site=${site}) failed:`, err.message);
+        summary.revenue_error = err.message;
       }
     }
 
@@ -1317,4 +1238,7 @@ app.post('/admin/yotpo/import', yotpoUpload.fields([{ name: 'customers_csv', max
 
 app.listen(PORT, () => {
   console.log(`ND dashboard backend listening on port ${PORT}`);
+  // Pre-compute Net Sales by Yotpo tier for this year's closed months (see
+  // src/yotpo-tier-revenue.js). Delayed so it doesn't compete with startup.
+  setTimeout(() => prewarmYotpoTierRevenue(YOTPO_VALID_SITES), 60000);
 });
