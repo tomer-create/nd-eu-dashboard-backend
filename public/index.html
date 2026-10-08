@@ -2671,6 +2671,10 @@ function channelsChangeData() {
       const ok = results.filter(x => x.status === 'fulfilled').map(x => x.value);
       if (!ok.length) { channelsChangeCache[ck] = { error: true }; return; }
       const map = {};
+      // Collabs creator-code orders (Collabs Affiliate Avg order), summed
+      // across sites like the channels; null where a site has none.
+      const collabs = { cur: null, yoy: null, prev: null };
+      const addC = (acc, v, fx) => { if (!v) return acc; acc = acc || { orders: 0, sales: 0 }; acc.orders += v.orders || 0; acc.sales += (v.sales || 0) * fx; return acc; };
       const add = (acc, v, fx) => { if (!v) return acc; acc = acc || { spend: 0, revenue: 0, orders: 0 }; acc.spend += v.spend * fx; acc.revenue += v.revenue * fx; acc.orders += v.orders; return acc; };
       ok.forEach(({ site, body }) => {
         const fx = state.site === 'all' && FX_TO_USD[site] != null ? FX_TO_USD[site] : 1;
@@ -2678,8 +2682,10 @@ function channelsChangeData() {
           const m = map[label] || (map[label] = { cur: null, yoy: null, prev: null });
           m.cur = add(m.cur, c.cur, fx); m.yoy = add(m.yoy, c.yoy, fx); m.prev = add(m.prev, c.prev, fx);
         });
+        const cb = body.collabs || {};
+        collabs.cur = addC(collabs.cur, cb.cur, fx); collabs.yoy = addC(collabs.yoy, cb.yoy, fx); collabs.prev = addC(collabs.prev, cb.prev, fx);
       });
-      channelsChangeCache[ck] = { map, hasPrev: !!r.prev, partial: ok.length < sites.length };
+      channelsChangeCache[ck] = { map, collabs, hasPrev: !!r.prev, partial: ok.length < sites.length };
     }).finally(() => { if (state.site + '|' + state.month === view) renderChannels(getMonthData()); });
   }
   return 'loading';
@@ -2796,6 +2802,13 @@ function renderChannels(monthData) {
     // Attentive rows on ND.COM: Revenue MoM / QoQ and AOV from Attentive's own
     // data (snapshot above). Spend / ROAS stay on the P&L sheet (Attentive
     // has no spend figures). No YoY — Attentive starts Jan 2026.
+    // Collabs Affiliate: Avg order from the orders that used a Collabs
+    // creator code — their own sales ÷ their count (added 2026-10-08).
+    if (c.label === 'Collabs Affiliate') {
+      const cc = chg && chg.collabs && chg.collabs.cur;
+      out.collabs = true;
+      out.aov = cc && cc.orders ? cc.sales / cc.orders : null;
+    }
     const attKey = state.site === 'com' ? ATTENTIVE_ROW_KEYS[c.label] : null;
     if (attKey) {
       out.attentive = true;
@@ -2814,6 +2827,7 @@ function renderChannels(monthData) {
   const sourceTag = (c, ch) => {
     if (ch.loading) return '';
     if (ch.attentive) return 'Attentive · P&amp;L sheet';
+    if (ch.collabs) return 'P&amp;L sheet · Avg order: Collabs codes';
     // Before / without the comparison data, fall back to the channels Triple
     // Whale normally supplies (see channels_note).
     const tw = ch.tw || (chgFailed && C4_TW_CHANNELS.includes(c.label));
@@ -2835,7 +2849,7 @@ function renderChannels(monthData) {
       <td>${c4Fig(c.spend_actual || 0, c.spend_goal, 'spend', chip(ch, 'spend', 'spend'), isCurrent)}</td>
       <td>${c4Fig(c.revenue_actual || 0, c.revenue_goal, 'revenue', chip(ch, 'revenue', 'revenue'), isCurrent)}</td>
       <td>${c4Roas(c.roas, chip(ch, 'roas', 'roas'))}</td>
-      <td>${ch.loading ? '<span class="c4-dim">…</span>' : (ch.aov !== null && ch.aov !== undefined ? fmtVal(ch.aov, 'currency-full') : '<span class="c4-dim" title="No order count for this channel">—</span>')}</td>
+      <td>${ch.loading ? '<span class="c4-dim">…</span>' : (ch.aov !== null && ch.aov !== undefined ? fmtVal(ch.aov, 'currency-full') : `<span class="c4-dim" title="${ch.collabs ? 'No Collabs-code orders available for this period' : 'No order count for this channel'}">—</span>`)}</td>
       <td>${c4Share(c.revenue_ratio, maxRatio)}</td>
     </tr>`;
   }).join('');
@@ -2930,7 +2944,7 @@ function renderChannels(monthData) {
     <ul>
       <li><b>Spend / Revenue vs goal</b> — actual so far against the P&amp;L sheet’s goal. Revenue bar: green at 95%+ of goal, amber 80–95%, red below 80% (blue while the period is still running). Spend bar: blue within budget, amber above 105%, red above 120%.</li>
       <li><b>ROAS</b> — revenue ÷ spend: how much revenue each ${sym()}1 of spend brought back.</li>
-      <li><b>Avg order</b> — channel revenue ÷ the orders attributed to it (Triple Whale Pixel orders, or the channel’s own reported conversions for Channel-CV channels).</li>
+      <li><b>Avg order</b> — channel revenue ÷ the orders attributed to it (Triple Whale Pixel orders, or the channel’s own reported conversions for Channel-CV channels). <b>Collabs Affiliate</b>: Shopify has no “Collabs order” flag, so its Avg order uses the orders that used a Collabs creator code — their sales after discount ÷ their number. The Collabs app’s revenue also includes link-only orders without a code, so those orders aren’t in this figure.</li>
       <li><b>Share of sales</b> — the channel’s revenue as a share of total gross sales. The bar is scaled to the biggest channel.</li>
       <li><b>Changes (${cmpWord})</b> — Triple Whale channels compare the same dates ${mode === 'yoy' ? 'last year' : 'in the previous ' + periodWord}. Channels from the P&amp;L sheet have no last-year data; their ${momLabel()} compares the previous closed ${periodWord} on this dashboard. The Total’s changes and Avg order cover the Triple Whale channels. Spend changes are grey — more spend isn’t good or bad by itself. Hover a “—” to see why it’s blank.${multi && !prevAvailable ? ' Year to Date and a quarter still in progress compare with last year only.' : ''}</li>
       ${attNote}
