@@ -2,7 +2,7 @@ require('dotenv').config();
 const path = require('path');
 const express = require('express');
 const cors = require('cors');
-const { fetchOrders, fetchOrdersLight, fetchOrdersForTierRevenue, fetchSalesReversals, fetchCostOfGoodsSold, fetchTopReturnsByProduct, fetchCountryBreakdown, fetchUsStateBreakdown, fetchSalesSummary, fetchCustomerAcquisition, fetchProductRetailPrices, getAuthorizeUrl, exchangeCodeForToken } = require('./src/shopify');
+const { fetchOrders, fetchOrdersLight, fetchOrdersForTierRevenue, fetchSalesReversals, fetchCostOfGoodsSold, fetchTopReturnsByProduct, fetchCountryBreakdown, fetchUsStateBreakdown, fetchSalesSummary, fetchCustomerAcquisition, fetchProductRetailPrices, fetchCollabsCodeSales, getAuthorizeUrl, exchangeCodeForToken } = require('./src/shopify');
 const { aggregate } = require('./src/aggregate');
 const { fetchChannelPerformance } = require('./src/triplewhale');
 const { fetchTikTokShop } = require('./src/tiktokshop');
@@ -914,7 +914,8 @@ const YOTPO_TIER_REVENUE_WAIT_MS = 15000;
 // Channels that come from the P&L sheet aren't in Triple Whale, so the
 // dashboard handles those itself. Returns { channels: { label: { cur, yoy,
 // prev } } } with { spend, revenue, orders } each (null if not requested
-// or Triple Whale has no row). Cached like /api/us-states.
+// or Triple Whale has no row), plus collabs: { cur, yoy, prev } (Collabs
+// creator-code orders, added 2026-10-08). Cached like /api/us-states.
 const channelsChangeCache = new Map();
 app.get('/api/channels-change', async (req, res) => {
   const { site, start, end, yoy_start, yoy_end, prev_start, prev_end } = req.query;
@@ -942,7 +943,21 @@ app.get('/api/channels-change', async (req, res) => {
       if (c.no_data) return;
       channels[c.label] = { cur: pick(cur, c.label), yoy: yoy ? pick(yoy, c.label) : null, prev: prev ? pick(prev, c.label) : null, cv_source: c.cv_source };
     });
-    const payload = { site, start, end, has_yoy: !!yoy, has_prev: !!prev, channels };
+    // Collabs Affiliate comes from the P&L sheet (no order count there), so
+    // its Avg order uses the orders that used a Collabs creator code (see
+    // fetchCollabsCodeSales). Never fails the request: until the store's
+    // token carries read_discounts this is null and the cell shows "—".
+    const collabsFor = (s, e) => fetchCollabsCodeSales(site, s, e).catch((err) => {
+      console.error(`channels-change collabs (site=${site} ${s}..${e}) failed:`, err.message);
+      return null;
+    });
+    const [collabsCur, collabsYoy, collabsPrev] = await Promise.all([
+      collabsFor(start, end),
+      yoy_start ? collabsFor(yoy_start, yoy_end) : Promise.resolve(null),
+      prev_start ? collabsFor(prev_start, prev_end) : Promise.resolve(null),
+    ]);
+    const collabs = { cur: collabsCur, yoy: collabsYoy, prev: collabsPrev };
+    const payload = { site, start, end, has_yoy: !!yoy, has_prev: !!prev, channels, collabs };
     const ended = new Date(`${end}T00:00:00Z`).getTime() + 86400000 <= Date.now();
     channelsChangeCache.set(key, { payload, expires: Date.now() + (ended ? 6 * 3600 : 15 * 60) * 1000 });
     if (channelsChangeCache.size > 500) channelsChangeCache.delete(channelsChangeCache.keys().next().value);
