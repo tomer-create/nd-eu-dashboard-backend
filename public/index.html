@@ -1844,11 +1844,47 @@ function getMonthData() {
 // (e.g. that site's Shopify connection hiccups) doesn't wipe out the other
 // two sites' successful results — each site is cached independently as
 // soon as its own fetch resolves.
-async function performSync() {
+// Auto-pull on period change (added 2026-10-08 per Tomer: "the dashboard
+// should pull data each time the date is changing ... without press sync").
+// Also on switching website (ND.COM / ND.EU / ND.IL / All Sites) — Tomer:
+// "also from website to website". A pull always covers all 3 sites, so a
+// switch only pulls when that period's data is missing or the current month
+// is stale.
+// Changing the month / quarter / YTD picker now runs the same pull the Sync
+// button does for that period, automatically:
+//   - a single month -> that month; a closed quarter -> its 3 months;
+//     YTD or an in-progress quarter -> the current month (every other month
+//     in them is closed and already final);
+//   - skipped when this session already has the data: a closed month once
+//     pulled stays final; the current month is re-pulled if it's older than
+//     AUTO_SYNC_FRESH_MS;
+//   - closed months come through the backend's month cache (instant once
+//     stored), the current month is always fresh;
+//   - one pull at a time: a change made while a pull is running is picked up
+//     as soon as it finishes.
+const AUTO_SYNC_FRESH_MS = 10 * 60 * 1000;
+let syncInProgress = false, autoSyncPending = false;
+function monthNeedsPull(month) {
+  return Object.keys(DATA.sites).some(s => {
+    const c = liveCache[s + '|' + month];
+    if (!c) return true;
+    return month === DATA.meta.current_month && (Date.now() - new Date(c.fetchedAt).getTime()) > AUTO_SYNC_FRESH_MS;
+  });
+}
+function autoSyncForPeriod() {
+  if (syncInProgress) { autoSyncPending = true; return; }
+  const months = syncTargetMonths().filter(monthNeedsPull);
+  if (!months.length) return;
+  performSync({ auto: true, months });
+}
+async function performSync(opts) {
   if (!canSync()) return; // guarded by the disabled button too
+  if (syncInProgress) return;
+  const auto = !!(opts && opts.auto);
   const btn = document.getElementById('sync-btn');
   const statusEl = document.getElementById('sync-status');
-  const months = syncTargetMonths();
+  const months = (opts && Array.isArray(opts.months) && opts.months.length) ? opts.months : syncTargetMonths();
+  syncInProgress = true;
   const monthTail = syncTail(months);
   const sites = Object.keys(DATA.sites);
   btn.disabled = true;
@@ -1870,7 +1906,10 @@ async function performSync() {
       const isCurrentMonth = month === DATA.meta.current_month;
       const results = await Promise.allSettled(sites.map(site => {
         const isCurrent = DATA.sites[site].months[month].is_current;
-        return fetchLiveData(site, month, isCurrent, { refresh: isCurrentMonth || months.length === 1 });
+        // Manual Sync forces a fresh pull (current month, or a single month
+        // you asked for); an automatic pull reads closed months from the
+        // backend's month cache.
+        return fetchLiveData(site, month, isCurrent, { refresh: isCurrentMonth || (!auto && months.length === 1) });
       }));
       results.forEach((r, i) => {
         const site = sites[i];
@@ -1899,12 +1938,17 @@ async function performSync() {
   } finally {
     btn.disabled = false;
     btn.classList.remove('syncing');
+    syncInProgress = false;
+    if (autoSyncPending) { autoSyncPending = false; autoSyncForPeriod(); }
   }
 }
 
 function updateSyncStatus() {
   const btn = document.getElementById('sync-btn');
   const statusEl = document.getElementById('sync-status');
+  // While a pull is running (manual or automatic) keep the button disabled
+  // and leave its "Syncing…" message on screen; the pull repaints when done.
+  if (syncInProgress) { btn.disabled = true; return; }
   btn.disabled = false;
   const months = syncTargetMonths();
   // On YTD (and an in-progress quarter), Sync targets/reads the current
@@ -1923,7 +1967,7 @@ function updateSyncStatus() {
   }
   if (!status) {
     statusEl.className = 'sync-status';
-    statusEl.textContent = 'Showing snapshot data — click Sync for live numbers (all sites)' + monthTail;
+    statusEl.textContent = 'Showing snapshot data — live numbers load automatically (all sites)' + monthTail;
   } else if (status.cachedSites.length === status.total) {
     statusEl.className = 'sync-status ok';
     statusEl.textContent = 'Synced all sites' + monthTail + ' ' + status.fetchedAt.toLocaleTimeString('en-US', { hour: 'numeric', minute: '2-digit' });
@@ -3489,7 +3533,7 @@ function renderSiteTabs() {
     btn.className = 'site-tab' + (key === state.site ? ' active' : '');
     btn.textContent = DATA.sites[key].meta.name;
     btn.dataset.site = key;
-    btn.addEventListener('click', () => { state.site = key; render(); });
+    btn.addEventListener('click', () => { state.site = key; render(); autoSyncForPeriod(); });
     el.appendChild(btn);
 
     const opt = document.createElement('option');
@@ -3502,7 +3546,7 @@ function renderSiteTabs() {
   allBtn.textContent = ALL_SITES_META.name;
   allBtn.dataset.site = 'all';
   allBtn.title = FX_NOTE;
-  allBtn.addEventListener('click', () => { state.site = 'all'; render(); });
+  allBtn.addEventListener('click', () => { state.site = 'all'; render(); autoSyncForPeriod(); });
   el.appendChild(allBtn);
 
   const allOpt = document.createElement('option');
@@ -3510,7 +3554,7 @@ function renderSiteTabs() {
   allOpt.textContent = ALL_SITES_META.name;
   mobileEl.appendChild(allOpt);
   mobileEl.value = state.site;
-  mobileEl.addEventListener('change', () => { state.site = mobileEl.value; render(); });
+  mobileEl.addEventListener('change', () => { state.site = mobileEl.value; render(); autoSyncForPeriod(); });
 }
 function renderMonthPicker() {
   const el = document.getElementById('month-picker');
@@ -3533,7 +3577,7 @@ function renderMonthPicker() {
     el.appendChild(opt);
   });
   el.value = state.month;
-  el.addEventListener('change', () => { state.month = el.value; render(); });
+  el.addEventListener('change', () => { state.month = el.value; render(); autoSyncForPeriod(); });
 }
 
 /* ---------------- main render ---------------- */
