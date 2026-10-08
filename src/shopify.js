@@ -938,8 +938,46 @@ async function fetchProductRetailPrices(site) {
   return prices;
 }
 
+// US sales by state (shipping address) — added 2026-10-08 per Tomer: "on
+// ND.COM under Sales by Country under United States add breakdown by state".
+// Same ShopifyQL source and columns as fetchCountryBreakdown above, filtered
+// to United States and grouped by shipping_region. Verified live for Sep
+// 2026: 51 rows (50 states + DC) whose gross sales add up exactly to the
+// United States row ($1,055,222.11).
+async function fetchUsStateBreakdown(site, startISO, endISOExclusive) {
+  const untilDate = new Date(endISOExclusive + 'T00:00:00Z');
+  untilDate.setUTCDate(untilDate.getUTCDate() - 1);
+  const untilISO = untilDate.toISOString().slice(0, 10);
+  const q = `FROM sales SHOW gross_sales, net_sales, sales_reversals, orders WHERE shipping_country = 'United States' GROUP BY shipping_region ORDER BY gross_sales DESC SINCE ${startISO} UNTIL ${untilISO} LIMIT 100`;
+  const data = await graphql(site, `
+    query UsStates($q: String!) {
+      shopifyqlQuery(query: $q) { parseErrors tableData { columns { name } rows } }
+    }`, { q });
+  const result = data.shopifyqlQuery;
+  if (result.parseErrors && result.parseErrors.length) {
+    throw new Error(`ShopifyQL parse error for "${site}" (query: ${q}): ${result.parseErrors.join('; ')}`);
+  }
+  const colNames = (result.tableData.columns || []).map((c) => c.name);
+  return (result.tableData.rows || [])
+    .map((row) => {
+      const values = Array.isArray(row) ? row : colNames.map((name) => row[name]);
+      const obj = {};
+      colNames.forEach((name, i) => { obj[name] = values[i]; });
+      return obj;
+    })
+    .filter((r) => r.shipping_region)
+    .map((r) => ({
+      state: r.shipping_region,
+      gross_sales: Number(r.gross_sales) || 0,
+      net_sales: Number(r.net_sales) || 0,
+      orders: Number(r.orders) || 0,
+      return_value: Math.abs(Number(r.sales_reversals) || 0),
+    }));
+}
+
 module.exports = {
   getSiteConfig,
+  fetchUsStateBreakdown,
   getAuthorizeUrl,
   exchangeCodeForToken,
   graphql,
