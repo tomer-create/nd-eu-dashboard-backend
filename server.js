@@ -9,7 +9,7 @@ const { fetchTikTokShop } = require('./src/tiktokshop');
 const { getSellerCenter } = require('./src/windsor-tiktok');
 const { fetchPnlSheetChannels, fetchPnlSheetOtherCosts, fetchPnlSheetTotalCost, fetchPnlSheetMarketingSpend, fetchPnlSheetShopPpc } = require('./src/googlesheets');
 const { VALID_SITES: YOTPO_VALID_SITES, ensureYotpoSchema, recordYotpoEvent, getYotpoSummary, getYotpoCustomerTierMap, getPool: getYotpoPool } = require('./src/yotpo');
-const { registerYotpoWebhooksForSite } = require('./src/yotpo-setup');
+const { registerYotpoWebhooksForSite, addYotpoTopicsForSite } = require('./src/yotpo-setup');
 const { importYotpoHistory } = require('./src/yotpo-import');
 const { ensureMonthCacheSchema, getWithMonthCache } = require('./src/month-cache');
 const { getTierRevenue: getYotpoTierRevenue, prewarm: prewarmYotpoTierRevenue } = require('./src/yotpo-tier-revenue');
@@ -1133,6 +1133,36 @@ app.get('/admin/yotpo/register-webhooks', async (req, res) => {
     res.json({ ok: true, site, ...result });
   } catch (err) {
     console.error(`yotpo webhook registration (site=${site}) failed:`, err.message);
+    res.status(err.status || 502).json({ ok: false, error: err.message, body: err.body });
+  }
+});
+
+// GET /admin/yotpo/add-topics?site=com&token=<ADMIN_SETUP_TOKEN>
+//
+// 2026-10-08: subscribes an already-registered site to the loyalty/opt_in
+// event (counted as a new loyalty member — see classifyTopic in
+// src/yotpo.js). Safe to open more than once: it does nothing if the
+// subscription already exists, and it never touches the original filter, so
+// redemptions / tier changes are never delivered twice.
+app.get('/admin/yotpo/add-topics', async (req, res) => {
+  const { site } = req.query;
+  const adminToken = process.env.ADMIN_SETUP_TOKEN;
+  if (!adminToken || req.query.token !== adminToken) {
+    return res.status(403).json({ error: 'Invalid or missing token' });
+  }
+  if (!YOTPO_VALID_SITES.includes(site)) {
+    return res.status(400).json({ error: `Unknown or missing site "${site}"` });
+  }
+  const upper = site.toUpperCase();
+  try {
+    const result = await addYotpoTopicsForSite(site, {
+      storeId: process.env[`YOTPO_STORE_ID_${upper}`],
+      secret: process.env[`YOTPO_SECRET_${upper}`],
+    });
+    console.log(`yotpo add-topics (site=${site}):`, JSON.stringify(result).slice(0, 500));
+    res.json({ ok: true, site, ...result });
+  } catch (err) {
+    console.error(`yotpo add-topics (site=${site}) failed:`, err.message);
     res.status(err.status || 502).json({ ok: false, error: err.message, body: err.body });
   }
 });
