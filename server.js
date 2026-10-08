@@ -905,6 +905,50 @@ app.post('/api/yotpo/webhook/:site', async (req, res) => {
 // response carries revenue_pending and the dashboard asks again shortly.
 const YOTPO_TIER_REVENUE_WAIT_MS = 15000;
 
+// GET /api/returns-change?site=com&start=&end=[&yoy_start=&yoy_end=][&prev_start=&prev_end=]
+// YoY / MoM (QoQ) for Section 3's Top 15 Return Products — added 2026-10-08
+// per Tomer ("on the Top 15 Return Products sections add YOY and MOM").
+// Return $ value (|sales_reversals|) per product for the selected range and
+// each comparison range, from the same ShopifyQL query the section's own list
+// uses (fetchTopReturnsByProduct), but for every product (LIMIT 1000) so the
+// dashboard can match any row by title. Returns { products: { title:
+// [current, yoy, prev] } } — null where that comparison wasn't requested.
+// Cached like /api/us-states.
+const returnsChangeCache = new Map();
+app.get('/api/returns-change', async (req, res) => {
+  const { site, start, end, yoy_start, yoy_end, prev_start, prev_end } = req.query;
+  if (!['com', 'eu', 'il'].includes(site)) return res.status(400).json({ error: `Unknown or missing site "${site}"` });
+  const ok = (a, b) => US_STATES_DATE.test(a || '') && US_STATES_DATE.test(b || '');
+  if (!ok(start, end) || ((yoy_start || yoy_end) && !ok(yoy_start, yoy_end)) || ((prev_start || prev_end) && !ok(prev_start, prev_end))) {
+    return res.status(400).json({ error: 'Invalid date range' });
+  }
+  const key = [site, start, end, yoy_start, yoy_end, prev_start, prev_end].join('|');
+  const hit = returnsChangeCache.get(key);
+  if (hit && hit.expires > Date.now()) return res.json(hit.payload);
+  try {
+    const [cur, yoy, prev] = await Promise.all([
+      fetchTopReturnsByProduct(site, start, end, 1000),
+      yoy_start ? fetchTopReturnsByProduct(site, yoy_start, yoy_end, 1000) : Promise.resolve(null),
+      prev_start ? fetchTopReturnsByProduct(site, prev_start, prev_end, 1000) : Promise.resolve(null),
+    ]);
+    const toMap = (list) => (list ? new Map(list.map((r) => [r.title, r.return_value])) : null);
+    const yoyMap = toMap(yoy), prevMap = toMap(prev);
+    const products = {};
+    cur.forEach((r) => {
+      if (!r.return_value) return;
+      products[r.title] = [r.return_value, yoyMap ? (yoyMap.get(r.title) || 0) : null, prevMap ? (prevMap.get(r.title) || 0) : null];
+    });
+    const payload = { site, start, end, has_yoy: !!yoy, has_prev: !!prev, products };
+    const ended = new Date(`${end}T00:00:00Z`).getTime() + 86400000 <= Date.now();
+    returnsChangeCache.set(key, { payload, expires: Date.now() + (ended ? 6 * 3600 : 15 * 60) * 1000 });
+    if (returnsChangeCache.size > 500) returnsChangeCache.delete(returnsChangeCache.keys().next().value);
+    res.json(payload);
+  } catch (err) {
+    console.error(`returns-change (site=${site}) failed:`, err.message);
+    res.status(502).json({ error: err.message });
+  }
+});
+
 // GET /api/us-states?site=com&start=&end=[&yoy_start=&yoy_end=][&prev_start=&prev_end=]
 // US sales by state for Section 5's United States row (added 2026-10-08).
 // One ShopifyQL query per range (about a second), so any period works —
