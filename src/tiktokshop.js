@@ -134,6 +134,28 @@ function changes(cur, prev) {
 // Returns the tiktok_shop block for /api/data, or null when the site has no
 // TikTok Shop, the API key isn't set, or Triple Whale errors (logged, never
 // thrown — this section must never break the rest of a sync).
+// Prior-period sales for the current top products — added 2026-10-08 (Tomer:
+// "for the Top TikTok Shop products, add YOY and MOM"). One query per prior
+// range, limited to the top-10 titles; titles are matched exactly (note some
+// TikTok titles contain non-breaking spaces, e.g. "EYESHADOW PALETTE").
+function sqlStr(t) { return "'" + String(t).replace(/\\/g, '\\\\').replace(/'/g, "\\'") + "'"; }
+async function fetchProductGross(shopId, start, end, titles) {
+  if (!titles.length) return new Map();
+  const rows = await twSql(shopId, `
+    SELECT p.product_name AS title,
+           SUM(p.product_name_price * p.product_name_quantity_sold) AS gross_sales
+    FROM orders_table ARRAY JOIN products_info AS p
+    WHERE event_date >= '${start}' AND event_date < '${end}' AND platform = 'tiktok-shops'
+      AND p.product_name IN (${titles.map(sqlStr).join(',')})
+    GROUP BY title`.trim(), start, end);
+  return new Map(rows.map((r) => [r.title, num(r.gross_sales)]));
+}
+// Same arithmetic as server.js shiftDateRange().
+function shiftMonths(range, months) {
+  const f = (iso) => { const d = new Date(iso + 'T00:00:00Z'); d.setUTCMonth(d.getUTCMonth() - months); return d.toISOString().slice(0, 10); };
+  return { start: f(range.start), end: f(range.end) };
+}
+
 async function fetchTikTokShop(site, start, end, { yoyRange, momRange } = {}) {
   if (!SITES_WITH_TIKTOK_SHOP.includes(site) || !process.env.TRIPLEWHALE_API_KEY) return null;
   if (!isoOk(start) || !isoOk(end)) return null;
@@ -145,6 +167,19 @@ async function fetchTikTokShop(site, start, end, { yoyRange, momRange } = {}) {
       yoyRange ? fetchTotals(shopId, yoyRange.start, yoyRange.end).catch(() => null) : Promise.resolve(null),
       momRange ? fetchTotals(shopId, momRange.start, momRange.end).catch(() => null) : Promise.resolve(null),
     ]);
+    // Prior-period sales per top product (absolute values; the dashboard
+    // computes the % so quarters / YTD can add months up first):
+    //   yoy_gross   = same period last year
+    //   prev_gross  = previous period (MoM range, same length)
+    //   prev3_gross = same period 3 months earlier (used for QoQ)
+    const titles = top.map((p) => p.title);
+    const prior = (range) => (range ? fetchProductGross(shopId, range.start, range.end, titles).catch(() => null) : Promise.resolve(null));
+    const [pYoy, pMom, pQoq] = await Promise.all([prior(yoyRange), prior(momRange), prior(shiftMonths({ start, end }, 3))]);
+    top.forEach((p) => {
+      if (pYoy) p.yoy_gross = pYoy.get(p.title) || 0;
+      if (pMom) p.prev_gross = pMom.get(p.title) || 0;
+      if (pQoq) p.prev3_gross = pQoq.get(p.title) || 0;
+    });
     return { source: 'triple_whale', ...cur, top_products: top, yoy: changes(cur, yoy), mom: changes(cur, mom) };
   } catch (err) {
     console.error(`fetchTikTokShop failed for site=${site}:`, err.message);
