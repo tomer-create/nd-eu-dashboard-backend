@@ -287,7 +287,9 @@ async function fetchChannelPerformance(site, start, end) {
       channel,
       SUM(spend) AS spend,
       SUM(channel_reported_conversion_value) AS channel_cv,
-      SUM(order_revenue) AS pixel_cv
+      SUM(order_revenue) AS pixel_cv,
+      SUM(orders_quantity) AS pixel_orders,
+      SUM(channel_reported_conversions) AS channel_orders
     FROM pixel_joined_tvf()
     WHERE event_date >= '${start}' AND event_date < '${end}'
       AND model = 'Last Click'
@@ -324,11 +326,16 @@ async function fetchChannelPerformance(site, start, end) {
     if (!row) return { label: c.label, no_data: true };
     const spend = Number(row.spend || 0);
     const revenue = Number((c.cv === 'channel' ? row.channel_cv : row.pixel_cv) || 0);
+    // Orders on the same basis as the revenue (added 2026-10-08 for Section
+    // 4's AOV): Pixel orders for Pixel-CV channels, channel-reported
+    // conversions for Channel-CV channels.
+    const orders = Number((c.cv === 'channel' ? row.channel_orders : row.pixel_orders) || 0);
     return {
       label: c.label,
       no_data: false,
       spend_actual: spend,
       revenue_actual: revenue,
+      orders,
       cv_source: c.cv, // 'pixel' or 'channel' — surfaced so the frontend note can say which
     };
   });
