@@ -43,7 +43,9 @@ const { getPool } = require('./yotpo');
 const WINDSOR_URL = 'https://connectors.windsor.ai/tiktok_shop';
 const WINDSOR_ACCOUNT = 'USLCMMEW2K';
 const REQUEST_TIMEOUT_MS = 240000;
-const STALE_AFTER_HOURS = 3;
+// 12 h (was 3 h): a closed month barely moves, and every refresh is a
+// chance for Windsor to hand back a partial answer (2026-10-08 incident).
+const STALE_AFTER_HOURS = 12;
 const STABLE_AFTER_DAYS = 45;
 // Bump when the payload shape changes, so older cached copies are re-pulled.
 // v2 (2026-10-07): added affiliate (Affiliate-driven GMV) and samples.
@@ -51,7 +53,9 @@ const STABLE_AFTER_DAYS = 45;
 // bounded statement window.
 // v4 (2026-10-07): statement window end+90 days; multi-month periods built from months.
 // v5 (2026-10-07): affiliate_with_ads_gmv (measured Ads/Affiliate overlap).
-const PAYLOAD_VERSION = 5;
+// v6 (2026-10-08): statements pulled in monthly chunks, rows de-duplicated by
+// transaction id, refreshes that lose orders are rejected.
+const PAYLOAD_VERSION = 6;
 
 const PERF_FIELDS = [
   'date',
@@ -168,6 +172,7 @@ const SAMPLE_SHIPPING_PER_CREATOR = 11;
 const ORDER_TZ = 'America/New_York';
 const SHIPPED_STATUSES = new Set(['AWAITING_COLLECTION', 'IN_TRANSIT', 'DELIVERED', 'COMPLETED']);
 const SETTLED_FIELDS = [
+  'statement_transaction_id',
   'statement_transaction_order_id',
   'statement_transaction_order_create_datetime',
   'statement_transaction_type',
@@ -177,6 +182,7 @@ const SETTLED_FIELDS = [
   'statement_transaction_fee_affiliate_ads_commission_amount',
 ];
 const UNSETTLED_FIELDS = [
+  'unsettled_transaction_id',
   'unsettled_transaction_order_id',
   'unsettled_transaction_order_create_datetime',
   'unsettled_transaction_type',
@@ -201,10 +207,24 @@ async function pullAffiliateGmv(start, end) {
   // start to 90 days after its end cover them (60 days missed ~1% of July). (Audit 2026-10-07: scanning
   // every statement up to today made May/Jun time out at 240 s.)
   const settledTo = addDays(end, 90) < today ? addDays(end, 90) : today;
-  const [settled, unsettled] = await Promise.all([
-    windsorQuery(SETTLED_FIELDS, start, settledTo),
-    windsorQuery(UNSETTLED_FIELDS, addDays(start, -7), today),
-  ]);
+  // Pulled in one-month chunks (2026-10-08): a single Aug 1 → Oct 8 request
+  // came back with about half of August's orders missing — Windsor appears to
+  // cut very large answers short. Chunks keep every answer small.
+  const chunks = monthSlices(start, addDays(settledTo, 1));
+  const settledParts = [];
+  for (let i = 0; i < chunks.length; i += 3) {
+    const batch = await Promise.all(chunks.slice(i, i + 3).map(([a, b]) => windsorQuery(SETTLED_FIELDS, a, addDays(b, -1))));
+    batch.forEach((rows) => settledParts.push(...rows));
+  }
+  const unsettled = await windsorQuery(UNSETTLED_FIELDS, addDays(start, -7), today);
+  // De-duplicate by transaction id — the same transaction can come back
+  // twice (2026-10-08: September's TikTok order gross jumped from $286.8K to
+  // $301.2K on a refresh with the same 4,244 orders).
+  const dedupe = (rows, idField) => {
+    const seen = new Set();
+    return rows.filter((r) => { const id = r[idField]; if (!id) return true; const k = String(id); if (seen.has(k)) return false; seen.add(k); return true; });
+  };
+  const settled = dedupe(settledParts, 'statement_transaction_id');
   const orders = new Map(); // order id -> { gross, aff, affAds, settled }
   const add = (prefix, rows, isSettled) => {
     rows.forEach((r) => {
@@ -221,7 +241,7 @@ async function pullAffiliateGmv(start, end) {
     });
   };
   add('statement_transaction_', settled, true);
-  add('unsettled_transaction_', unsettled, false);
+  add('unsettled_transaction_', dedupe(unsettled, 'unsettled_transaction_id'), false);
   // affiliate_with_ads_gmv (added 2026-10-07, per Tomer's choice "Remove
   // overlap"): affiliate orders that ALSO paid an affiliate ADS commission —
   // i.e. ads run on the creator's content. TikTok counts these in its Ads
@@ -427,11 +447,24 @@ async function writeCache(start, end, payload) {
 }
 
 const inFlight = new Map();
+// Refresh guard (2026-10-08): a closed month's order count doesn't shrink, so
+// a refresh that finds noticeably fewer TikTok orders than the saved copy is
+// a partial answer from Windsor — keep the saved copy instead.
+function seenOrders(p) { return p && p.affiliate && !p.affiliate.error ? num(p.affiliate.orders_seen) : 0; }
 function pullAndStore(start, end) {
   const k = start + '|' + end;
   if (inFlight.has(k)) return inFlight.get(k);
   const p = pullSellerCenter(start, end)
-    .then(async (payload) => { await writeCache(start, end, payload); return payload; })
+    .then(async (payload) => {
+      const prev = await readCache(start, end).catch(() => null);
+      const old = prev && prev.payload;
+      if (old && seenOrders(old) > 0 && seenOrders(payload) < seenOrders(old) * 0.95) {
+        console.error(`windsor-tiktok: refresh for ${start}..${end} found ${seenOrders(payload)} orders vs ${seenOrders(old)} saved — keeping the saved copy`);
+        if (old.version === PAYLOAD_VERSION) return old;
+      }
+      await writeCache(start, end, payload);
+      return payload;
+    })
     .finally(() => inFlight.delete(k));
   inFlight.set(k, p);
   return p;
@@ -485,7 +518,7 @@ function combinePayloads(start, end, parts) {
       // Per-month figures so the dashboard can work out the Ads/Affiliate
       // overlap month by month — a quarter's Organic GMV then equals the sum
       // of its months' Organic GMV (audit 2026-10-07).
-      by_month: parts.map((p) => ({ start: p.start, gmv: num(p.affiliate.gmv), with_ads: num(p.affiliate.affiliate_with_ads_gmv) })),
+      by_month: parts.map((p) => ({ start: p.start, gmv: num(p.affiliate.gmv), with_ads: num(p.affiliate.affiliate_with_ads_gmv), gross_seen: num(p.affiliate.gross_seen) })),
     };
   // A month with no TikTok sample history ("No TikTok sample data…") counts as 0;
   // any other sample error makes the period's total unavailable.
