@@ -2527,6 +2527,54 @@ function ttSheetCostsPrev() {
 // 2025 sheet data for YoY, and no order count for AOV — shown as "—".
 // Spend changes are neutral grey (more spend isn't good or bad by itself);
 // Revenue and ROAS are green when up, red when down.
+// Attentive snapshot for Section 4's Attentive rows (ND.COM) — added
+// 2026-10-08 per Tomer (Attentive rows were missing the new YoY / MoM / AOV;
+// he chose "Attentive's own data", then "All 4 rows, flag Email").
+// Pulled through the Attentive connector (journey_message_revenue /
+// journey_total_conversions and campaign_revenue / campaign_conversions, by
+// message channel): [revenue, conversions] per calendar month, plus the
+// current month-to-date and the same days of the previous month. The
+// dashboard server can't read Attentive itself, so this is a snapshot:
+// re-pull it to update (ask Claude). Attentive's data starts Jan 2026 (SMS
+// ran through SMSBump in 2025), so there's no YoY. A month whose average
+// order comes out above ATTENTIVE_AOV_MAX is treated as unreliable — Email
+// revenue jumps to $400–$3,600 per order in several months (e.g. Email
+// Journey Sep 2026: $2.5M on 689 orders), an Attentive-side data issue.
+const ATTENTIVE_SNAPSHOT = {"as_of":"2026-10-08","first_month":"2026-01","months":{"2026-01":{"email_journey":[40895.43,217],"sms_journey":[27792.69,341],"email_campaign":[6030.31,25],"sms_campaign":[8879.76,115]},"2026-02":{"email_journey":[517346.55,380],"sms_journey":[31987.86,303],"email_campaign":[608735.75,513],"sms_campaign":[21278.24,229]},"2026-03":{"email_journey":[536056.32,346],"sms_journey":[64120.59,425],"email_campaign":[1260494.23,645],"sms_campaign":[13146.87,120]},"2026-04":{"email_journey":[1068618.36,319],"sms_journey":[67821.68,461],"email_campaign":[652200.25,1265],"sms_campaign":[38588.16,456]},"2026-05":{"email_journey":[104543.44,503],"sms_journey":[144670.41,695],"email_campaign":[1091041.13,1383],"sms_campaign":[27326.03,292]},"2026-06":{"email_journey":[48888.09,313],"sms_journey":[106930.4,547],"email_campaign":[116473.83,951],"sms_campaign":[11433.21,121]},"2026-07":{"email_journey":[765195.93,451],"sms_journey":[118993.94,720],"email_campaign":[83095.61,769],"sms_campaign":[21795.64,219]},"2026-08":{"email_journey":[616155.75,461],"sms_journey":[128060.05,909],"email_campaign":[484234.3,1156],"sms_campaign":[57369.62,556]},"2026-09":{"email_journey":[2496363.8,689],"sms_journey":[174598.67,1768],"email_campaign":[82302.02,768],"sms_campaign":[31764.86,330]}},"ranges":{"2026-10-01|2026-10-09":{"email_journey":[28238.57,227],"sms_journey":[63631.85,543],"email_campaign":[1688.93,22],"sms_campaign":[0,0]},"2026-09-01|2026-09-09":{"email_journey":[554434.43,132],"sms_journey":[28828.76,226],"email_campaign":[15120.18,120],"sms_campaign":[9602.77,94]}}};
+const ATTENTIVE_AOV_MAX = 300;
+const ATTENTIVE_ROW_KEYS = { 'Attentive - SMS Journey': 'sms_journey', 'Attentive - Email Journey': 'email_journey', 'Attentive - SMS Campaign': 'sms_campaign', 'Attentive - Email Campaign (Newsletter)': 'email_campaign' };
+function attentiveSane(v) { return !!v && (!v[1] || v[0] / v[1] <= ATTENTIVE_AOV_MAX); }
+// [revenue, conversions] for a period (months list or exact range) or null
+// when it's not in the snapshot or any month in it is unreliable.
+function attentivePeriod(key, months, range) {
+  if (range) {
+    const v = ATTENTIVE_SNAPSHOT.ranges[range.start + '|' + range.end];
+    return v && attentiveSane(v[key]) ? v[key] : null;
+  }
+  if (!months || !months.length) return null;
+  let rev = 0, conv = 0;
+  for (const m of months) {
+    const v = ATTENTIVE_SNAPSHOT.months['2026-' + String(MONTH_INDEX[m] + 1).padStart(2, '0')];
+    if (!v || !attentiveSane(v[key])) return null;
+    rev += v[key][0]; conv += v[key][1];
+  }
+  return [rev, conv];
+}
+// Current / previous Attentive values for the period on screen.
+function attentiveForView(key) {
+  const m = state.month, cur = DATA.meta.current_month;
+  if (m === cur) {
+    const r = usStatesRanges();
+    return { cur: attentivePeriod(key, null, r.cur), prev: r.prev ? attentivePeriod(key, null, r.prev) : null, hasPrev: !!r.prev };
+  }
+  if (m === 'YTD' || (isQuarter(m) && isQuarterInProgress(m))) {
+    const ms = periodMonths(m).filter(x => x !== cur);
+    return { cur: null, prev: null, hasPrev: false, ytdMonths: ms };
+  }
+  const months = periodMonths(m);
+  const prevP = chPrevPeriod();
+  return { cur: attentivePeriod(key, months), prev: prevP ? attentivePeriod(key, periodMonths(prevP)) : null, hasPrev: !!prevP };
+}
 const channelsChangeCache = {};
 function chPct(cur, prior) { return (prior === null || prior === undefined || !prior || cur === null || cur === undefined) ? null : (cur - prior) / Math.abs(prior); }
 function chRoas(x) { return x && x.spend ? x.revenue / x.spend : null; }
@@ -2617,12 +2665,23 @@ function renderChannels(monthData) {
     }
     const p = prevByLabel[c.label];
     const prevRoas = p && p.spend_actual ? p.revenue_actual / p.spend_actual : null;
-    return {
+    const out = {
       spend: [null, p ? chPct(c.spend_actual, p.spend_actual) : null],
       revenue: [null, p ? chPct(c.revenue_actual, p.revenue_actual) : null],
       roas: [null, p ? chPct(c.roas, prevRoas) : null],
       aov: null,
     };
+    // Attentive rows on ND.COM: Revenue MoM / QoQ and AOV from Attentive's own
+    // data (snapshot above). Spend / ROAS stay on the P&L sheet (Attentive
+    // has no spend figures). No YoY — Attentive starts Jan 2026.
+    const attKey = state.site === 'com' ? ATTENTIVE_ROW_KEYS[c.label] : null;
+    if (attKey) {
+      const a = attentiveForView(attKey);
+      out.revenue = [null, a.hasPrev && a.cur && a.prev ? chPct(a.cur[0], a.prev[0]) : null];
+      out.aov = a.cur && a.cur[1] ? a.cur[0] / a.cur[1] : null;
+      if (a.ytdMonths) { const y = attentivePeriod(attKey, a.ytdMonths); out.aov = y && y[1] ? y[0] / y[1] : null; }
+    }
+    return out;
   };
   const chipsFor = (ch, key, kind) => ch.loading ? chChips('loading') : chChips(ch[key][0], ch[key][1], kind);
   let rows = visibleChannels.map(c => {
@@ -2724,7 +2783,7 @@ function renderChannels(monthData) {
     <tbody>${rows}${totalRow}</tbody>
   </table>
   ${monthData.channels_note ? `<div style="margin-top:10px;font-size:11px;color:var(--text-muted)">${monthData.channels_note}</div>` : ''}
-  <div style="margin-top:6px;font-size:11px;color:var(--text-muted)">YoY / ${momLabel()} under Spend, Revenue and ROAS compare ${state.month === 'YTD' ? 'Year to Date' : monthLabelText()} with the same dates last year / the previous ${isQuarter(state.month) ? 'quarter' : 'month'}${state.month === 'YTD' || (isQuarter(state.month) && isQuarterInProgress(state.month)) ? ' (not shown for ' + (state.month === 'YTD' ? 'Year to Date' : 'a quarter still in progress') + ')' : ''}, from Triple Whale (Last Click). AOV = channel revenue ÷ attributed orders on the same basis as that channel's revenue (Pixel orders, or channel-reported conversions for Channel-CV channels). Channels from the P&amp;L sheet have no last-year data or order counts — their ${momLabel()} compares the previous closed ${isQuarter(state.month) ? 'quarter' : 'month'} on this dashboard. The Total row's changes and AOV cover the Triple Whale channels. Spend changes are grey: more spend isn't good or bad by itself.${chg && chg.partial ? ' Some sites\u2019 Triple Whale data didn\u2019t load, so the changes cover the rest.' : ''}</div>`;
+  <div style="margin-top:6px;font-size:11px;color:var(--text-muted)">YoY / ${momLabel()} under Spend, Revenue and ROAS compare ${state.month === 'YTD' ? 'Year to Date' : monthLabelText()} with the same dates last year / the previous ${isQuarter(state.month) ? 'quarter' : 'month'}${state.month === 'YTD' || (isQuarter(state.month) && isQuarterInProgress(state.month)) ? ' (not shown for ' + (state.month === 'YTD' ? 'Year to Date' : 'a quarter still in progress') + ')' : ''}, from Triple Whale (Last Click). AOV = channel revenue ÷ attributed orders on the same basis as that channel's revenue (Pixel orders, or channel-reported conversions for Channel-CV channels). Channels from the P&amp;L sheet have no last-year data or order counts — their ${momLabel()} compares the previous closed ${isQuarter(state.month) ? 'quarter' : 'month'} on this dashboard. The Total row's changes and AOV cover the Triple Whale channels.${state.site === 'com' ? ' Attentive rows: Revenue ' + momLabel() + ' and AOV use Attentive\u2019s own revenue and conversions (snapshot as of ' + ATTENTIVE_SNAPSHOT.as_of + '; Attentive\u2019s data starts January 2026, so there\u2019s no YoY). Periods where Attentive\u2019s own average order exceeds $' + ATTENTIVE_AOV_MAX + ' — Email in most months, an Attentive-side data issue — show \u201c—\u201d. For Year to Date or a quarter in progress, AOV covers the closed months.' : ''} Spend changes are grey: more spend isn't good or bad by itself.${chg && chg.partial ? ' Some sites\u2019 Triple Whale data didn\u2019t load, so the changes cover the rest.' : ''}</div>`;
 }
 
 /* ---------------- Section 7: Other Costs ---------------- */
