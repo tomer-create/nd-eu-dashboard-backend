@@ -206,6 +206,12 @@ function classifyTopic(topic) {
   if (t.includes('tier')) return 'tier_change';
   if (t.includes('redemption') || t.includes('coupon') || t.includes('reward')) return 'redemption';
   if (t.includes('account') && t.includes('creat')) return 'new_member';
+  // 2026-10-08: Yotpo only sends swell/account/created when a customer gets
+  // the "New Member Reward", so live sign-ups never arrived (New Loyalty
+  // Members was 0 on all stores after the Sep 6 CSV import). loyalty/opt_in
+  // ("a customer opts in to the loyalty program") now counts as a new member
+  // too; loyalty/opt_out stays 'other'.
+  if ((t.includes('opt_in') || t.includes('opt-in') || t.includes('optin')) && !t.includes('out')) return 'new_member';
   return 'other';
 }
 
@@ -297,6 +303,11 @@ async function recordYotpoEvent(site, topic, payload) {
     }
   }
 
+  // 2026-10-08: logged so new-member / unrecognised deliveries can be
+  // checked from Render's logs (the database isn't reachable from outside).
+  if (eventType === 'new_member' || eventType === 'other') {
+    console.log(`yotpo webhook (site=${site}): topic=${topic || 'unknown'} -> ${eventType}${email ? '' : ' (no email)'}`);
+  }
   await p.query(
     `INSERT INTO yotpo_events (site, topic, event_type, email, tier_from, tier_to, tier_at_event, points, reward_name, raw_payload)
      VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)`,
@@ -323,7 +334,9 @@ async function getYotpoSummary(site, start, end) {
   }
 
   const newMembersRes = await p.query(
-    `SELECT COUNT(*) AS n FROM yotpo_events
+    // Distinct customers (2026-10-08): a customer who both opts in and gets
+    // the account-created event is one new member, not two.
+    `SELECT COUNT(DISTINCT COALESCE(LOWER(email), 'event:' || id::text)) AS n FROM yotpo_events
      WHERE site = $1 AND event_type = 'new_member' AND received_at >= $2 AND received_at < $3`,
     [site, start, end]
   );
