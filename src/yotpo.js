@@ -336,8 +336,14 @@ async function getYotpoSummary(site, start, end) {
   const newMembersRes = await p.query(
     // Distinct customers (2026-10-08): a customer who both opts in and gets
     // the account-created event is one new member, not two.
+    // Also counts loyalty/opt_in deliveries stored BEFORE classifyTopic
+    // recognised them (they were saved as 'other' since the Sep 6 webhook
+    // go-live — confirmed in Render logs 2026-10-08 that Yotpo already sends
+    // them), so Sep 7 onwards fills in without re-importing anything.
     `SELECT COUNT(DISTINCT COALESCE(LOWER(email), 'event:' || id::text)) AS n FROM yotpo_events
-     WHERE site = $1 AND event_type = 'new_member' AND received_at >= $2 AND received_at < $3`,
+     WHERE site = $1 AND received_at >= $2 AND received_at < $3
+       AND (event_type = 'new_member'
+            OR (event_type = 'other' AND topic ILIKE '%opt_in%' AND topic NOT ILIKE '%out%'))`,
     [site, start, end]
   );
 
