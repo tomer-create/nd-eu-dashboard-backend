@@ -905,6 +905,54 @@ app.post('/api/yotpo/webhook/:site', async (req, res) => {
 // response carries revenue_pending and the dashboard asks again shortly.
 const YOTPO_TIER_REVENUE_WAIT_MS = 15000;
 
+// GET /api/channels-change?site=com&start=&end=[&yoy_start=&yoy_end=][&prev_start=&prev_end=]
+// Section 4 (Marketing & Sales Channel Performance) YoY / MoM (QoQ) for
+// Spend, Revenue and ROAS, plus AOV — added 2026-10-08 per Tomer ("add MOM
+// YOY, and AOV"; he chose YoY/MoM on Revenue, Spend and ROAS). Triple Whale
+// channels only (fetchChannelPerformance, same SQL / CV choice as the
+// section itself, now also returning orders on the same basis as revenue).
+// Channels that come from the P&L sheet aren't in Triple Whale, so the
+// dashboard handles those itself. Returns { channels: { label: { cur, yoy,
+// prev } } } with { spend, revenue, orders } each (null if not requested
+// or Triple Whale has no row). Cached like /api/us-states.
+const channelsChangeCache = new Map();
+app.get('/api/channels-change', async (req, res) => {
+  const { site, start, end, yoy_start, yoy_end, prev_start, prev_end } = req.query;
+  if (!['com', 'eu', 'il'].includes(site)) return res.status(400).json({ error: `Unknown or missing site "${site}"` });
+  const ok = (a, b) => US_STATES_DATE.test(a || '') && US_STATES_DATE.test(b || '');
+  if (!ok(start, end) || ((yoy_start || yoy_end) && !ok(yoy_start, yoy_end)) || ((prev_start || prev_end) && !ok(prev_start, prev_end))) {
+    return res.status(400).json({ error: 'Invalid date range' });
+  }
+  const key = [site, start, end, yoy_start, yoy_end, prev_start, prev_end].join('|');
+  const hit = channelsChangeCache.get(key);
+  if (hit && hit.expires > Date.now()) return res.json(hit.payload);
+  try {
+    const [cur, yoy, prev] = await Promise.all([
+      fetchChannelPerformance(site, start, end),
+      yoy_start ? fetchChannelPerformance(site, yoy_start, yoy_end) : Promise.resolve(null),
+      prev_start ? fetchChannelPerformance(site, prev_start, prev_end) : Promise.resolve(null),
+    ]);
+    if (!cur) return res.status(502).json({ error: 'Triple Whale returned no data (check TRIPLEWHALE_API_KEY / logs)' });
+    const pick = (list, label) => {
+      const r = list && list.find((x) => x.label === label);
+      return r && !r.no_data ? { spend: r.spend_actual || 0, revenue: r.revenue_actual || 0, orders: r.orders || 0 } : null;
+    };
+    const channels = {};
+    cur.forEach((c) => {
+      if (c.no_data) return;
+      channels[c.label] = { cur: pick(cur, c.label), yoy: yoy ? pick(yoy, c.label) : null, prev: prev ? pick(prev, c.label) : null, cv_source: c.cv_source };
+    });
+    const payload = { site, start, end, has_yoy: !!yoy, has_prev: !!prev, channels };
+    const ended = new Date(`${end}T00:00:00Z`).getTime() + 86400000 <= Date.now();
+    channelsChangeCache.set(key, { payload, expires: Date.now() + (ended ? 6 * 3600 : 15 * 60) * 1000 });
+    if (channelsChangeCache.size > 500) channelsChangeCache.delete(channelsChangeCache.keys().next().value);
+    res.json(payload);
+  } catch (err) {
+    console.error(`channels-change (site=${site}) failed:`, err.message);
+    res.status(502).json({ error: err.message });
+  }
+});
+
 // GET /api/returns-change?site=com&start=&end=[&yoy_start=&yoy_end=][&prev_start=&prev_end=]
 // YoY / MoM (QoQ) for Section 3's Top 15 Return Products — added 2026-10-08
 // per Tomer ("on the Top 15 Return Products sections add YOY and MOM").
