@@ -19,7 +19,8 @@
 //       orders 4,290 · units 6,933 · new-customer orders 2,923
 //   - refunds_table, platform = 'tiktok-shops', by refund date:
 //       refunds     = SUM(total_refunded_price)            $19,361.61
-//       net_sales   = sales − refunds − taxes              $216,772.56
+//       net_sales   = gross − discounts − refunds          $175,431.71 (since 2026-10-08;
+//                     was sales − refunds − taxes = $216,772.56)
 //   - pixel_joined_tvf, channel = 'tiktok-ads' (Last Click):
 //       ads_spend   = SUM(spend)                           $38,380.66
 //       ads_revenue = SUM(channel_reported_conversion_value) $73,815.93
@@ -96,7 +97,12 @@ async function fetchTotals(shopId, start, end) {
     orders: num(o.orders),
     gross_sales: gross,
     sales,
-    net_sales: sales - refundsTotal - taxes,
+    // 2026-10-08 per Tomer: same Net Sales definition as the rest of the
+    // dashboard — GMV − all discounts − refunds (no tax / shipping). It was
+    // order_revenue − refunds − taxes (Triple Whale's TikTok Summary figure),
+    // which keeps TikTok-funded discounts in and didn't line up.
+    net_sales: gross - num(o.discounts) - refundsTotal,
+    net_sales_def: 2,
     refunds: refundsTotal,
     discounts: num(o.discounts),
     taxes,
