@@ -2706,7 +2706,10 @@ function combineYotpoSummaries(perSite) {
   // A site whose response has no net_sales yet (revenue not requested, or
   // revenue_error — see fetchYotpoSummaryForSite/renderYotpoSection) simply
   // contributes 0 here via `|| 0`, same graceful-degradation as elsewhere.
-  const anyRevenueIncluded = collected.some((s) => s.revenue_included);
+  // 2026-10-08: Net Sales is only shown when EVERY site has it — otherwise
+  // the "total" would silently leave a site out.
+  const anyRevenueIncluded = collected.every((s) => s.revenue_included);
+  const anyRevenuePending = collected.some((s) => s.revenue_pending);
   const anyRevenueError = collected.some((s) => s.revenue_error);
   const tierMap = new Map();
   collected.forEach((s) => {
@@ -2737,7 +2740,10 @@ function combineYotpoSummaries(perSite) {
     redemptions_by_tier: Array.from(tierMap.values()).sort((a, b) => b.points_used - a.points_used),
     tier_movement: Array.from(movementMap.values()).sort((a, b) => b.count - a.count),
     revenue_included: anyRevenueIncluded,
-    revenue_error: anyRevenueError ? 'One or more sites could not load Net Sales by tier.' : null,
+    revenue_pending: anyRevenuePending,
+    revenue_error: anyRevenuePending
+      ? 'Net Sales by tier is still being calculated for one or more sites — it will appear here automatically in a minute or two.'
+      : (anyRevenueError ? 'One or more sites could not load Net Sales by tier.' : null),
   };
 }
 
@@ -2787,6 +2793,7 @@ async function renderYotpoLoyalty() {
 
     if (keys.concat(yoyKeys, momKeys).every((k) => yotpoCache[k] && yotpoCache[k] !== 'loading')) {
       paintAll();
+      yotpoRetryPendingRevenue(sites, keys, { start, end });
     } else {
       el.innerHTML = '<div class="placeholder">Loading Yotpo Loyalty data…</div>';
       await Promise.all([
@@ -2796,7 +2803,10 @@ async function renderYotpoLoyalty() {
       ]);
       // Only repaint if the user hasn't since navigated away from "All
       // Sites" or switched months while this was in flight.
-      if (state.site === 'all' && state.month === requestedMonth) paintAll();
+      if (state.site === 'all' && state.month === requestedMonth) {
+        paintAll();
+        yotpoRetryPendingRevenue(sites, keys, { start, end });
+      }
     }
     return;
   }
@@ -2814,6 +2824,7 @@ async function renderYotpoLoyalty() {
       readComparison(momKey),
       false
     );
+    yotpoRetryPendingRevenue([state.site], [key], yotpoDateRange(state.month));
     return;
   }
   el.innerHTML = '<div class="placeholder">Loading Yotpo Loyalty data…</div>';
@@ -2843,7 +2854,35 @@ async function renderYotpoLoyalty() {
       readComparison(momKey),
       false
     );
+    yotpoRetryPendingRevenue([state.site], [key], { start, end });
   }
+}
+
+// 2026-10-08: Net Sales by tier is computed in the background on the backend
+// (src/yotpo-tier-revenue.js). When a response says it's still being
+// calculated (revenue_pending), ask again for just the current period every
+// 20 s (up to 10 times) and repaint once it arrives — no Sync or reload
+// needed. YoY/MoM fetches are left alone (they never include Net Sales).
+const yotpoRevenueRetries = {};
+function yotpoRetryPendingRevenue(sites, keys, range) {
+  const view = state.site + '|' + state.month;
+  keys.forEach((key, i) => {
+    const v = yotpoCache[key];
+    if (!v || typeof v !== 'object' || !v.revenue_pending || v._retrying) return;
+    const n = yotpoRevenueRetries[key] || 0;
+    if (n >= 10) return;
+    yotpoRevenueRetries[key] = n + 1;
+    v._retrying = true;
+    setTimeout(async () => {
+      try {
+        const d = await fetchYotpoSummaryForSite(sites[i], range.start, range.end, 0, true);
+        yotpoCache[key] = d;
+      } catch (err) {
+        v._retrying = false;
+      }
+      if (state.site + '|' + state.month === view) renderYotpoLoyalty();
+    }, 20000);
+  });
 }
 
 function renderYotpoSection(el, data, yoyData, momData, combined) {
@@ -2924,7 +2963,7 @@ function renderYotpoSection(el, data, yoyData, momData, combined) {
       <td>${r.uses.toLocaleString('en-US')}</td>
       <td>${r.points_used.toLocaleString('en-US')}</td>
       <td>${sym()}${r.points_value.toLocaleString('en-US', { maximumFractionDigits: 0 })}</td>
-      <td>${data.revenue_included ? sym() + r.net_sales.toLocaleString('en-US', { maximumFractionDigits: 0 }) : '<span style="color:var(--text-muted)">—</span>'}</td>
+      <td>${data.revenue_included ? sym() + r.net_sales.toLocaleString('en-US', { maximumFractionDigits: 0 }) : (data.revenue_pending ? '<span style="color:var(--text-muted)">calculating…</span>' : '<span style="color:var(--text-muted)">—</span>')}</td>
       <td>${yoyCell(r.yoy)}</td>
       <td>${yoyCell(r.mom)}</td>
     </tr>`).join('');
@@ -2954,7 +2993,7 @@ function renderYotpoSection(el, data, yoyData, momData, combined) {
       <td>${totalUses.toLocaleString('en-US')}</td>
       <td>${totalPoints.toLocaleString('en-US')}</td>
       <td>${sym()}${totalValue.toLocaleString('en-US', { maximumFractionDigits: 0 })}</td>
-      <td>${data.revenue_included ? sym() + totalNetSales.toLocaleString('en-US', { maximumFractionDigits: 0 }) : '<span style="color:var(--text-muted)">—</span>'}</td>
+      <td>${data.revenue_included ? sym() + totalNetSales.toLocaleString('en-US', { maximumFractionDigits: 0 }) : (data.revenue_pending ? '<span style="color:var(--text-muted)">calculating…</span>' : '<span style="color:var(--text-muted)">—</span>')}</td>
       <td>${yoyCell(totalYoy)}</td>
       <td>${yoyCell(totalMom)}</td>
     </tr>`;
@@ -2989,7 +3028,7 @@ function renderYotpoSection(el, data, yoyData, momData, combined) {
       <tbody>${tierRows}${totalRow}</tbody>
     </table>
     ${movementSection}
-    <div style="margin-top:10px;font-size:11px;color:var(--text-muted)">From Yotpo webhook events accumulated since ${data.collecting_since ? new Date(data.collecting_since).toLocaleDateString('en-US') : '—'} — no historical backfill is possible, so periods before that aren’t shown here. Redemptions with no resolvable tier are grouped under BRONZE. YoY/MoM compare points redeemed against the same date range one year/month earlier. "Movement between tiers" only reflects real tier-change webhook events (never backfilled) — it's hidden here rather than shown empty when no customer has changed tiers in this period, which is expected in the early days after go-live. Net Sales is each tier's Shopify order revenue (gross − discounts, current period only — no YoY/MoM yet) from customers we can match to that tier by email; guest/non-member orders aren't included in any tier's figure, so this total won't tie to the store's overall Net Sales.${data.revenue_error ? ` Net Sales isn’t loading right now — ${data.revenue_error}` : ''}${partialNote}</div>`;
+    <div style="margin-top:10px;font-size:11px;color:var(--text-muted)">From Yotpo webhook events accumulated since ${data.collecting_since ? new Date(data.collecting_since).toLocaleDateString('en-US') : '—'} — no historical backfill is possible, so periods before that aren’t shown here. Redemptions with no resolvable tier are grouped under BRONZE. YoY/MoM compare points redeemed against the same date range one year/month earlier. "Movement between tiers" only reflects real tier-change webhook events (never backfilled) — it's hidden here rather than shown empty when no customer has changed tiers in this period, which is expected in the early days after go-live. Net Sales is each tier's Shopify order revenue (gross − discounts, current period only — no YoY/MoM yet) from customers we can match to that tier by email; guest/non-member orders aren't included in any tier's figure, so this total won't tie to the store's overall Net Sales.${data.revenue_error ? (data.revenue_pending ? ` ${data.revenue_error}` : ` Net Sales isn’t loading right now — ${data.revenue_error}`) : ''}${partialNote}</div>`;
 }
 
 /* ---------------- Section 2: Top Selling Products (live from Shopify where available) ---------------- */
