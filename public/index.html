@@ -111,6 +111,10 @@
   .kpi-yoy.up { color: var(--status-good); background: rgba(12,163,12,0.12); }
   .kpi-yoy.down { color: var(--status-crit); background: rgba(208,59,59,0.12); }
   .kpi-yoy.flat { color: var(--text-muted); background: transparent; }
+  .kpi-yoy.neutral { color: var(--text-secondary); background: var(--track); }
+  /* Section 4 YoY / MoM chips under Spend, Revenue and ROAS (2026-10-08) */
+  .ch-chg { display: inline-flex; gap: 4px; flex-wrap: wrap; justify-content: flex-end; margin-top: 2px; }
+  .ch-chg .lbl { font-size: 9.5px; font-weight: 650; color: var(--text-muted); letter-spacing: .02em; margin-right: 1px; }
   .kpi-mom-row { display: flex; justify-content: flex-end; margin-top: 3px; }
   .kpi-value { font-size: 19px; font-weight: 650; margin-top: 5px; letter-spacing:-0.01em; }
   .kpi-goal-line { font-size: 11px; color: var(--text-muted); margin-top: 2px; }
@@ -2509,6 +2513,79 @@ function ttSheetCostsPrev() {
   return { commission, gifting };
 }
 
+// Section 4 YoY / MoM (QoQ) on Spend, Revenue and ROAS, and AOV — added
+// 2026-10-08 per Tomer ("add MOM YOY, and AOV"; he chose changes on all
+// three). Triple Whale channels: /api/channels-change for exactly the period
+// on screen (YoY = same dates last year; MoM = prior month, same days for the
+// current month; QoQ = prior quarter once closed; none for YTD / an
+// in-progress quarter) — the same ranges as the other sections' changes.
+// AOV = that channel's revenue ÷ its attributed orders on the same basis
+// (Pixel orders for Pixel-CV channels, channel-reported conversions for
+// Channel-CV channels). Channels from the P&L sheet (Attentive, TikTok
+// Affiliates + Organic, …) aren't in Triple Whale: their MoM / QoQ compares
+// the previous closed month / quarter already in the dashboard, there's no
+// 2025 sheet data for YoY, and no order count for AOV — shown as "—".
+// Spend changes are neutral grey (more spend isn't good or bad by itself);
+// Revenue and ROAS are green when up, red when down.
+const channelsChangeCache = {};
+function chPct(cur, prior) { return (prior === null || prior === undefined || !prior || cur === null || cur === undefined) ? null : (cur - prior) / Math.abs(prior); }
+function chRoas(x) { return x && x.spend ? x.revenue / x.spend : null; }
+function chChip(v, kind) {
+  if (v === null || v === undefined) return '<span class="kpi-yoy flat">—</span>';
+  const cls = kind === 'spend' ? 'neutral' : (v >= 0 ? 'up' : 'down');
+  return `<span class="kpi-yoy ${cls}">${fmtYoY(v)}</span>`;
+}
+function chChips(yoy, mom, kind) {
+  if (yoy === 'loading') return '<span class="ch-chg"><span class="lbl">…</span></span>';
+  return `<span class="ch-chg"><span class="lbl">YoY</span>${chChip(yoy, kind)}<span class="lbl">${momLabel()}</span>${chChip(mom, kind)}</span>`;
+}
+function chPrevPeriod() {
+  const m = state.month;
+  if (m === 'YTD') return null;
+  if (isQuarter(m)) return isQuarterInProgress(m) ? null : (PREV_QUARTER[m] || null);
+  if (m === DATA.meta.current_month) return null; // a full prior month vs a partial one would mislead
+  const list = DATA.meta.months_available, i = list.indexOf(m);
+  return i > 0 ? list[i - 1] : null;
+}
+function chPrevMonthData() {
+  const prev = chPrevPeriod();
+  if (!prev) return null;
+  const saved = state.month;
+  state.month = prev;
+  try { return getMonthData(); } catch (e) { return null; } finally { state.month = saved; }
+}
+function channelsChangeData() {
+  const r = usStatesRanges();
+  const sites = state.site === 'all' ? Object.keys(DATA.sites) : [state.site];
+  const ck = [state.site, r.cur.start, r.cur.end, r.prev ? r.prev.start : ''].join('|');
+  const entry = channelsChangeCache[ck];
+  if (entry && entry.error) { delete channelsChangeCache[ck]; return entry; }
+  if (entry && entry !== 'loading') return entry;
+  if (!entry) {
+    channelsChangeCache[ck] = 'loading';
+    const view = state.site + '|' + state.month;
+    Promise.allSettled(sites.map(site => {
+      const q = new URLSearchParams({ site, start: r.cur.start, end: r.cur.end, yoy_start: r.yoy.start, yoy_end: r.yoy.end });
+      if (r.prev) { q.set('prev_start', r.prev.start); q.set('prev_end', r.prev.end); }
+      return fetch(`${BACKEND_URL}/api/channels-change?${q}`)
+        .then(res => res.json().then(body => { if (!res.ok) throw new Error(body.error || ('Backend returned ' + res.status)); return { site, body }; }));
+    })).then(results => {
+      const ok = results.filter(x => x.status === 'fulfilled').map(x => x.value);
+      if (!ok.length) { channelsChangeCache[ck] = { error: true }; return; }
+      const map = {};
+      const add = (acc, v, fx) => { if (!v) return acc; acc = acc || { spend: 0, revenue: 0, orders: 0 }; acc.spend += v.spend * fx; acc.revenue += v.revenue * fx; acc.orders += v.orders; return acc; };
+      ok.forEach(({ site, body }) => {
+        const fx = state.site === 'all' && FX_TO_USD[site] != null ? FX_TO_USD[site] : 1;
+        Object.entries(body.channels || {}).forEach(([label, c]) => {
+          const m = map[label] || (map[label] = { cur: null, yoy: null, prev: null });
+          m.cur = add(m.cur, c.cur, fx); m.yoy = add(m.yoy, c.yoy, fx); m.prev = add(m.prev, c.prev, fx);
+        });
+      });
+      channelsChangeCache[ck] = { map, hasPrev: !!r.prev, partial: ok.length < sites.length };
+    }).finally(() => { if (state.site + '|' + state.month === view) renderChannels(getMonthData()); });
+  }
+  return 'loading';
+}
 function renderChannels(monthData) {
   const el = document.getElementById('section-4');
   // Hide this site's HIDDEN_CHANNELS_BY_SITE rows from its own table/Total —
@@ -2519,10 +2596,40 @@ function renderChannels(monthData) {
   // contribution is zeroed rather than excluded in that combined view).
   const hidden = HIDDEN_CHANNELS_BY_SITE[state.site] || [];
   const visibleChannels = hidden.length ? monthData.channels.filter(c => !hidden.includes(c.label)) : monthData.channels;
+  const chg = channelsChangeData();
+  const chgLoading = chg === 'loading';
+  const chgMap = chg && chg !== 'loading' && !chg.error ? chg.map : {};
+  const prevMd = chPrevMonthData();
+  const prevByLabel = prevMd && prevMd.channels ? Object.fromEntries(prevMd.channels.filter(x => !x.no_data).map(x => [x.label, x])) : {};
+  // Per-row changes: Triple Whale channels from /api/channels-change, P&L
+  // sheet channels MoM/QoQ from the previous closed period's own figures.
+  const rowChanges = (c) => {
+    if (chgLoading) return { loading: true };
+    const t = chgMap[c.label];
+    if (t && t.cur) {
+      const hasPrev = chg.hasPrev;
+      return {
+        spend: [chPct(t.cur.spend, t.yoy && t.yoy.spend), hasPrev ? chPct(t.cur.spend, t.prev && t.prev.spend) : null],
+        revenue: [chPct(t.cur.revenue, t.yoy && t.yoy.revenue), hasPrev ? chPct(t.cur.revenue, t.prev && t.prev.revenue) : null],
+        roas: [chPct(chRoas(t.cur), chRoas(t.yoy)), hasPrev ? chPct(chRoas(t.cur), chRoas(t.prev)) : null],
+        aov: t.cur.orders ? t.cur.revenue / t.cur.orders : null,
+      };
+    }
+    const p = prevByLabel[c.label];
+    const prevRoas = p && p.spend_actual ? p.revenue_actual / p.spend_actual : null;
+    return {
+      spend: [null, p ? chPct(c.spend_actual, p.spend_actual) : null],
+      revenue: [null, p ? chPct(c.revenue_actual, p.revenue_actual) : null],
+      roas: [null, p ? chPct(c.roas, prevRoas) : null],
+      aov: null,
+    };
+  };
+  const chipsFor = (ch, key, kind) => ch.loading ? chChips('loading') : chChips(ch[key][0], ch[key][1], kind);
   let rows = visibleChannels.map(c => {
     if (c.no_data) {
-      return `<tr class="no-data-row"><td>${c.label}</td><td colspan="4">No data in P&amp;L sheet — needs an ad-platform or Shopify connection</td></tr>`;
+      return `<tr class="no-data-row"><td>${c.label}</td><td colspan="5">No data in P&amp;L sheet — needs an ad-platform or Shopify connection</td></tr>`;
     }
+    const ch = rowChanges(c);
     const spendPct = c.spend_goal ? c.spend_actual / c.spend_goal : null;
     const revPct = c.revenue_goal ? c.revenue_actual / c.revenue_goal : null;
     return `<tr>
@@ -2531,15 +2638,23 @@ function renderChannels(monthData) {
         <div class="cell-figs">
           <span class="actual">${fmtVal(c.spend_actual,'currency-full')} <span style="color:var(--text-muted);font-weight:500">/ ${fmtVal(c.spend_goal,'currency-full')}</span></span>
           <span class="goal">${pctLabel(spendPct)} of goal</span>
+          ${chipsFor(ch, 'spend', 'spend')}
         </div>
       </td>
       <td>
         <div class="cell-figs">
           <span class="actual">${fmtVal(c.revenue_actual,'currency-full')} <span style="color:var(--text-muted);font-weight:500">/ ${fmtVal(c.revenue_goal,'currency-full')}</span></span>
           <span class="goal">${pctLabel(revPct)} of goal</span>
+          ${chipsFor(ch, 'revenue', 'revenue')}
         </div>
       </td>
-      <td>${c.roas !== null ? fmtVal(c.roas,'ratio') : '—'}</td>
+      <td>
+        <div class="cell-figs">
+          <span class="actual">${c.roas !== null ? fmtVal(c.roas,'ratio') : '—'}</span>
+          ${chipsFor(ch, 'roas', 'roas')}
+        </div>
+      </td>
+      <td>${ch.loading ? '<span style="color:var(--text-muted)">…</span>' : (ch.aov !== null && ch.aov !== undefined ? fmtVal(ch.aov,'currency-full') : '—')}</td>
       <td>${c.revenue_ratio !== null ? fmtVal(c.revenue_ratio,'percent') : '—'}</td>
     </tr>`;
   }).join('');
@@ -2552,28 +2667,64 @@ function renderChannels(monthData) {
   const totSpendPct = totSpendGoal ? totSpendActual / totSpendGoal : null;
   const totRevPct = totRevGoal ? totRevActual / totRevGoal : null;
   const totRoas = totSpendActual ? totRevActual / totSpendActual : null;
+  // Total-row changes and AOV cover the Triple Whale channels (the only ones
+  // with last-year data and order counts), summed current vs prior.
+  let totCh = { loading: true };
+  if (!chgLoading) {
+    // Pairwise: a comparison only counts channels that have BOTH the current
+    // and that comparison period, so a channel with no last-year data
+    // doesn't inflate the total's YoY.
+    const pair = (k) => {
+      let cur = null, pri = null;
+      dataChannels.forEach(c => {
+        const t = chgMap[c.label];
+        if (!t || !t.cur || !t[k]) return;
+        cur = cur || { spend: 0, revenue: 0, orders: 0 }; pri = pri || { spend: 0, revenue: 0, orders: 0 };
+        ['spend', 'revenue', 'orders'].forEach(f => { cur[f] += t.cur[f]; pri[f] += t[k][f]; });
+      });
+      return cur ? [cur, pri] : null;
+    };
+    let tc = null; dataChannels.forEach(c => { const t = chgMap[c.label]; if (t && t.cur) { tc = tc || { spend: 0, revenue: 0, orders: 0 }; tc.spend += t.cur.spend; tc.revenue += t.cur.revenue; tc.orders += t.cur.orders; } });
+    const py = pair('yoy'), pp = chg && chg.hasPrev ? pair('prev') : null;
+    const ch3 = (pr, f) => pr ? (f === 'roas' ? chPct(chRoas(pr[0]), chRoas(pr[1])) : chPct(pr[0][f], pr[1][f])) : null;
+    totCh = {
+      spend: [ch3(py, 'spend'), ch3(pp, 'spend')],
+      revenue: [ch3(py, 'revenue'), ch3(pp, 'revenue')],
+      roas: [ch3(py, 'roas'), ch3(pp, 'roas')],
+      aov: tc && tc.orders ? tc.revenue / tc.orders : null,
+    };
+  }
   const totalRow = `<tr class="total-row">
       <td>Total</td>
       <td>
         <div class="cell-figs">
           <span class="actual">${fmtVal(totSpendActual,'currency-full')} <span style="color:var(--text-muted);font-weight:500">/ ${fmtVal(totSpendGoal,'currency-full')}</span></span>
           <span class="goal">${pctLabel(totSpendPct)} of goal</span>
+          ${chipsFor(totCh, 'spend', 'spend')}
         </div>
       </td>
       <td>
         <div class="cell-figs">
           <span class="actual">${fmtVal(totRevActual,'currency-full')} <span style="color:var(--text-muted);font-weight:500">/ ${fmtVal(totRevGoal,'currency-full')}</span></span>
           <span class="goal">${pctLabel(totRevPct)} of goal</span>
+          ${chipsFor(totCh, 'revenue', 'revenue')}
         </div>
       </td>
-      <td>${totRoas !== null ? fmtVal(totRoas,'ratio') : '—'}</td>
+      <td>
+        <div class="cell-figs">
+          <span class="actual">${totRoas !== null ? fmtVal(totRoas,'ratio') : '—'}</span>
+          ${chipsFor(totCh, 'roas', 'roas')}
+        </div>
+      </td>
+      <td>${totCh.loading ? '<span style="color:var(--text-muted)">…</span>' : (totCh.aov !== null ? fmtVal(totCh.aov,'currency-full') : '—')}</td>
       <td>${fmtVal(totRevRatio,'percent')}</td>
     </tr>`;
   el.innerHTML = `<table class="dtable">
-    <thead><tr><th style="text-align:left">Channel</th><th>Spend (actual / goal)</th><th>Revenue (actual / goal)</th><th>ROAS</th><th>Revenue Ratio</th></tr></thead>
+    <thead><tr><th style="text-align:left">Channel</th><th>Spend (actual / goal)</th><th>Revenue (actual / goal)</th><th>ROAS</th><th title="Average order value: channel revenue ÷ attributed orders">AOV</th><th>Revenue Ratio</th></tr></thead>
     <tbody>${rows}${totalRow}</tbody>
   </table>
-  ${monthData.channels_note ? `<div style="margin-top:10px;font-size:11px;color:var(--text-muted)">${monthData.channels_note}</div>` : ''}`;
+  ${monthData.channels_note ? `<div style="margin-top:10px;font-size:11px;color:var(--text-muted)">${monthData.channels_note}</div>` : ''}
+  <div style="margin-top:6px;font-size:11px;color:var(--text-muted)">YoY / ${momLabel()} under Spend, Revenue and ROAS compare ${state.month === 'YTD' ? 'Year to Date' : monthLabelText()} with the same dates last year / the previous ${isQuarter(state.month) ? 'quarter' : 'month'}${state.month === 'YTD' || (isQuarter(state.month) && isQuarterInProgress(state.month)) ? ' (not shown for ' + (state.month === 'YTD' ? 'Year to Date' : 'a quarter still in progress') + ')' : ''}, from Triple Whale (Last Click). AOV = channel revenue ÷ attributed orders on the same basis as that channel's revenue (Pixel orders, or channel-reported conversions for Channel-CV channels). Channels from the P&amp;L sheet have no last-year data or order counts — their ${momLabel()} compares the previous closed ${isQuarter(state.month) ? 'quarter' : 'month'} on this dashboard. The Total row's changes and AOV cover the Triple Whale channels. Spend changes are grey: more spend isn't good or bad by itself.${chg && chg.partial ? ' Some sites\u2019 Triple Whale data didn\u2019t load, so the changes cover the rest.' : ''}</div>`;
 }
 
 /* ---------------- Section 7: Other Costs ---------------- */
