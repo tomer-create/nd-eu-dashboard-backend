@@ -37,7 +37,12 @@ const API_VERSION = process.env.SHOPIFY_API_VERSION || '2026-07';
 // (same category as read_reports/ShopifyQL needed) — if the already-granted
 // Level 2 approval on the app doesn't cover this field, Shopify's OAuth
 // consent screen or a later API response will say so explicitly.
-const SCOPES = 'read_orders,read_products,read_inventory,read_reports,read_customers';
+// read_discounts added 2026-10-08 for fetchCollabsCodeSales() (Section 4's
+// Collabs Affiliate Avg order): it lists the Shopify Collabs creator codes.
+// Same deal as above — each store's token has to be re-authorized (visit
+// /auth/<site>, approve, paste the new token into Render) before it works;
+// until then that one figure shows "—" and nothing else is affected.
+const SCOPES = 'read_orders,read_products,read_inventory,read_reports,read_customers,read_discounts';
 
 function getSiteConfig(site) {
   const key = site.toUpperCase();
@@ -975,9 +980,113 @@ async function fetchUsStateBreakdown(site, startISO, endISOExclusive) {
     }));
 }
 
+// Shopify Collabs orders — added 2026-10-08 for Section 4's Avg order on the
+// Collabs Affiliate row (Tomer chose "Code orders only"). Shopify has no
+// "Collabs order" flag, so this counts orders that used a Collabs creator
+// code: the codes on the discounts the Collabs app creates, titled
+// "Shopify Collabs Tier Codes - …". The Collabs app's own revenue also
+// includes link-only orders (no code), so these orders cover roughly two
+// thirds of it (Sep 2026, ND.COM: 431 orders / $52,869 gross vs the app's
+// $79,927); Avg order therefore uses these orders' own sales ÷ their count.
+// When the Collabs app expires a code it renames it "CODE (Shopify Collabs
+// expired <unix seconds>)"; such a code counts only for periods that began
+// before it expired (later orders with the same name are another discount).
+const COLLABS_CODES_TTL_MS = 12 * 3600 * 1000;
+const collabsCodesCache = new Map(); // site -> { at, codes: Map(CODE -> expiredAtMs|null) }
+const collabsCodesInFlight = new Map(); // site -> Promise (one fetch at a time per store)
+function fetchCollabsCodes(site) {
+  const hit = collabsCodesCache.get(site);
+  if (hit && Date.now() - hit.at < COLLABS_CODES_TTL_MS) return Promise.resolve(hit.codes);
+  if (!collabsCodesInFlight.has(site)) {
+    collabsCodesInFlight.set(site, loadCollabsCodes(site).finally(() => collabsCodesInFlight.delete(site)));
+  }
+  return collabsCodesInFlight.get(site);
+}
+async function loadCollabsCodes(site) {
+  const codes = new Map();
+  const ids = [];
+  let after = null;
+  do {
+    const d = await graphql(site, `
+      query CollabsDiscounts($after: String) {
+        discountNodes(first: 50, after: $after, query: "title:Shopify Collabs Tier Codes*") {
+          nodes { id discount { __typename ... on DiscountCodeBasic { title } } }
+          pageInfo { hasNextPage endCursor }
+        }
+      }`, { after });
+    const conn = d.discountNodes;
+    conn.nodes.forEach((n) => {
+      if (n.discount && n.discount.__typename === 'DiscountCodeBasic' && /^Shopify Collabs Tier Codes/i.test(n.discount.title || '')) ids.push(n.id);
+    });
+    after = conn.pageInfo.hasNextPage ? conn.pageInfo.endCursor : null;
+  } while (after);
+  for (const id of ids) {
+    let cur = null;
+    do {
+      const d = await graphql(site, `
+        query CollabsCodes($id: ID!, $after: String) {
+          codeDiscountNode(id: $id) {
+            codeDiscount { ... on DiscountCodeBasic { codes(first: 250, after: $after) { nodes { code } pageInfo { hasNextPage endCursor } } } }
+          }
+        }`, { id, after: cur });
+      const conn = d.codeDiscountNode && d.codeDiscountNode.codeDiscount && d.codeDiscountNode.codeDiscount.codes;
+      if (!conn) break;
+      conn.nodes.forEach(({ code }) => {
+        const m = /^(.*?)\s*\(Shopify Collabs expired (\d+)\)\s*$/i.exec(code || '');
+        const name = (m ? m[1] : code || '').trim().toUpperCase();
+        if (!name || /^[0-9a-f]{32}$/i.test(name)) return; // internal placeholder codes
+        const expiredAt = m ? Number(m[2]) * 1000 : null;
+        const prev = codes.get(name);
+        // Active wins; otherwise keep the latest expiry.
+        if (prev === undefined || expiredAt === null || (prev !== null && expiredAt > prev)) codes.set(name, expiredAt);
+      });
+      cur = conn.pageInfo.hasNextPage ? conn.pageInfo.endCursor : null;
+    } while (cur);
+  }
+  collabsCodesCache.set(site, { at: Date.now(), codes });
+  return codes;
+}
+
+// { orders, gross_sales, discounts, sales (gross − discounts), codes_used }
+// for orders in [startISO, endISOExclusive) that used a Collabs code.
+async function fetchCollabsCodeSales(site, startISO, endISOExclusive) {
+  const codes = await fetchCollabsCodes(site);
+  const untilDate = new Date(endISOExclusive + 'T00:00:00Z');
+  untilDate.setUTCDate(untilDate.getUTCDate() - 1);
+  const untilISO = untilDate.toISOString().slice(0, 10);
+  const startMs = new Date(startISO + 'T00:00:00Z').getTime();
+  const q = `FROM sales SHOW orders, gross_sales, discounts GROUP BY discount_name ORDER BY orders DESC SINCE ${startISO} UNTIL ${untilISO} LIMIT 5000`;
+  const data = await graphql(site, `
+    query CollabsSales($q: String!) {
+      shopifyqlQuery(query: $q) { parseErrors tableData { columns { name } rows } }
+    }`, { q });
+  const result = data.shopifyqlQuery;
+  if (result.parseErrors && result.parseErrors.length) {
+    throw new Error(`ShopifyQL parse error for "${site}" (query: ${q}): ${result.parseErrors.join('; ')}`);
+  }
+  const colNames = (result.tableData.columns || []).map((c) => c.name);
+  const out = { orders: 0, gross_sales: 0, discounts: 0, sales: 0, codes_used: 0 };
+  (result.tableData.rows || []).forEach((row) => {
+    const values = Array.isArray(row) ? row : colNames.map((name) => row[name]);
+    const r = {};
+    colNames.forEach((name, i) => { r[name] = values[i]; });
+    const name = String(r.discount_name || '').trim().toUpperCase();
+    if (!name || !codes.has(name)) return;
+    const expiredAt = codes.get(name);
+    if (expiredAt !== null && expiredAt <= startMs) return;
+    out.orders += Number(r.orders) || 0;
+    out.gross_sales += Number(r.gross_sales) || 0;
+    out.discounts += Math.abs(Number(r.discounts) || 0);
+    out.codes_used += 1;
+  });
+  out.sales = out.gross_sales - out.discounts;
+  return out;
+}
+
 module.exports = {
   getSiteConfig,
   fetchUsStateBreakdown,
+  fetchCollabsCodeSales,
   getAuthorizeUrl,
   exchangeCodeForToken,
   graphql,
