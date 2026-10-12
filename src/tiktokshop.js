@@ -129,7 +129,7 @@ async function fetchTopProducts(shopId, start, end) {
   return rows.map((r) => ({ title: r.title, gross_sales: num(r.gross_sales), units: num(r.units) }));
 }
 
-const CHANGE_KEYS = ['gross_sales', 'net_sales', 'orders', 'units', 'refunds', 'ads_spend', 'ads_revenue', 'affiliate_organic_revenue', 'new_customer_orders'];
+const CHANGE_KEYS = ['gross_sales', 'net_sales', 'orders', 'units', 'refunds', 'discounts', 'ads_spend', 'ads_revenue', 'affiliate_organic_revenue', 'new_customer_orders'];
 function changes(cur, prev) {
   if (!prev) return null;
   const out = {};
