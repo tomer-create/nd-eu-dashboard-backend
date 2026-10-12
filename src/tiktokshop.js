@@ -16,6 +16,7 @@
 //       gross_sales = SUM(gross_product_sales)            $287,519.35
 //       sales       = SUM(order_revenue)                  $254,357.23
 //       discounts   = product + shipping discounts         $92,726.03
+//       product_discounts = product discounts only          $55,198.86 (Discount Ratio)
 //       orders 4,290 · units 6,933 · new-customer orders 2,923
 //   - refunds_table, platform = 'tiktok-shops', by refund date:
 //       refunds     = SUM(total_refunded_price)            $19,361.61
@@ -72,6 +73,7 @@ async function fetchTotals(shopId, start, end) {
              SUM(order_revenue) AS sales,
              SUM(taxes) AS taxes,
              SUM(discount_amount_for_product) + SUM(discount_amount_for_shipping) AS discounts,
+             SUM(discount_amount_for_product) AS product_discounts,
              SUM(shipping_price) AS shipping,
              SUM(product_quantity_sold_in_order) AS units,
              SUM(if(is_new_customer = 1, 1, 0)) AS new_customer_orders,
@@ -105,6 +107,9 @@ async function fetchTotals(shopId, start, end) {
     net_sales_def: 2,
     refunds: refundsTotal,
     discounts: num(o.discounts),
+    // Product discounts only (no shipping discounts) — the TikTok Shop
+    // Discount Ratio's numerator since 2026-10-12 per Tomer.
+    product_discounts: num(o.product_discounts),
     taxes,
     shipping: num(o.shipping),
     units: num(o.units),
@@ -129,7 +134,7 @@ async function fetchTopProducts(shopId, start, end) {
   return rows.map((r) => ({ title: r.title, gross_sales: num(r.gross_sales), units: num(r.units) }));
 }
 
-const CHANGE_KEYS = ['gross_sales', 'net_sales', 'orders', 'units', 'refunds', 'discounts', 'ads_spend', 'ads_revenue', 'affiliate_organic_revenue', 'new_customer_orders'];
+const CHANGE_KEYS = ['gross_sales', 'net_sales', 'orders', 'units', 'refunds', 'discounts', 'product_discounts', 'ads_spend', 'ads_revenue', 'affiliate_organic_revenue', 'new_customer_orders'];
 function changes(cur, prev) {
   if (!prev) return null;
   const out = {};
