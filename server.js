@@ -7,7 +7,7 @@ const { aggregate } = require('./src/aggregate');
 const { fetchChannelPerformance } = require('./src/triplewhale');
 const { fetchTikTokShop } = require('./src/tiktokshop');
 const { getSellerCenter } = require('./src/windsor-tiktok');
-const { fetchPnlSheetChannels, fetchPnlSheetOtherCosts, fetchPnlSheetTotalCost, fetchPnlSheetMarketingSpend, fetchPnlSheetShopPpc } = require('./src/googlesheets');
+const { fetchPnlSheetChannels, fetchPnlSheetOtherCosts, fetchPnlSheetTotalCost, fetchPnlSheetMarketingSpend, fetchPnlSheetShopPpc, fetchPnlSheetGoals } = require('./src/googlesheets');
 const { VALID_SITES: YOTPO_VALID_SITES, ensureYotpoSchema, recordYotpoEvent, getYotpoSummary, getYotpoCustomerTierMap, getPool: getYotpoPool } = require('./src/yotpo');
 const { registerYotpoWebhooksForSite, addYotpoTopicsForSite } = require('./src/yotpo-setup');
 const { importYotpoHistory } = require('./src/yotpo-import');
@@ -904,6 +904,24 @@ app.post('/api/yotpo/webhook/:site', async (req, res) => {
 // YOTPO_TIER_REVENUE_WAIT_MS; if a month is still being computed the
 // response carries revenue_pending and the dashboard asks again shortly.
 const YOTPO_TIER_REVENUE_WAIT_MS = 15000;
+
+// GET /api/pnl-goals?site=com — every 2026 month's goals from the site's P&L
+// sheet tab (added 2026-10-12 per Tomer, who chose to read goals live
+// instead of the copies built into index.html). See fetchPnlSheetGoals in
+// src/googlesheets.js for the shape. Cached there for 5 minutes.
+app.get('/api/pnl-goals', async (req, res) => {
+  const { site } = req.query;
+  if (!['com', 'eu', 'il'].includes(site)) return res.status(400).json({ error: `Unknown or missing site "${site}"` });
+  try {
+    const goals = await fetchPnlSheetGoals(site);
+    if (!goals) return res.status(502).json({ error: 'Could not read the P&L sheet (is it still shared as "Anyone with the link"?)' });
+    res.set('Cache-Control', 'no-store');
+    res.json(goals);
+  } catch (err) {
+    console.error(`pnl-goals (site=${site}) failed:`, err.message);
+    res.status(502).json({ error: err.message });
+  }
+});
 
 // GET /api/channels-change?site=com&start=&end=[&yoy_start=&yoy_end=][&prev_start=&prev_end=]
 // Section 4 (Marketing & Sales Channel Performance) YoY / MoM (QoQ) for
