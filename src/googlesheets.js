@@ -1107,7 +1107,14 @@ async function fetchPnlSheetGoals(site) {
     const pc = at(costRows, 'Product Cost');
     if (pc !== null) other_costs['Product Cost'] = pc;
 
-    out.months[mon] = { kpis, channels, other_costs, organic_row_broken: organicBroken || undefined };
+    // This month's Gross Sales ACTUAL (the block's 3rd column). Section 4
+    // compares it with Shopify's gross so far to tell how many days the
+    // sheet's month-to-date figures cover (the "Date Updated" cell isn't
+    // always moved when the figures are refreshed — 13 Oct 2026 it said
+    // 7.10 while the figures ran through the 12th/13th).
+    const gIdx = topRows.get('Gross Sales');
+    const grossActual = gIdx === undefined ? null : parseNum(rows[gIdx] ? rows[gIdx][col + 2] : undefined);
+    out.months[mon] = { kpis, channels, other_costs, gross_actual: grossActual, organic_row_broken: organicBroken || undefined };
   }
   goalsCache.set(site, { at: Date.now(), value: out });
   return out;
