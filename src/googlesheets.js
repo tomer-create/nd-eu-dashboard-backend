@@ -282,14 +282,20 @@ const CHANNEL_ROWS = [
   // so giving IL the same cost source here would double-count it. ND.EU
   // doesn't track a TikTok Affiliate commission at all and hides this
   // channel from Section 4 entirely, so it's unaffected either way.
+  // Split into two rows 2026-10-13 per Tomer ("there is no more TikTok
+  // Affiliates + Organic, instead there is 2 fields TikTok Affiliates and
+  // TikTok Organic") -- the sheet has both rows for every 2026 month. The
+  // TikTok Affiliate commission is TikTok Affiliates' spend on ND.COM only:
+  // ND.IL keeps its own 'Commision' line in Section 7 (see OTHER_COST_ROWS.il),
+  // so giving IL the same cost here would double-count it; ND.EU has no
+  // TikTok affiliate program.
   {
-    sheetLabel: 'TikTok Organic + Affiliates',
-    // Since Oct 2026 the sheet splits this into two rows; their sum is used.
-    sumSheetLabels: ['TikTok Affiliates', 'TikTok Organic'],
-    dashboardLabel: 'TikTok Affiliates + Organic',
+    sheetLabel: 'TikTok Affiliates',
+    dashboardLabel: 'TikTok Affiliates',
     hasCost: ['com'],
     costSheetLabel: ['TIkTok Affiliate Commision', 'Commision'],
   },
+  { sheetLabel: 'TikTok Organic', dashboardLabel: 'TikTok Organic', hasCost: false },
   { sheetLabel: 'Organic Revenue (P.N)', dashboardLabel: 'Organic', hasCost: false },
   // Added 2026-09-03 — see the COLLABS ADDED note in the file header above.
   { sheetLabel: 'Collabs', dashboardLabel: 'Collabs Affiliate', hasCost: true },
@@ -998,7 +1004,8 @@ const GOAL_CHANNELS = [
   { label: 'Snapchat', rev: ['Snapchet Ads', 'Snapchat Ads'], cost: ['Snapchat Ads'] },
   { label: 'Microsoft Ads', rev: ['Microsoft Ads'], cost: ['Microsoft Ads'], organicGuard: true },
   { label: 'Organic', rev: ['Organic Revenue (P.N)'], spendZero: true, organicGuard: true },
-  { label: 'TikTok Affiliates + Organic', rev: ['TikTok Organic + Affiliates'], revSum: ['TikTok Affiliates', 'TikTok Organic'], cost: ['TIkTok Affiliate Commision', 'Commision'], costSites: ['com'] },
+  { label: 'TikTok Affiliates', rev: ['TikTok Affiliates'], cost: ['TIkTok Affiliate Commision', 'Commision'], costSites: ['com'] },
+  { label: 'TikTok Organic', rev: ['TikTok Organic'], spendZero: true },
 ];
 const REVENUE_GOAL_HOLD = [];
 const GOAL_MONTHS = ['Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun', 'Jul', 'Aug', 'Sep', 'Oct', 'Nov', 'Dec'];
