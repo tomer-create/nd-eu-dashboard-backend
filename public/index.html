@@ -4303,6 +4303,71 @@ applyMobileTableLabels(document.querySelector('.wrap'));
 // this initial auto-sync is already safely a no-op — no separate lock needed.
 performSync().finally(autoFillClosedMonths);
 
+// Goals live from the P&L sheet — added 2026-10-12 (Tomer: "the goal October
+// on the ND.COM is wrong"; he chose to read goals live). The goals built
+// into DATA are a copy taken when this file was built; the sheet's Goal
+// columns have changed since (e.g. COM Oct Gross Sales 844,026 -> 1,200,000).
+// On load, /api/pnl-goals returns every 2026 month's goals per site and they
+// replace the built-in ones: Goal Tracker KPIs, Section 4 channel spend /
+// revenue goals and Other Costs. Everything derived (quarters, YTD, All
+// Sites, % of goal) is computed from these monthly figures, so it follows
+// automatically. A goal the sheet doesn't have keeps its built-in value, and
+// if the sheet can't be read the dashboard simply keeps the built-in goals.
+const pnlGoalsLoaded = {};
+function applyPnlGoals(site, payload) {
+  Object.entries((payload && payload.months) || {}).forEach(([mon, g]) => {
+    const md = DATA.sites[site] && DATA.sites[site].months[mon];
+    if (!md || !g) return;
+    (md.kpis || []).forEach(k => {
+      if (!g.kpis || !(k.label in g.kpis)) return;
+      k.goal = g.kpis[k.label];
+      const hasActual = !k.no_data && typeof k.actual === 'number';
+      k.pct_of_goal = hasActual && k.goal ? k.actual / k.goal : null;
+    });
+    (md.channels || []).forEach(c => {
+      const x = g.channels && g.channels[c.label];
+      if (!x || c.no_data) return;
+      if ('spend_goal' in x) c.spend_goal = x.spend_goal;
+      if ('revenue_goal' in x) c.revenue_goal = x.revenue_goal;
+    });
+    if (g.other_costs && md.other_costs) {
+      let touched = false;
+      md.other_costs.forEach(o => {
+        let v = g.other_costs[o.label];
+        if (o.label === 'PR Box Cost + Product Cost' && ('PR Box Cost' in g.other_costs || 'Product Cost' in g.other_costs)) {
+          v = (g.other_costs['PR Box Cost'] || 0) + (g.other_costs['Product Cost'] || 0);
+        }
+        if (v !== undefined) { o.goal = v; touched = true; }
+      });
+      if (touched) md.total_other_costs_goal = md.other_costs.reduce((t, o) => t + (o.goal || 0), 0);
+    }
+    // Blended ROAS goal on the same basis the quarter / YTD / All Sites
+    // combine uses: gross sales goal ÷ (channel spend goals + PPC Agency Fee
+    // goal), so a month and its quarter agree.
+    const roasK = (md.kpis || []).find(k => k.label === 'Blended ROAS');
+    const grossK = (md.kpis || []).find(k => k.label === 'Gross Sales');
+    if (roasK && grossK && grossK.goal) {
+      const ppc = (md.other_costs || []).find(o => o.label === 'PPC Agency Fee');
+      const spendGoal = (md.channels || []).reduce((t, c) => t + (c.spend_goal || 0), 0) + ((ppc && ppc.goal) || 0);
+      if (spendGoal) {
+        roasK.goal = grossK.goal / spendGoal;
+        roasK.pct_of_goal = !roasK.no_data && typeof roasK.actual === 'number' ? roasK.actual / roasK.goal : null;
+      }
+    }
+  });
+}
+function loadPnlGoals() {
+  return Promise.allSettled(Object.keys(DATA.sites).map(site =>
+    fetch(`${BACKEND_URL}/api/pnl-goals?site=${site}`)
+      .then(r => r.ok ? r.json() : Promise.reject(new Error('HTTP ' + r.status)))
+      .then(payload => { applyPnlGoals(site, payload); pnlGoalsLoaded[site] = payload.fetched_at || true; })
+  )).then(results => {
+    results.forEach((r, i) => { if (r.status === 'rejected') console.warn('P&L goals not loaded for', Object.keys(DATA.sites)[i], r.reason && r.reason.message); });
+    if (Object.keys(pnlGoalsLoaded).length) render();
+  });
+}
+loadPnlGoals();
+
 // Closed-month auto-fill — added 2026-10-04 (Tomer: "let's build a solution
 // for this" — every month that just ended was left as an empty placeholder
 // in the embedded snapshot, so it showed no results and dropped out of the
