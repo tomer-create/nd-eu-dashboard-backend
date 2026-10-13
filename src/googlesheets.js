@@ -1012,6 +1012,20 @@ const GOAL_MONTHS = ['Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun', 'Jul', 'Aug', 'Se
 const goalsCache = new Map(); // site -> { at, value }
 const GOALS_TTL_MS = 5 * 60 * 1000;
 
+// The tab's "Date Updated:" cell (B2, e.g. "7.10.2026" = 7 Oct 2026, day
+// first) as YYYY-MM-DD, or null. The month-to-date actuals run from the 1st
+// through this day, so Section 4 uses it to compare the month in progress
+// with last month per day (added 2026-10-13).
+function sheetUpdatedDate(rows) {
+  const r = rows[1] || [];
+  const raw = String((r[1] || '') || (r[2] || '')).trim();
+  const m = raw.match(/^(\d{1,2})[./-](\d{1,2})[./-](\d{2}|\d{4})$/);
+  if (!m) return null;
+  const d = Number(m[1]), mo = Number(m[2]), y = m[3].length === 2 ? 2000 + Number(m[3]) : Number(m[3]);
+  if (mo < 1 || mo > 12 || d < 1 || d > 31) return null;
+  return `${y}-${String(mo).padStart(2, '0')}-${String(d).padStart(2, '0')}`;
+}
+
 async function fetchPnlSheetGoals(site) {
   if (!TAB_GID[site]) return null;
   const hit = goalsCache.get(site);
@@ -1028,7 +1042,7 @@ async function fetchPnlSheetGoals(site) {
     if (v && topRows.get(v) === undefined) topRows.set(v, i);
   }
   const header = rows[1] || [];
-  const out = { site, months: {}, fetched_at: new Date().toISOString() };
+  const out = { site, months: {}, fetched_at: new Date().toISOString(), updated: sheetUpdatedDate(rows) };
   for (const mon of GOAL_MONTHS) {
     const col = header.findIndex((v) => (v || '').trim() === `${mon}-26`);
     if (col === -1) continue;
