@@ -2739,18 +2739,23 @@ function chPrevMonthData() { return chMonthDataFor(chPrevPeriod()); }
 // Month in progress, P&L-sheet channels (added 2026-10-13, Tomer: "there is
 // no MOM or YOY, add it"). The sheet holds one month-to-date figure per
 // month, so the same days of last month aren't available. Instead the MoM
-// compares per day: this month's figure ÷ the days the sheet covers (1st
-// through its "Date Updated" day) against last month's full figure ÷ its
-// days. ROAS is a ratio, so it compares as is. null when the sheet's update
-// date isn't known (or differs between sites in All Sites).
-const pnlSheetUpdated = {}; // site -> 'YYYY-MM-DD' from /api/pnl-goals
+// compares per day: this month's figure ÷ the days it covers against last
+// month's full figure ÷ its days. ROAS is a ratio, so it compares as is.
+// Days covered: the sheet's own October Gross Sales actual as a share of
+// Shopify's gross so far, × the days elapsed — the sheet's "Date Updated"
+// cell isn't reliable (13 Oct it said 7.10 while the figures ran through
+// the 12th/13th). null when either gross is missing, or in All Sites when
+// the sites' sheets cover clearly different spans.
+const pnlSheetGross = {}; // site -> { Mon: sheet Gross Sales actual } from /api/pnl-goals
 function daysInMonthKey(key) { return new Date(Date.UTC(2026, MONTH_INDEX[key] + 1, 0)).getUTCDate(); }
-function sheetDaysCovered(site, key) {
-  const u = pnlSheetUpdated[site];
-  if (!u) return null;
-  const y = Number(u.slice(0, 4)), mo = Number(u.slice(5, 7)) - 1, d = Number(u.slice(8, 10));
-  if (y !== 2026 || mo !== MONTH_INDEX[key]) return null;
-  return Math.min(d, daysInMonthKey(key));
+function sheetDaysCovered(site, key, elapsed) {
+  const sg = pnlSheetGross[site] && pnlSheetGross[site][key];
+  // Only once this month's live figures are in (before the first Sync the
+  // month's channels are empty placeholders, which would read as −100%).
+  if (!sg || !liveCache[site + '|' + key]) return null;
+  const g = (getSingleSiteMonthData(site, key).kpis || []).find(k => k.label === 'Gross Sales');
+  if (!g || g.no_data || !g.actual) return null;
+  return { days: Math.max(1, Math.min(elapsed, elapsed * sg / g.actual)), share: sg / g.actual };
 }
 function c4PaceInfo() {
   const m = state.month;
@@ -2758,13 +2763,15 @@ function c4PaceInfo() {
   const list = DATA.meta.months_available, i = list.indexOf(m);
   const prevKey = i > 0 ? list[i - 1] : null;
   if (!prevKey) return null;
+  const r = usStatesRanges().cur;
+  const elapsed = Math.round((new Date(r.end + 'T00:00:00Z') - new Date(r.start + 'T00:00:00Z')) / 86400000);
   const sites = state.site === 'all' ? Object.keys(DATA.sites) : [state.site];
-  // Only once this month's live figures are in (before the first Sync the
-  // month's channels are empty placeholders, which would read as −100%).
-  if (sites.some(s => !liveCache[s + '|' + m])) return null;
-  const days = sites.map(s => sheetDaysCovered(s, m));
-  if (days.some(d => !d) || new Set(days).size !== 1) return null;
-  return { prevKey, curDays: days[0], prevDays: daysInMonthKey(prevKey), updated: pnlSheetUpdated[sites[0]] };
+  const cov = sites.map(s => sheetDaysCovered(s, m, elapsed));
+  if (cov.some(c => !c)) return null;
+  const ds = cov.map(c => c.days);
+  if (Math.max(...ds) - Math.min(...ds) > 1.5) return null;
+  const curDays = ds.reduce((a, b) => a + b, 0) / ds.length;
+  return { prevKey, curDays, elapsed, share: cov.reduce((a, c) => a + c.share, 0) / cov.length, prevDays: daysInMonthKey(prevKey) };
 }
 function channelsChangeData() {
   const r = usStatesRanges();
@@ -2897,7 +2904,7 @@ function renderChannels(monthData) {
   const paceMd = pace ? chMonthDataFor(pace.prevKey) : null;
   const paceByLabel = paceMd && paceMd.channels ? Object.fromEntries(paceMd.channels.filter(x => !x.no_data).map(x => [x.label, x])) : {};
   const prevName = pace ? (DATA.meta.month_full_names[pace.prevKey] || pace.prevKey) : '';
-  const paceTitle = pace ? `Per day: ${c4RangeText({ start: ranges.cur.start, end: new Date(Date.UTC(2026, MONTH_INDEX[state.month], pace.curDays + 1)).toISOString().slice(0, 10) })} (the P&amp;L sheet’s figures so far, updated ${pace.updated}) vs all of ${prevName} — ${pace.curDays} vs ${pace.prevDays} days` : '';
+  const paceTitle = pace ? `Per day: this month’s P&amp;L-sheet figure over the ~${pace.curDays.toFixed(1)} days it covers (the sheet’s Gross Sales is ${Math.round(pace.share * 100)}% of Shopify’s for the ${pace.elapsed} days so far) vs all of ${prevName} over ${pace.prevDays} days` : '';
   // Per-row changes: Triple Whale channels from /api/channels-change, P&L
   // sheet channels MoM/QoQ from the previous closed period's own figures
   // (or per day for the month in progress).
@@ -2966,12 +2973,12 @@ function renderChannels(monthData) {
     if (ch.tw || ch.total) return 'No figures for this channel in the previous ' + periodWord;
     if (isCurMonth && !pace) return (state.site === 'all' ? Object.keys(DATA.sites) : [state.site]).some(s => !liveCache[s + '|' + state.month])
       ? 'This month’s figures haven’t loaded yet — click Sync'
-      : 'The P&L sheet’s “Date Updated” day couldn’t be read' + (state.site === 'all' ? ' (or differs between sites)' : '') + ', so this month can’t be compared per day yet';
+      : 'The P&L sheet’s Gross Sales for this month isn’t available' + (state.site === 'all' ? ' (or the sites’ sheets cover different days)' : '') + ', so this month can’t be compared per day yet';
     return 'No figures for this channel in the previous ' + periodWord;
   };
   const chip = (ch, key, kind) => {
     if (ch.loading) return c4Chips(c4Chip(null, kind, true), c4Chip(null, kind, true));
-    const paceNote = ch.pace && ch.pace[key] ? (ch.pace[key] === 'ratio' ? `This month so far (P&amp;L sheet, updated ${pace.updated}) vs all of ${prevName}` : paceTitle) : null;
+    const paceNote = ch.pace && ch.pace[key] ? (ch.pace[key] === 'ratio' ? `This month so far (P&amp;L sheet) vs all of ${prevName}` : paceTitle) : null;
     return c4Chips(c4Chip(ch[key][0], kind, false, whyBlank(ch, 'yoy')), c4Chip(ch[key][1], kind, false, whyBlank(ch, 'mom'), paceNote));
   };
   const sourceTag = (c, ch) => {
@@ -3092,7 +3099,7 @@ function renderChannels(monthData) {
       <li><b>ROAS</b> — revenue ÷ spend: how much revenue each ${sym()}1 of spend brought back.</li>
       <li><b>Avg order</b> — channel revenue ÷ the orders attributed to it (Triple Whale Pixel orders, or the channel’s own reported conversions for Channel-CV channels). <b>Collabs Affiliate</b>: Shopify has no “Collabs order” flag, so its Avg order uses the orders that used a Collabs creator code — their sales after discount ÷ their number. The Collabs app’s revenue also includes link-only orders without a code, so those orders aren’t in this figure.</li>
       <li><b>Share of sales</b> — the channel’s revenue as a share of total gross sales. The bar is scaled to the biggest channel.</li>
-      <li><b>YoY and ${momLabel()}</b> — Triple Whale channels compare the same dates last year and ${prevAvailable ? 'in the previous ' + periodWord : '(no previous period here)'}. Channels from the P&amp;L sheet (Organic, TikTok Affiliates, TikTok Organic, Collabs, Attentive…) have no YoY: the sheet’s 2025 columns only hold Gross and Net Sales, not channels. Their ${momLabel()} compares the previous closed ${periodWord} on this dashboard${isCurMonth ? `; for the month in progress the sheet has one month-to-date figure, so it compares per day — this month’s figure ÷ the days it covers (1st to the sheet’s “Date Updated” day${pace ? ', ' + pace.updated + ' — ' + pace.curDays + ' days' : ''}) against last month’s full figure ÷ its days (ROAS as is). Those chips have a dotted underline; hover one for details` : ''}. The Total’s changes and Avg order cover the Triple Whale channels. Spend changes are grey — more spend isn’t good or bad by itself. Hover a “—” to see why it’s blank.</li>
+      <li><b>YoY and ${momLabel()}</b> — Triple Whale channels compare the same dates last year and ${prevAvailable ? 'in the previous ' + periodWord : '(no previous period here)'}. Channels from the P&amp;L sheet (Organic, TikTok Affiliates, TikTok Organic, Collabs, Attentive…) have no YoY: the sheet’s 2025 columns only hold Gross and Net Sales, not channels. Their ${momLabel()} compares the previous closed ${periodWord} on this dashboard${isCurMonth ? `; for the month in progress the sheet has one month-to-date figure, so it compares per day — this month’s figure ÷ the days it covers against last month’s full figure ÷ its days (ROAS as is). The days covered come from the sheet’s own Gross Sales as a share of Shopify’s so far${pace ? ` (${Math.round(pace.share * 100)}% of ${pace.elapsed} days ≈ ${pace.curDays.toFixed(1)} days)` : ''}. Those chips have a dotted underline; hover one for details` : ''}. The Total’s changes and Avg order cover the Triple Whale channels. Spend changes are grey — more spend isn’t good or bad by itself. Hover a “—” to see why it’s blank.</li>
       ${attNote}
       ${monthData.channels_note ? `<li><b>Sources</b> — ${monthData.channels_note}</li>` : ''}
       ${chg && chg.partial ? '<li>Some sites’ Triple Whale data didn’t load, so the changes cover the rest.</li>' : ''}
@@ -4434,7 +4441,7 @@ function loadPnlGoals() {
   return Promise.allSettled(Object.keys(DATA.sites).map(site =>
     fetch(`${BACKEND_URL}/api/pnl-goals?site=${site}`)
       .then(r => r.ok ? r.json() : Promise.reject(new Error('HTTP ' + r.status)))
-      .then(payload => { applyPnlGoals(site, payload); pnlGoalsLoaded[site] = payload.fetched_at || true; if (payload.updated) pnlSheetUpdated[site] = payload.updated; })
+      .then(payload => { applyPnlGoals(site, payload); pnlGoalsLoaded[site] = payload.fetched_at || true; Object.entries(payload.months || {}).forEach(([mon, g]) => { if (g && g.gross_actual) (pnlSheetGross[site] = pnlSheetGross[site] || {})[mon] = g.gross_actual; }); })
   )).then(results => {
     results.forEach((r, i) => { if (r.status === 'rejected') console.warn('P&L goals not loaded for', Object.keys(DATA.sites)[i], r.reason && r.reason.message); });
     if (Object.keys(pnlGoalsLoaded).length) render();
