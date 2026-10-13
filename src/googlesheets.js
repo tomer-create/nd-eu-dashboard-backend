@@ -270,7 +270,7 @@ const CHANNEL_ROWS = [
     hasCost: true,
   },
   { sheetLabel: 'Microsoft Ads', dashboardLabel: 'Microsoft Ads', hasCost: true },
-  { sheetLabel: 'Pinterest', dashboardLabel: 'Pinterest', hasCost: true },
+  { sheetLabel: ['Pinterest Ads', 'Pinterest'], dashboardLabel: 'Pinterest', hasCost: true },
   // TikTok Organic + Affiliates has no matching Cost-section row of its own
   // (organic has no ad spend) -- per Tomer's request 2026-09-09, ND.COM now
   // sources this channel's "spend" from the TikTok Affiliate program's
@@ -284,9 +284,11 @@ const CHANNEL_ROWS = [
   // channel from Section 4 entirely, so it's unaffected either way.
   {
     sheetLabel: 'TikTok Organic + Affiliates',
+    // Since Oct 2026 the sheet splits this into two rows; their sum is used.
+    sumSheetLabels: ['TikTok Affiliates', 'TikTok Organic'],
     dashboardLabel: 'TikTok Affiliates + Organic',
     hasCost: ['com'],
-    costSheetLabel: 'Commision',
+    costSheetLabel: ['TIkTok Affiliate Commision', 'Commision'],
   },
   { sheetLabel: 'Organic Revenue (P.N)', dashboardLabel: 'Organic', hasCost: false },
   // Added 2026-09-03 — see the COLLABS ADDED note in the file header above.
@@ -487,6 +489,33 @@ function looksLikeCsv(text) {
 // (Pinterest, Microsoft Ads) were inserted into this exact section between
 // when this integration was scoped and when it was built, which is exactly
 // the kind of drift a hardcoded row number silently breaks on.
+// Row-label lookup that tolerates the sheet's label edits (added
+// 2026-10-12): case- and spacing-insensitive, takes one label or a list of
+// labels to try in order, and knows the renames made in the sheet in
+// October 2026 (e.g. "Commision" became "TIkTok Affiliate Commision",
+// "Pinterest" became "Pinterest Ads", COM's "PR Box cost" became
+// "PR Box cost + product cost"). Last occurrence of a label in a section
+// wins, as before.
+const normLabel = (v) => String(v == null ? '' : v).toLowerCase().replace(/\s+/g, ' ').trim();
+const LABEL_ALIASES = {
+  'commision': ['tiktok affiliate commision', 'tiktok affiliate commission'],
+  'pinterest': ['pinterest ads'],
+  'pr box cost': ['pr box cost + product cost'],
+};
+class LabelRows {
+  constructor() { this.m = new Map(); }
+  get size() { return this.m.size; }
+  set(label, i) { this.m.set(normLabel(label), i); return this; }
+  get(labels) {
+    for (const l of (Array.isArray(labels) ? labels : [labels])) {
+      const k = normLabel(l);
+      if (this.m.has(k)) return this.m.get(k);
+      for (const a of LABEL_ALIASES[k] || []) if (this.m.has(a)) return this.m.get(a);
+    }
+    return undefined;
+  }
+}
+
 function findRevenueAndCostRows(rows) {
   const colD = (i) => (rows[i] && rows[i][3] != null ? rows[i][3].trim() : '');
   let revStart = -1;
@@ -499,7 +528,7 @@ function findRevenueAndCostRows(rows) {
     if (costStart === -1 && v === 'Cost' && i > Math.max(revEnd, 0)) costStart = i;
   }
 
-  const revenueRows = new Map();
+  const revenueRows = new LabelRows();
   if (revStart !== -1 && revEnd !== -1) {
     for (let i = revStart + 1; i < revEnd; i++) {
       const v = colD(i);
@@ -507,7 +536,7 @@ function findRevenueAndCostRows(rows) {
     }
   }
 
-  const costRows = new Map();
+  const costRows = new LabelRows();
   if (costStart !== -1) {
     const costEnd = Math.min(rows.length, costStart + 60);
     for (let i = costStart + 1; i < costEnd; i++) {
@@ -516,7 +545,7 @@ function findRevenueAndCostRows(rows) {
     }
   }
 
-  return { revenueRows, costRows };
+  return { revenueRows, costRows, revStart };
 }
 
 // Parses a P&L sheet cell's displayed text into a number, or null if it's
@@ -604,6 +633,22 @@ function findActualColIdx(rows, start, site) {
 // covered yet, the sheet isn't shared as "Anyone with the link" yet, the
 // month/rows couldn't be located, or the request failed (logged, never
 // thrown).
+// A channel's revenue cell: its own row, or (when the sheet splits a
+// channel across rows, see sumSheetLabels) the sum of those rows. null when
+// nothing usable is there.
+function channelRevenueCell(entry, revenueRows, cellAt) {
+  const rIdx = revenueRows.get(entry.sheetLabel);
+  if (rIdx !== undefined) return parseNum(cellAt(rIdx));
+  if (!entry.sumSheetLabels) return null;
+  let total = null;
+  for (const l of entry.sumSheetLabels) {
+    const i = revenueRows.get(l);
+    const v = i !== undefined ? parseNum(cellAt(i)) : null;
+    if (v !== null) total = (total || 0) + v;
+  }
+  return total;
+}
+
 async function fetchPnlSheetChannels(site, start) {
   // ND.IL added 2026-09-08 -- see the "IL ADDED" note above. ND.EU added
   // 2026-09-09 per Tomer's request to remove Collabs/SMS Jurney/SMS
@@ -645,9 +690,7 @@ async function fetchPnlSheetChannels(site, start) {
   const cellAt = (rowIdx) => (rows[rowIdx] ? rows[rowIdx][actualColIdx] : undefined);
 
   return CHANNEL_ROWS.map((entry) => {
-    const rIdx = revenueRows.get(entry.sheetLabel);
-    if (rIdx === undefined) return { label: entry.dashboardLabel, no_data: true };
-    const revenue = parseNum(cellAt(rIdx));
+    const revenue = channelRevenueCell(entry, revenueRows, cellAt);
     if (revenue === null) return { label: entry.dashboardLabel, no_data: true };
 
     // hasCost may be `true` (applies to every site this entry is reached
@@ -922,12 +965,140 @@ async function fetchPnlSheetMarketingSpend(site, start) {
   };
 }
 
+// ---------------------------------------------------------------------------
+// GOALS, live from the sheet (added 2026-10-12 per Tomer: "the goal October
+// on the ND.COM is wrong" -> he chose to read goals live). Until now every
+// goal on the dashboard was copied into index.html when it was built, so
+// any later change to a Goal cell in the sheet never showed up (Oct COM
+// Gross Sales goal: dashboard 844,026 vs sheet 1,200,000).
+//
+// Reads the "Goal" column (first column of each month's Goal / Sales % /
+// Actual / G vs A block) for every 2026 month of one site's tab and returns
+// the goals already keyed the way the dashboard uses them:
+//   { site, months: { Oct: { kpis: { 'Gross Sales': n, ... },
+//                            channels: { 'Google Ads': { spend_goal, revenue_goal }, ... },
+//                            other_costs: { 'Boxes': n, ... } }, ... } }
+// A goal the sheet doesn't have (row missing / blank) is simply left out,
+// and the dashboard keeps its built-in value for it.
+const GOAL_CHANNELS = [
+  { label: 'Google Ads', rev: ['Google Revenue'], cost: ['Google Ads'] },
+  { label: 'Meta Ads', rev: ['Meta Revenue'], cost: ['Meta ads'] },
+  { label: 'TikTok Ads', rev: ['TikTok Ads'], cost: ['TikTok Shop Ads'] },
+  { label: 'Criteo', rev: ['Criteo'], cost: ['Criteo Ads'] },
+  { label: 'Shop App', rev: ['Shop'], cost: ['Shop PPC'] },
+  // impact.com spend goal: affiliate fees; on EU / IL the dashboard has always
+  // included Impact TBU too (COM shows Impact TBU as its own Other Costs line).
+  { label: 'impact.com', rev: ['Impact'], cost: ['Impact Affiliate fees'], costPlus: { eu: ['Impact TBU'], il: ['Impact TBU'] } },
+  { label: 'Collabs Affiliate', rev: ['Collabs'], cost: ['Collabs'] },
+  { label: 'Attentive - SMS Journey', rev: ['SMS Jurney'], cost: ['SMS Jurney'] },
+  { label: 'Attentive - SMS Campaign', rev: ['SMS Campaign'], cost: ['SMS Campaign'] },
+  { label: 'Attentive - Email Journey', rev: ['Email Jurney'], cost: ['Email Jurney'] },
+  { label: 'Attentive - Email Campaign (Newsletter)', rev: ['Email Campaign - Newsletter'], cost: ['Email Campaign - Newsletter'] },
+  { label: 'Pinterest', rev: ['Pinterest Ads', 'Pinterest'], cost: ['Pinterest Ads'] },
+  { label: 'Snapchat', rev: ['Snapchet Ads', 'Snapchat Ads'], cost: ['Snapchat Ads'] },
+  { label: 'Microsoft Ads', rev: ['Microsoft Ads'], cost: ['Microsoft Ads'], organicGuard: true },
+  { label: 'Organic', rev: ['Organic Revenue (P.N)'], spendZero: true, organicGuard: true },
+  { label: 'TikTok Affiliates + Organic', rev: ['TikTok Organic + Affiliates'], revSum: ['TikTok Affiliates', 'TikTok Organic'], cost: ['TIkTok Affiliate Commision', 'Commision'], costSites: ['com'] },
+];
+const REVENUE_GOAL_HOLD = [];
+const GOAL_MONTHS = ['Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun', 'Jul', 'Aug', 'Sep', 'Oct', 'Nov', 'Dec'];
+const goalsCache = new Map(); // site -> { at, value }
+const GOALS_TTL_MS = 5 * 60 * 1000;
+
+async function fetchPnlSheetGoals(site) {
+  if (!TAB_GID[site]) return null;
+  const hit = goalsCache.get(site);
+  if (hit && Date.now() - hit.at < GOALS_TTL_MS) return hit.value;
+  const rows = await fetchSheetRows(site);
+  if (!rows) return hit ? hit.value : null; // keep serving the last good copy
+
+  const { revenueRows, costRows, revStart } = findRevenueAndCostRows(rows);
+  // Top-of-sheet KPI rows (above "Revenue Breakdown") and the bottom
+  // Total Cost / Profit rows.
+  const topRows = new LabelRows();
+  for (let i = 0; i < (revStart === -1 ? rows.length : revStart); i++) {
+    const v = rows[i] && rows[i][3] != null ? rows[i][3].trim() : '';
+    if (v && topRows.get(v) === undefined) topRows.set(v, i);
+  }
+  const header = rows[1] || [];
+  const out = { site, months: {}, fetched_at: new Date().toISOString() };
+  for (const mon of GOAL_MONTHS) {
+    const col = header.findIndex((v) => (v || '').trim() === `${mon}-26`);
+    if (col === -1) continue;
+    const at = (map, labels) => { const i = map.get(labels); return i === undefined ? null : parseNum(rows[i] ? rows[i][col] : undefined); };
+    const sumRows = (map, labels) => { let t = null; for (const l of labels) { const v = at(map, l); if (v !== null) t = (t || 0) + v; } return t; };
+
+    const gross = at(topRows, 'Gross Sales');
+    const ret = at(topRows, 'Returns');
+    const disc = at(topRows, 'Discounts');
+    const kpis = {};
+    const put = (k, v) => { if (v !== null && v !== undefined && Number.isFinite(v)) kpis[k] = v; };
+    put('Gross Sales', gross);
+    put('Net Sales', at(topRows, 'Net Sales'));
+    put('Discounts', disc === null ? null : Math.abs(disc));
+    put('% Discount Ratio', disc !== null && gross ? Math.abs(disc) / gross : null);
+    put('Returns', ret === null ? null : Math.abs(ret));
+    put('% Returns Ratio', ret !== null && gross ? Math.abs(ret) / gross : null);
+    put('COGS', at(costRows, 'Product Cost'));
+    put('AOV', at(topRows, 'Avg. Cart Value'));
+    put('Number of Orders', at(topRows, 'Orders'));
+    put('Profit', at(costRows, 'Profit'));
+    put('Profit Margin', at(costRows, 'Profit Margin'));
+    // Blended ROAS goal: gross sales goal ÷ the same marketing-cost rows the
+    // dashboard's Blended ROAS actual uses (MARKETING_COST_ROWS).
+    const mkt = sumRows(costRows, MARKETING_COST_ROWS);
+    put('Blended ROAS', gross && mkt ? gross / mkt : null);
+
+    // When the "Organic Revenue (P.N)" row is empty for this month while the
+    // gross goal isn't, the sheet's Organic plug formula has moved into
+    // another row (COM, Oct 2026: it sits in the row labelled "Microsoft
+    // Ads"), so neither row can be trusted -> both are left out.
+    // Safety net (2026-10-12): on 12 Oct the COM Organic plug formula had
+    // moved into the row labelled "Microsoft Ads" and "Organic Revenue (P.N)"
+    // was empty — Tomer fixed the sheet on 13 Oct. If a month's Organic row is
+    // ever empty again while the gross goal isn't, both revenue goals keep the
+    // dashboard's built-in values for that month. REVENUE_GOAL_HOLD can hold
+    // a site code to force that for a whole site.
+    const organicBroken = REVENUE_GOAL_HOLD.includes(site) || (gross !== null && at(revenueRows, 'Organic Revenue (P.N)') === null);
+    const channels = {};
+    for (const c of GOAL_CHANNELS) {
+      const g = {};
+      if (!(c.organicGuard && organicBroken)) {
+        let rev = at(revenueRows, c.rev);
+        if (rev === null && c.revSum) rev = sumRows(revenueRows, c.revSum);
+        if (rev !== null) g.revenue_goal = rev;
+      }
+      if (c.spendZero) g.spend_goal = 0;
+      else if (c.cost && (!c.costSites || c.costSites.includes(site))) {
+        let sp = at(costRows, c.cost);
+        const plus = c.costPlus && c.costPlus[site] ? sumRows(costRows, c.costPlus[site]) : null;
+        if (plus !== null) sp = (sp || 0) + plus;
+        if (sp !== null) g.spend_goal = sp;
+      }
+      if (Object.keys(g).length) channels[c.label] = g;
+    }
+
+    const other_costs = {};
+    for (const e of OTHER_COST_ROWS[site] || []) {
+      const v = at(costRows, e.sheetLabel);
+      if (v !== null) other_costs[e.dashboardLabel] = v;
+    }
+    const pc = at(costRows, 'Product Cost');
+    if (pc !== null) other_costs['Product Cost'] = pc;
+
+    out.months[mon] = { kpis, channels, other_costs, organic_row_broken: organicBroken || undefined };
+  }
+  goalsCache.set(site, { at: Date.now(), value: out });
+  return out;
+}
+
 module.exports = {
   fetchPnlSheetChannels,
   fetchPnlSheetOtherCosts,
   fetchPnlSheetTotalCost,
   fetchPnlSheetMarketingSpend,
   fetchPnlSheetShopPpc,
+  fetchPnlSheetGoals,
   CHANNEL_ROWS,
   OTHER_COST_ROWS,
   MARKETING_COST_ROWS,
