@@ -2192,7 +2192,7 @@ function renderKPIs(monthData) {
 // TikTok Shop orders also sync into Shopify, so they're already inside
 // ND.COM's Gross Sales — this section is a breakdown, never added to totals.
 const TT_SUM_KEYS = ['orders', 'gross_sales', 'sales', 'net_sales', 'refunds', 'discounts', 'product_discounts', 'taxes', 'shipping', 'units', 'new_customer_orders', 'cogs', 'ads_spend', 'ads_revenue', 'affiliate_organic_revenue'];
-const TT_CHANGE_KEYS = ['gross_sales', 'net_sales', 'orders', 'units', 'refunds', 'discounts', 'product_discounts', 'ads_spend', 'ads_revenue', 'affiliate_organic_revenue', 'new_customer_orders'];
+const TT_CHANGE_KEYS = ['gross_sales', 'net_sales', 'orders', 'units', 'refunds', 'discounts', 'product_discounts', 'shipping', 'ads_spend', 'ads_revenue', 'affiliate_organic_revenue', 'new_customer_orders'];
 // Net Sales definition (2026-10-08, Tomer chose the dashboard definition):
 // GMV − all discounts − refunds, no tax or shipping — same as Net Sales
 // elsewhere on this dashboard. Payloads from before the backend change (a
@@ -2328,14 +2328,61 @@ function renderTikTokShop(monthData) {
   const discRatio = tt.gross_sales && hasProdDisc ? prodDisc / tt.gross_sales : null;
   const discRatioYoy = tt.yoy && hasProdDisc ? ratioChange(prodDisc, tt.gross_sales, tt.yoy.product_discounts, tt.yoy.gross_sales) : null;
   const discRatioMom = tt.mom && hasProdDisc ? ratioChange(prodDisc, tt.gross_sales, tt.mom.product_discounts, tt.mom.gross_sales) : null;
+  // TikTok Shop GMV (2026-10-14, Tomer: "Use from TikTok Shop analytics the
+  // GMV = Price x Items sold + Shipping fees - Seller promotions - Platform
+  // co-funding"). The figure is TikTok's own Shop Performance GMV (Seller
+  // Center analytics, via Windsor — src/windsor-tiktok.js). It was Triple
+  // Whale's gross product sales before discounts ($209.7K vs TikTok's $170.6K
+  // for Oct 1–12). TikTok's analytics run about a day behind and don't go
+  // back before May 2026, so:
+  //   - YoY / MoM come from TikTok's order data in Triple Whale on the same
+  //     formula — gross + shipping − product discounts — for the same days
+  //     (within a few % of TikTok's own GMV month to month);
+  //   - until TikTok's figure has loaded, or for a period it doesn't fully
+  //     cover, the tile shows that order-data figure, labelled as an estimate.
+  const gmvRange = ttPeriodRange();
+  const gmvSC = gmvRange ? ttEnsureSC(gmvRange) : null;
+  const ttProxyGmv = (t) => (t.gross_sales || 0) + (t.shipping || 0) - (t.product_discounts || 0);
+  const proxyNow = ttProxyGmv(tt);
+  const proxyChange = (kind) => {
+    const c = tt[kind];
+    if (!c || !hasProdDiscEarly) return null;
+    const prior = (v, ch) => (v === null || v === undefined) ? null : (ch === null || ch === undefined || (1 + ch) === 0) ? (v ? null : 0) : v / (1 + ch);
+    const pg = prior(tt.gross_sales || 0, c.gross_sales), ppd = prior(tt.product_discounts || 0, c.product_discounts);
+    if (pg === null || ppd === null) return null;
+    let ps = prior(tt.shipping || 0, c.shipping);
+    if (ps === null || c.shipping === undefined) ps = tt.gross_sales ? (tt.shipping || 0) * pg / tt.gross_sales : 0; // shipping change not synced yet: scale with gross
+    const p = pg + ps - ppd;
+    return p > 0 ? (proxyNow - p) / p : null;
+  };
+  const hasProdDiscEarly = tt.product_discounts !== undefined && tt.product_discounts !== null;
+  const gmvInfo = (() => {
+    const d = gmvSC && gmvSC.status === 'ok' ? gmvSC.data : null;
+    const todayIso = new Date().toISOString().slice(0, 10);
+    let covered = false, through = null;
+    if (d && !d.perf_error && d.perf_from === gmvRange.start && d.days_with_data) {
+      const lastIso = gmvRange.end <= todayIso ? gmvRange.end : new Date(Date.parse(todayIso + 'T00:00:00Z') + 86400000).toISOString().slice(0, 10);
+      const expected = Math.round((Date.parse(lastIso + 'T00:00:00Z') - Date.parse(gmvRange.start + 'T00:00:00Z')) / 86400000);
+      covered = !d.perf_partial && d.days_with_data >= expected - 2;
+      // TikTok's analytics run about a day behind: today has no figure yet.
+      if (covered && gmvRange.end > todayIso) through = new Date(Date.parse(todayIso + 'T00:00:00Z') - 86400000).toISOString().slice(0, 10);
+    }
+    const loading = !gmvSC || gmvSC.status === 'loading';
+    const why = loading ? 'loading TikTok’s figure…' : d && d.perf_error ? 'TikTok’s analytics don’t go back to this period' : d && d.perf_from && d.perf_from > gmvRange.start ? 'TikTok’s analytics start ' + c4RangeText({ start: d.perf_from, end: new Date(Date.parse(d.perf_from + 'T00:00:00Z') + 86400000).toISOString().slice(0, 10) }) : 'TikTok’s figure isn’t complete for this period yet';
+    return covered
+      ? { value: d.gmv, orders: d.orders, tiktok: true, note: 'TikTok Shop analytics' + (through ? ' · through ' + c4RangeText({ start: through, end: new Date(Date.parse(through + 'T00:00:00Z') + 86400000).toISOString().slice(0, 10) }) : '') }
+      : { value: hasProdDiscEarly ? proxyNow : null, orders: tt.orders, tiktok: false, note: (hasProdDiscEarly ? '≈ estimate from TikTok order data — ' : '') + why };
+  })();
+  const gmvShown = gmvInfo.value;
+  const gmvTip = 'TikTok Shop GMV = price × items sold + shipping fees − seller promotions − platform co-funding (TikTok Shop analytics). YoY / ' + mLabel + ': same formula on TikTok’s order data (Triple Whale), same days.';
   const tileList = [
-    tile('TikTok Shop GMV', tt.gross_sales, 'currency-full', 'gross_sales', true, 'Gross product sales, before discounts'),
-    tile('Net Sales', tt.net_sales, 'currency-full', 'net_sales', true, 'GMV − discounts − refunds'),
+    tileV('TikTok Shop GMV', gmvShown === null ? '—' : fmtVal(gmvShown, 'currency-full'), proxyChange('yoy'), proxyChange('mom'), true, gmvInfo.note, gmvTip),
+    tile('Net Sales', tt.net_sales, 'currency-full', 'net_sales', true, 'Gross sales − discounts − refunds'),
     tile('Orders', tt.orders, 'number', 'orders', true, tt.orders && tt.units ? (tt.units / tt.orders).toFixed(1) + ' units per order' : ''),
-    tileV('AOV', fmtVal(aov, 'currency'), aovYoy, aovMom, true, tt.orders ? fmtVal(tt.gross_sales / tt.orders, 'currency') + ' GMV per order' : '', 'Average order value: Net Sales ÷ Orders (same basis as the dashboard’s AOV in Key Metrics)'),
+    tileV('AOV', fmtVal(aov, 'currency'), aovYoy, aovMom, true, gmvShown !== null && gmvInfo.orders ? fmtVal(gmvShown / gmvInfo.orders, 'currency') + ' GMV per order' : '', 'Average order value: Net Sales ÷ Orders (same basis as the dashboard’s AOV in Key Metrics)'),
     tile('Units Sold', tt.units, 'number', 'units', true, ''),
-    tile('Refunds', tt.refunds, 'currency-full', 'refunds', false, tt.gross_sales ? fmtVal(tt.refunds / tt.gross_sales, 'percent') + ' of GMV' : ''),
-    tileV('Discount Ratio', fmtVal(discRatio, 'percent'), discRatioYoy, discRatioMom, false, hasProdDisc ? fmtVal(prodDisc, 'currency-full') + ' product discounts ÷ GMV (excl. ' + fmtVal((tt.discounts || 0) - prodDisc, 'currency-full') + ' shipping discounts)' : 'Product discounts not loaded yet — click Sync', 'Product discounts ÷ Gross Sales TikTok (shipping discounts not included)'),
+    tile('Refunds', tt.refunds, 'currency-full', 'refunds', false, gmvShown ? fmtVal(tt.refunds / gmvShown, 'percent') + ' of GMV' : ''),
+    tileV('Discount Ratio', fmtVal(discRatio, 'percent'), discRatioYoy, discRatioMom, false, hasProdDisc ? fmtVal(prodDisc, 'currency-full') + ' product discounts ÷ gross sales before discounts (excl. ' + fmtVal((tt.discounts || 0) - prodDisc, 'currency-full') + ' shipping discounts)' : 'Product discounts not loaded yet — click Sync', 'Product discounts ÷ Gross Sales TikTok (shipping discounts not included)'),
     tile('New-Customer Orders', tt.new_customer_orders, 'number', 'new_customer_orders', true, tt.orders ? fmtVal(tt.new_customer_orders / tt.orders, 'percent') + ' of orders' : ''),
   ];
 
@@ -2447,11 +2494,11 @@ function renderTikTokShop(monthData) {
   const revenueTable = `
     ${shareBar}
     <table class="dtable" style="margin-top:10px">
-      <thead><tr><th style="text-align:left">Revenue source</th><th>Revenue</th><th>% of GMV</th><th>YoY</th><th>${mLabel}</th></tr></thead>
+      <thead><tr><th style="text-align:left">Revenue source</th><th>Revenue</th><th>% of gross</th><th>YoY</th><th>${mLabel}</th></tr></thead>
       <tbody>
         ${adsRow}
         ${splitRows}
-        <tr class="total-row"><td>Gross Sales TikTok (GMV)</td><td>${fmtVal(gmv,'currency-full')}</td><td>100%</td><td>${ch('gross_sales', true)}</td><td>${chM('gross_sales', true)}</td></tr>
+        <tr class="total-row"><td>Gross Sales TikTok <span style="color:var(--text-muted)">(before discounts)</span></td><td>${fmtVal(gmv,'currency-full')}</td><td>100%</td><td>${ch('gross_sales', true)}</td><td>${chM('gross_sales', true)}</td></tr>
       </tbody>
     </table>
     ${aff ? `<div class="tt-note">TikTok Ads = Triple Whale's TikTok Ads conversion value, the same figure as in Marketing &amp; Sales Channel Performance. Affiliate-driven GMV = the share of TikTok's order data (orders placed in this period) that paid a creator commission, applied to Gross Sales TikTok, less ${fmtVal(overlap,'currency-full')} of affiliate orders TikTok Ads already counts${overlapEstimated ? ' (partly estimated)' : ''} — ads run on creators' content — so they aren't counted twice. Organic GMV = Gross Sales TikTok − (Affiliate-driven GMV + TikTok Ads). The three rows add up to Gross Sales TikTok.</div>` : ''}`;
@@ -2501,17 +2548,18 @@ function renderTikTokShop(monthData) {
   // compare with the prior period's GMV ÷ prior costs, so they show only when
   // every cost line has a prior value (like the Total row).
   const missingCosts = costRows.filter(r => r.v === null || r.v === undefined).map(r => r.label === 'Samples (TikTok Gifting)' ? 'samples' : r.label.toLowerCase());
-  const ttRoas = totalCost ? gmv / totalCost : null;
+  // On TikTok Shop GMV (the tile above) since 2026-10-14.
+  const ttRoas = totalCost && gmvShown ? gmvShown / totalCost : null;
   const roasCh = (kind) => {
-    const chG = tt[kind] ? tt[kind].gross_sales : null, pc = totalPrior(kind);
+    const chG = proxyChange(kind), pc = totalPrior(kind);
     if (ttRoas === null || chG === null || chG === undefined || (1 + chG) === 0 || !pc) return null;
-    const prior = (gmv / (1 + chG)) / pc;
+    const prior = (gmvShown / (1 + chG)) / pc;
     return prior ? (ttRoas - prior) / prior : null;
   };
   const shipPending = sampleShip === null && scPending;
   const roasTile = tileV('TikTok ROAS', ttRoas === null ? '—' : fmtVal(ttRoas, 'ratio'), roasCh('yoy'), roasCh('mom'), true,
     totalCost ? `GMV ÷ ${fmtVal(totalCost, 'currency-full')} TikTok costs${shipPending ? ' (sample shipping loading…)' : (missingCosts.length ? ' (excl. ' + missingCosts.join(', ') + ')' : '')}` : 'No TikTok costs for this period',
-    'Gross Sales TikTok ÷ total TikTok costs (ads spend + affiliate commission + samples + sample shipping)');
+    'TikTok Shop GMV ÷ total TikTok costs (ads spend + affiliate commission + samples + sample shipping)');
   const tiles = tileList.join('') + roasTile;
   const cCell = v => { const c = ttChange(v, false); return `<span class="kpi-yoy ${c.dir}">${c.str === null ? '—' : c.str}</span>`; };
   const missingRow = (r) => r.label === 'Sample shipping cost' && scPending
@@ -2523,11 +2571,11 @@ function renderTikTokShop(monthData) {
       <tbody>
         ${costRows.map(r => r.v === null || r.v === undefined
           ? missingRow(r)
-          : `<tr><td>${r.label}${r.sub ? ` <span style="color:var(--text-muted)">(${r.sub})</span>` : ''}</td><td>${fmtVal(r.v,'currency-full')}</td><td>${gmv ? fmtVal(r.v/gmv,'percent') : '—'}</td><td>${cCell(r.yoy)}</td><td>${cCell(r.mom)}</td></tr>`).join('')}
-        <tr class="total-row"><td>Total TikTok costs</td><td>${fmtVal(totalCost,'currency-full')}</td><td>${gmv ? fmtVal(totalCost/gmv,'percent') : '—'}</td><td>${cCell(totalYoy)}</td><td>${cCell(totalMom)}</td></tr>
+          : `<tr><td>${r.label}${r.sub ? ` <span style="color:var(--text-muted)">(${r.sub})</span>` : ''}</td><td>${fmtVal(r.v,'currency-full')}</td><td>${gmvShown ? fmtVal(r.v/gmvShown,'percent') : '—'}</td><td>${cCell(r.yoy)}</td><td>${cCell(r.mom)}</td></tr>`).join('')}
+        <tr class="total-row"><td>Total TikTok costs</td><td>${fmtVal(totalCost,'currency-full')}</td><td>${gmvShown ? fmtVal(totalCost/gmvShown,'percent') : '—'}</td><td>${cCell(totalYoy)}</td><td>${cCell(totalMom)}</td></tr>
       </tbody>
     </table>
-    <div class="tt-note">TikTok ROAS (tile above) = Gross Sales TikTok ÷ Total TikTok costs. Product cost (COGS ${fmtVal(tt.cogs,'currency-full')}) and platform fees aren't included. Sources: TikTok Ads spend — Triple Whale; Affiliate commission and TikTok Gifting — P&amp;L sheet (no YoY: only the 2026 tab is connected); Sample shipping — creators with at least one sample shipped × $11, from TikTok's sample orders, counted per month.</div>`;
+    <div class="tt-note">TikTok ROAS (tile above) = TikTok Shop GMV ÷ Total TikTok costs; “% of GMV” is on the same GMV. Product cost (COGS ${fmtVal(tt.cogs,'currency-full')}) and platform fees aren't included. Sources: TikTok Ads spend — Triple Whale; Affiliate commission and TikTok Gifting — P&amp;L sheet (no YoY: only the 2026 tab is connected); Sample shipping — creators with at least one sample shipped × $11, from TikTok's sample orders, counted per month.</div>`;
 
   // Top products
   // YoY / MoM per product (2026-10-08): prior-period sales of the same product
@@ -2545,7 +2593,7 @@ function renderTikTokShop(monthData) {
   };
   const prodTable = prods.length ? `
     <table class="dtable">
-      <thead><tr><th style="text-align:left">Product</th><th>Gross sales</th><th>Units</th><th>% of GMV</th><th>YoY</th><th>${mLabel}</th></tr></thead>
+      <thead><tr><th style="text-align:left">Product</th><th>Gross sales</th><th>Units</th><th>% of gross</th><th>YoY</th><th>${mLabel}</th></tr></thead>
       <tbody>${prods.map((p, i) => `<tr><td><div class="tt-title" title="${p.title.replace(/"/g,'&quot;')}">${i+1}. ${p.title}</div></td><td>${fmtVal(p.gross_sales,'currency-full')}</td><td>${fmtVal(p.units,'number')}</td><td>${gmv ? fmtVal(p.gross_sales/gmv,'percent') : '—'}</td><td>${pCell(p.gross_sales, p.yoy_gross)}</td><td>${pCell(p.gross_sales, multi ? (qoqOk ? p.prev3_gross : undefined) : p.prev_gross)}</td></tr>`).join('')}</tbody>
     </table>${tt.top_products_note ? `<div class="tt-note">${tt.top_products_note}</div>` : ''}` : `<div class="tt-pending">No product-level TikTok Shop data for this period.</div>`;
 
