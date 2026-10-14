@@ -5,7 +5,7 @@ const cors = require('cors');
 const { fetchOrders, fetchOrdersLight, fetchOrdersForTierRevenue, fetchSalesReversals, fetchCostOfGoodsSold, fetchTopReturnsByProduct, fetchCountryBreakdown, fetchUsStateBreakdown, fetchSalesSummary, fetchCustomerAcquisition, fetchProductRetailPrices, fetchCollabsCodeSales, getAuthorizeUrl, exchangeCodeForToken } = require('./src/shopify');
 const { aggregate } = require('./src/aggregate');
 const { fetchChannelPerformance } = require('./src/triplewhale');
-const { fetchTikTokShop } = require('./src/tiktokshop');
+const { fetchTikTokShop, fetchGmvEstimate } = require('./src/tiktokshop');
 const { getSellerCenter } = require('./src/windsor-tiktok');
 const { fetchPnlSheetChannels, fetchPnlSheetOtherCosts, fetchPnlSheetTotalCost, fetchPnlSheetMarketingSpend, fetchPnlSheetShopPpc, fetchPnlSheetGoals } = require('./src/googlesheets');
 const { VALID_SITES: YOTPO_VALID_SITES, ensureYotpoSchema, recordYotpoEvent, getYotpoSummary, getYotpoCustomerTierMap, getPool: getYotpoPool } = require('./src/yotpo');
@@ -1091,7 +1091,18 @@ app.get('/api/tiktok-shop/seller-center', async (req, res) => {
   try {
     const { start, end } = req.query;
     const out = await getSellerCenter(String(start || ''), String(end || ''), { refresh: req.query.refresh === '1' });
-    res.json({ ...out.payload, cache: out.cache });
+    // Month to date (2026-10-14, Tomer: "it need to be month to date"):
+    // TikTok's analytics run about two days behind, so the days after the
+    // last day TikTok has (perf_through) are filled from TikTok's order data
+    // in Triple Whale on the same GMV formula. Computed on every request (not
+    // cached) so today's orders keep coming in.
+    let gap = null;
+    const p = out.payload || {};
+    const gapStart = p.perf_through ? new Date(Date.parse(p.perf_through + 'T00:00:00Z') + 86400000).toISOString().slice(0, 10) : null;
+    if (gapStart && !p.perf_error && gapStart < String(end)) {
+      gap = await fetchGmvEstimate('com', gapStart, String(end)).catch((err) => { console.error('seller-center gap fill failed:', err.message); return null; });
+    }
+    res.json({ ...p, gap, cache: out.cache });
   } catch (err) {
     console.error('seller-center failed:', err.message);
     res.status(err.status || 502).json({ error: err.message });
