@@ -2878,6 +2878,29 @@ let c4NotesOpen = false; // keeps "How these numbers work" open across re-render
 const C4_TW_CHANNELS = ['Google Ads', 'TikTok Ads', 'Meta Ads', 'Microsoft Ads', 'impact.com', 'Criteo', 'Pinterest', 'Snapchat', 'ChatGPT Ads', 'Shop App'];
 function c4Name(label) { return label.replace(/^Attentive - /, 'Attentive · '); }
 
+// Organic as the balancing figure (2026-10-14, Tomer: "the total should be
+// equal to the total gross sales"). The P&L sheet's "Organic Revenue (P.N)"
+// row is itself Gross Sales − the other channels, but here several channels
+// come live from Triple Whale rather than from the sheet, so the sheet's
+// Organic no longer closes the gap (COM Sep: channels added up to
+// $1,118,704 vs $1,091,775 gross). Organic is therefore recomputed as Gross
+// Sales (Section 1) − every other channel shown, so the Total always equals
+// Gross Sales; Share of sales is recomputed on the same gross. Skipped while
+// the period's gross isn't loaded (before the month's first Sync).
+function c4OrganicPlug(md, hidden) {
+  if (!md || !md.channels) return md;
+  const g = (md.kpis || []).find(k => k.label === 'Gross Sales');
+  if (!g || g.no_data || !(g.actual > 0)) return md;
+  const gross = g.actual;
+  const others = md.channels.filter(c => !c.no_data && c.label !== 'Organic' && !hidden.includes(c.label)).reduce((t, c) => t + (c.revenue_actual || 0), 0);
+  const plug = gross - others;
+  let channels = md.channels.map(c => c.label === 'Organic'
+    ? Object.assign({}, c, { no_data: false, revenue_actual: plug, sheet_revenue: c.no_data ? null : c.revenue_actual, spend_actual: c.spend_actual || 0, roas: c.spend_actual ? plug / c.spend_actual : null, plug: true })
+    : Object.assign({}, c));
+  if (!channels.some(c => c.label === 'Organic')) channels.push({ label: 'Organic', no_data: false, spend_actual: 0, revenue_actual: plug, spend_goal: null, revenue_goal: null, roas: null, plug: true });
+  channels.forEach(c => { if (!c.no_data) c.revenue_ratio = (c.revenue_actual || 0) / gross; });
+  return Object.assign({}, md, { channels, c4_gross: gross });
+}
 function renderChannels(monthData) {
   const el = document.getElementById('section-4');
   // Hide this site's HIDDEN_CHANNELS_BY_SITE rows from its own table/Total —
@@ -2887,12 +2910,13 @@ function renderChannels(monthData) {
   // still renders (see combineChannels() for how the hidden site's own
   // contribution is zeroed rather than excluded in that combined view).
   const hidden = HIDDEN_CHANNELS_BY_SITE[state.site] || [];
+  monthData = c4OrganicPlug(monthData, hidden);
   const visibleChannels = hidden.length ? monthData.channels.filter(c => !hidden.includes(c.label)) : monthData.channels;
   const chg = channelsChangeData();
   const chgLoading = chg === 'loading';
   const chgMap = chg && chg !== 'loading' && !chg.error ? chg.map : {};
   const chgFailed = !!(chg && chg.error);
-  const prevMd = chPrevMonthData();
+  const prevMd = c4OrganicPlug(chPrevMonthData(), hidden);
   const prevByLabel = prevMd && prevMd.channels ? Object.fromEntries(prevMd.channels.filter(x => !x.no_data).map(x => [x.label, x])) : {};
   const ranges = usStatesRanges();
   const isCurrent = !!monthData.is_current;
@@ -2901,7 +2925,7 @@ function renderChannels(monthData) {
   const prevAvailable = !!ranges.prev;
   // Month in progress: P&L-sheet channels' MoM per day (see c4PaceInfo).
   const pace = c4PaceInfo();
-  const paceMd = pace ? chMonthDataFor(pace.prevKey) : null;
+  const paceMd = pace ? c4OrganicPlug(chMonthDataFor(pace.prevKey), hidden) : null;
   const paceByLabel = paceMd && paceMd.channels ? Object.fromEntries(paceMd.channels.filter(x => !x.no_data).map(x => [x.label, x])) : {};
   const prevName = pace ? (DATA.meta.month_full_names[pace.prevKey] || pace.prevKey) : '';
   const paceTitle = pace ? `Per day: this month’s P&amp;L-sheet figure over the ~${pace.curDays.toFixed(1)} days it covers (the sheet’s Gross Sales is ${Math.round(pace.share * 100)}% of Shopify’s for the ${pace.elapsed} days so far) vs all of ${prevName} over ${pace.prevDays} days` : '';
@@ -2932,7 +2956,9 @@ function renderChannels(monthData) {
     out.pnl = !C4_TW_CHANNELS.includes(c.label);
     const q = !p && pace && out.pnl ? paceByLabel[c.label] : null;
     if (q) {
-      const k = pace.prevDays / pace.curDays; // this month per day, scaled to last month's length
+      // this month per day, scaled to last month's length. Organic is Shopify
+      // gross − the other channels, so it covers all the days elapsed.
+      const k = pace.prevDays / (c.plug ? pace.elapsed : pace.curDays);
       const qRoas = q.spend_actual ? q.revenue_actual / q.spend_actual : null;
       out.spend[1] = chPct((c.spend_actual || 0) * k, q.spend_actual);
       out.revenue[1] = chPct((c.revenue_actual || 0) * k, q.revenue_actual);
@@ -2985,6 +3011,7 @@ function renderChannels(monthData) {
     if (ch.loading) return '';
     if (ch.attentive) return 'Attentive · P&amp;L sheet';
     if (ch.collabs) return 'P&amp;L sheet · Avg order: Collabs codes';
+    if (c.plug) return 'Gross sales − all other channels';
     // Before / without the comparison data, fall back to the channels Triple
     // Whale normally supplies (see channels_note).
     const tw = ch.tw || (chgFailed && C4_TW_CHANNELS.includes(c.label));
@@ -3099,6 +3126,7 @@ function renderChannels(monthData) {
       <li><b>ROAS</b> — revenue ÷ spend: how much revenue each ${sym()}1 of spend brought back.</li>
       <li><b>Avg order</b> — channel revenue ÷ the orders attributed to it (Triple Whale Pixel orders, or the channel’s own reported conversions for Channel-CV channels). <b>Collabs Affiliate</b>: Shopify has no “Collabs order” flag, so its Avg order uses the orders that used a Collabs creator code — their sales after discount ÷ their number. The Collabs app’s revenue also includes link-only orders without a code, so those orders aren’t in this figure.</li>
       <li><b>Share of sales</b> — the channel’s revenue as a share of total gross sales. The bar is scaled to the biggest channel.</li>
+      ${monthData.c4_gross ? `<li><b>Organic</b> — Gross Sales (${fmtVal(monthData.c4_gross, 'currency-full')}, as in Key Metrics) minus every other channel above, so the Total always equals Gross Sales. The P&amp;L sheet’s Organic row works the same way, but several channels here come live from Triple Whale rather than from the sheet, so it’s recomputed on the dashboard’s own figures${(() => { const o = monthData.channels.find(c => c.plug); return o && o.sheet_revenue != null ? ` (the sheet’s Organic figure: ${fmtVal(o.sheet_revenue, 'currency-full')})` : ''; })()}.${state.month === DATA.meta.current_month ? ' For the month in progress, channels from the sheet run through its last update, so Organic also picks up the days the sheet hasn’t reached yet.' : ''}</li>` : ''}
       <li><b>YoY and ${momLabel()}</b> — Triple Whale channels compare the same dates last year and ${prevAvailable ? 'in the previous ' + periodWord : '(no previous period here)'}. Channels from the P&amp;L sheet (Organic, TikTok Affiliates, TikTok Organic, Collabs, Attentive…) have no YoY: the sheet’s 2025 columns only hold Gross and Net Sales, not channels. Their ${momLabel()} compares the previous closed ${periodWord} on this dashboard${isCurMonth ? `; for the month in progress the sheet has one month-to-date figure, so it compares per day — this month’s figure ÷ the days it covers against last month’s full figure ÷ its days (ROAS as is). The days covered come from the sheet’s own Gross Sales as a share of Shopify’s so far${pace ? ` (${Math.round(pace.share * 100)}% of ${pace.elapsed} days ≈ ${pace.curDays.toFixed(1)} days)` : ''}. Those chips have a dotted underline; hover one for details` : ''}. The Total’s changes and Avg order cover the Triple Whale channels. Spend changes are grey — more spend isn’t good or bad by itself. Hover a “—” to see why it’s blank.</li>
       ${attNote}
       ${monthData.channels_note ? `<li><b>Sources</b> — ${monthData.channels_note}</li>` : ''}
