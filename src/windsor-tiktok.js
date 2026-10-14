@@ -55,7 +55,10 @@ const STABLE_AFTER_DAYS = 45;
 // v5 (2026-10-07): affiliate_with_ads_gmv (measured Ads/Affiliate overlap).
 // v6 (2026-10-08): statements pulled in monthly chunks, rows de-duplicated by
 // transaction id, refreshes that lose orders are rejected.
-const PAYLOAD_VERSION = 6;
+// v7 (2026-10-14): perf_partial flag; partial copies refresh after 1 hour.
+// Bumped so the partial Oct 1–14 copy saved that morning (8 of 14 days) is
+// re-pulled.
+const PAYLOAD_VERSION = 7;
 
 const PERF_FIELDS = [
   'date',
@@ -329,6 +332,21 @@ async function pullShopPerformance(start, dateTo) {
   return { perf: [], fees: [], statements: [], perfFrom: null, perfError: 'TikTok Shop performance data isn\'t available for this period (before the shop\'s start of operations in Windsor).' };
 }
 
+// Partial-answer check for Shop Performance (2026-10-14): Windsor sometimes
+// hands back only part of the days early in the (UTC) day — 14 Oct 07:00 the
+// Oct 1–14 pull had 8 daily rows / $111K vs 13 rows / $170.6K later. A
+// payload with clearly fewer daily rows than days in the period (TikTok's
+// analytics run about a day behind, so 2 days of slack) is flagged
+// perf_partial: it's refreshed after 1 hour instead of 12, and a refresh
+// never replaces a copy that has more days.
+function perfPartial(from, end, days, perfError) {
+  if (perfError) return false;
+  const last = end < addDays(todayISO(), 1) ? end : addDays(todayISO(), 1);
+  const expected = Math.round((new Date(last + 'T00:00:00Z') - new Date(from + 'T00:00:00Z')) / 86400000);
+  return days < expected - 2;
+}
+const PARTIAL_STALE_HOURS = 1;
+
 // [start, end) — end exclusive like everywhere else in this app.
 async function pullSellerCenter(start, end) {
   const dateTo = addDays(end, -1);
@@ -362,6 +380,7 @@ async function pullSellerCenter(start, end) {
     start,
     end,
     days_with_data: days,
+    perf_partial: perfPartial(perfFrom || start, end, days, perfError),
     perf_from: perfFrom,
     perf_error: perfError,
     gmv: s('gmv_amount'),
@@ -458,6 +477,10 @@ function pullAndStore(start, end) {
     .then(async (payload) => {
       const prev = await readCache(start, end).catch(() => null);
       const old = prev && prev.payload;
+      if (old && old.version === PAYLOAD_VERSION && num(old.days_with_data) > num(payload.days_with_data) && !old.perf_error) {
+        console.error(`windsor-tiktok: refresh for ${start}..${end} has ${payload.days_with_data} days of shop performance vs ${old.days_with_data} saved — keeping the saved copy`);
+        return old;
+      }
       if (old && seenOrders(old) > 0 && seenOrders(payload) < seenOrders(old) * 0.95) {
         console.error(`windsor-tiktok: refresh for ${start}..${end} found ${seenOrders(payload)} orders vs ${seenOrders(old)} saved — keeping the saved copy`);
         if (old.version === PAYLOAD_VERSION) return old;
@@ -496,6 +519,7 @@ function combinePayloads(start, end, parts) {
     source: 'windsor_tiktok_shop', version: PAYLOAD_VERSION, start, end, combined_months: parts.length,
     ...sumKeys(parts, ['days_with_data', 'gmv', 'orders', 'units', 'sku_orders', 'buyers', 'impressions', 'page_views', 'refunds', 'cancellations_and_returns']),
     perf_from: (withPerf[0] && withPerf[0].perf_from) || null,
+    perf_partial: parts.some((p) => p.perf_partial),
     perf_error: withPerf.length ? null : ((parts.find((p) => p.perf_error) || {}).perf_error || null),
     fetched_at: parts.map((p) => p.fetched_at).filter(Boolean).sort()[0] || new Date().toISOString(),
   };
@@ -551,7 +575,7 @@ async function getSellerCenter(start, end, { refresh } = {}) {
     if (row && row.payload && row.payload.version === PAYLOAD_VERSION) {
       const ageHours = (Date.now() - new Date(row.fetched_at).getTime()) / 3600000;
       const stable = end <= todayISO() && (Date.now() - new Date(end + 'T00:00:00Z').getTime()) / 86400000 > STABLE_AFTER_DAYS;
-      if (!stable && ageHours > STALE_AFTER_HOURS) {
+      if (!stable && ageHours > (row.payload.perf_partial ? PARTIAL_STALE_HOURS : STALE_AFTER_HOURS)) {
         pullAndStore(start, end).catch((err) => console.error('windsor-tiktok: background refresh failed:', err.message));
         return { payload: row.payload, cache: 'stale' };
       }
