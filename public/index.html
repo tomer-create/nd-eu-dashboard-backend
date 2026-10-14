@@ -2370,12 +2370,21 @@ function renderTikTokShop(monthData) {
     }
     const loading = !gmvSC || gmvSC.status === 'loading';
     const why = loading ? 'loading TikTok’s figure…' : d && d.perf_error ? 'TikTok’s analytics don’t go back to this period' : d && d.perf_from && d.perf_from > gmvRange.start ? 'TikTok’s analytics start ' + c4RangeText({ start: d.perf_from, end: new Date(Date.parse(d.perf_from + 'T00:00:00Z') + 86400000).toISOString().slice(0, 10) }) : 'TikTok’s figure isn’t complete for this period yet';
+    // Month to date (2026-10-14): the days after TikTok's last day are filled
+    // from TikTok's order data (backend `gap`, same GMV formula).
+    const fmtD = (iso) => c4RangeText({ start: iso, end: new Date(Date.parse(iso + 'T00:00:00Z') + 86400000).toISOString().slice(0, 10) });
+    const gap = covered && d.gap && d.gap.gmv !== undefined ? d.gap : null;
+    const lastDay = new Date(Date.parse((gmvRange.end <= todayIso ? gmvRange.end : new Date(Date.parse(todayIso + 'T00:00:00Z') + 86400000).toISOString().slice(0, 10)) + 'T00:00:00Z') - 86400000).toISOString().slice(0, 10);
+    const plus1 = (iso) => new Date(Date.parse(iso + 'T00:00:00Z') + 86400000).toISOString().slice(0, 10);
+    const note = gap
+      ? `TikTok Shop analytics ${c4RangeText({ start: gmvRange.start, end: plus1(d.perf_through) })} + TikTok order data ${c4RangeText({ start: gap.start, end: plus1(lastDay) })}${gmvRange.end > todayIso ? ' · month to date' : ''}`
+      : 'TikTok Shop analytics' + (through ? ' · through ' + fmtD(through) : '');
     return covered
-      ? { value: d.gmv, orders: d.orders, tiktok: true, note: 'TikTok Shop analytics' + (through ? ' · through ' + c4RangeText({ start: through, end: new Date(Date.parse(through + 'T00:00:00Z') + 86400000).toISOString().slice(0, 10) }) : '') }
+      ? { value: d.gmv + (gap ? gap.gmv : 0), orders: d.orders + (gap ? gap.orders : 0), tiktok: true, note }
       : { value: hasProdDiscEarly ? proxyNow : null, orders: tt.orders, tiktok: false, note: (hasProdDiscEarly ? '≈ estimate from TikTok order data — ' : '') + why };
   })();
   const gmvShown = gmvInfo.value;
-  const gmvTip = 'TikTok Shop GMV = price × items sold + shipping fees − seller promotions − platform co-funding (TikTok Shop analytics). YoY / ' + mLabel + ': same formula on TikTok’s order data (Triple Whale), same days.';
+  const gmvTip = 'TikTok Shop GMV = price × items sold + shipping fees − seller promotions − platform co-funding (TikTok Shop analytics). TikTok’s analytics run about two days behind, so the latest days are filled from TikTok’s order data (Triple Whale) on the same formula to keep it month to date. YoY / ' + mLabel + ': same formula on TikTok’s order data, same days.';
   const tileList = [
     tileV('TikTok Shop GMV', gmvShown === null ? '—' : fmtVal(gmvShown, 'currency-full'), proxyChange('yoy'), proxyChange('mom'), true, gmvInfo.note, gmvTip),
     tile('Net Sales', tt.net_sales, 'currency-full', 'net_sales', true, 'Gross sales − discounts − refunds'),
