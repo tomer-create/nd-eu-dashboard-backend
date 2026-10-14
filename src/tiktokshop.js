@@ -200,4 +200,20 @@ async function fetchTikTokShop(site, start, end, { yoyRange, momRange } = {}) {
   }
 }
 
-module.exports = { fetchTikTokShop, SITES_WITH_TIKTOK_SHOP };
+// TikTok Shop GMV estimate from TikTok's order data in Triple Whale, same
+// formula as TikTok's GMV (gross + shipping − product discounts), for
+// [start, end). Used to bring TikTok's own analytics GMV (which runs about
+// two days behind) up to month-to-date — added 2026-10-14.
+async function fetchGmvEstimate(site, start, end) {
+  if (!SITES_WITH_TIKTOK_SHOP.includes(site) || !process.env.TRIPLEWHALE_API_KEY) return null;
+  if (!isoOk(start) || !isoOk(end) || end <= start) return null;
+  const rows = await twSql(TW_SHOP_ID[site], `
+    SELECT uniq(order_id) AS orders,
+           SUM(gross_product_sales) + SUM(shipping_price) - SUM(discount_amount_for_product) AS gmv
+    FROM orders_table
+    WHERE event_date >= '${start}' AND event_date < '${end}' AND platform = 'tiktok-shops'`.trim(), start, end);
+  const r = rows[0] || {};
+  return { start, end, gmv: num(r.gmv), orders: num(r.orders) };
+}
+
+module.exports = { fetchTikTokShop, fetchGmvEstimate, SITES_WITH_TIKTOK_SHOP };
