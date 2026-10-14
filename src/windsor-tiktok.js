@@ -370,6 +370,18 @@ function perfPartial(from, end, days, perfError) {
   return days < expected - 2;
 }
 const PARTIAL_STALE_HOURS = 1;
+// Last real day with TikTok GMV in the rows. Windsor labels Shop Performance
+// rows one day late (see the note at the top), so the real day is the
+// label − 1. 14 Oct: last non-zero label 10-13 → data through Oct 12, which
+// matches the Oct 1–12 total ($170,587.68).
+function perfThrough(rows, end) {
+  let last = null;
+  for (const r of rows) if (num(r.shop_performance_gmv_amount) > 0 && r.date && (!last || r.date > last)) last = String(r.date).slice(0, 10);
+  if (!last) return null;
+  const real = addDays(last, -1);
+  const cap = addDays(end, -1);
+  return real < cap ? real : cap;
+}
 
 // [start, end) — end exclusive like everywhere else in this app.
 async function pullSellerCenter(start, end) {
@@ -411,6 +423,7 @@ async function pullSellerCenter(start, end) {
     start,
     end,
     days_with_data: days,
+    perf_through: perfThrough(perf, end),
     perf_partial: perfPartial(perfFrom || start, end, days, perfError),
     perf_from: perfFrom,
     perf_error: perfError,
