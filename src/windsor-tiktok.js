@@ -564,6 +564,7 @@ function combinePayloads(start, end, parts) {
     ...sumKeys(parts, ['days_with_data', 'gmv', 'orders', 'units', 'sku_orders', 'buyers', 'impressions', 'page_views', 'refunds', 'cancellations_and_returns']),
     perf_from: (withPerf[0] && withPerf[0].perf_from) || null,
     perf_partial: parts.some((p) => p.perf_partial),
+    perf_through: (parts[parts.length - 1] || {}).perf_through || null,
     perf_error: withPerf.length ? null : ((parts.find((p) => p.perf_error) || {}).perf_error || null),
     fetched_at: parts.map((p) => p.fetched_at).filter(Boolean).sort()[0] || new Date().toISOString(),
   };
