@@ -2871,8 +2871,14 @@ function channelsChangeData() {
 // - rows sorted by revenue, inactive / not-connected channels folded into
 //   one line at the bottom, and a source tag under each channel name;
 // - the long footnotes moved into a "How these numbers work" panel.
-// 2026-10-13 (Tomer: "there is no MOM or YOY, add it"): the switch is gone —
-// every figure shows YoY and MoM (QoQ for quarters) side by side again.
+// 2026-10-13 (Tomer: "there is no MOM or YOY, add it"): the switch was
+// removed and every figure showed YoY and MoM side by side.
+// 2026-10-14 (Tomer: "bring back the switch ... for MOM to YOY"): the
+// "vs last year / vs last month" switch is back — one comparison at a time,
+// remembered per device. Everything added since (per-day MoM for P&L-sheet
+// channels in the month in progress, Organic as Gross − other channels)
+// works the same under either choice.
+let chCompareMode = (() => { try { return localStorage.getItem('nd.c4.compare') === 'prev' ? 'prev' : 'yoy'; } catch (e) { return 'yoy'; } })();
 function c4RangeText(r) {
   if (!r) return '';
   const s = new Date(r.start + 'T00:00:00Z');
@@ -3051,11 +3057,17 @@ function renderChannels(monthData) {
       : 'The P&L sheet’s Gross Sales for this month isn’t available' + (state.site === 'all' ? ' (or the sites’ sheets cover different days)' : '') + ', so this month can’t be compared per day yet';
     return 'No figures for this channel in the previous ' + periodWord;
   };
-  const chip = (ch, key, kind) => {
-    if (ch.loading) return c4Chips(c4Chip(null, kind, true), c4Chip(null, kind, true));
+  // One comparison at a time, picked with the switch.
+  const mode = chCompareMode === 'prev' && prevAvailable ? 'prev' : 'yoy';
+  const ci = mode === 'yoy' ? 0 : 1;
+  const cmpLbl = mode === 'yoy' ? 'YoY' : momLabel();
+  const oneChip = (ch, key, kind) => {
+    if (ch.loading) return c4Chip(null, kind, true);
+    if (ci === 0) return c4Chip(ch[key][0], kind, false, whyBlank(ch, 'yoy'));
     const paceNote = ch.pace && ch.pace[key] ? (ch.pace[key] === 'ratio' ? `This month so far (P&amp;L sheet) vs all of ${prevName}` : paceTitle) : null;
-    return c4Chips(c4Chip(ch[key][0], kind, false, whyBlank(ch, 'yoy')), c4Chip(ch[key][1], kind, false, whyBlank(ch, 'mom'), paceNote));
+    return c4Chip(ch[key][1], kind, false, whyBlank(ch, 'mom'), paceNote);
   };
+  const chip = (ch, key, kind) => `<span class="ch-chg c4-chg"><span class="lbl">${cmpLbl}</span>${oneChip(ch, key, kind)}</span>`;
   const sourceTag = (c, ch) => {
     if (ch.loading) return '';
     if (ch.attentive) return 'Attentive · P&amp;L sheet';
@@ -3138,13 +3150,9 @@ function renderChannels(monthData) {
 
   // Summary strip.
   const top = activeChannels.filter(c => c.label !== 'Organic' && (c.revenue_actual || 0) > 0)[0];
-  // Tiles: YoY chip top-right, MoM / QoQ under it — same layout as the
-  // other sections' tiles.
-  const tileChips = (key, kind) => {
-    if (totCh.loading) return [c4Chip(null, kind, true), c4Chip(null, kind, true)];
-    return [c4Chip(totCh[key][0], kind, false, whyBlank(totCh, 'yoy')), c4Chip(totCh[key][1], kind, false, whyBlank(totCh, 'mom'))];
-  };
-  const tile = (label, valueHtml, chips, extra) => `<div class="kpi-tile c4-tile"><div class="kpi-top"><span class="kpi-label">${label}</span>${chips ? `<span class="c4-tchip"><span class="lbl">YoY</span>${chips[0]}</span>` : ''}</div>${chips ? `<div class="kpi-mom-row"><span class="c4-tchip"><span class="lbl">${momLabel()}</span>${chips[1]}</span></div>` : ''}<div class="kpi-value">${valueHtml}</div>${extra}</div>`;
+  // Tiles: the chosen comparison's chip top-right.
+  const tileChips = (key, kind) => oneChip(totCh, key, kind);
+  const tile = (label, valueHtml, chipHtml, extra) => `<div class="kpi-tile c4-tile"><div class="kpi-top"><span class="kpi-label">${label}</span>${chipHtml ? `<span class="c4-tchip"><span class="lbl">${cmpLbl}</span>${chipHtml}</span>` : ''}</div><div class="kpi-value">${valueHtml}</div>${extra}</div>`;
   const pctTile = (actual, goal, kind) => {
     const pct = goal ? actual / goal : null;
     if (pct === null) return `<div class="pbar-pct">No ${kind === 'spend' ? 'budget' : 'goal'} set</div>`;
@@ -3159,10 +3167,21 @@ function renderChannels(monthData) {
     ${tile('Top revenue channel', top ? c4Name(top.label) : '—', null, `<div class="pbar-pct c4-tile-sub">${top ? `${fmtVal(top.revenue_actual, 'currency-full')} · ${fmtVal(top.revenue_ratio, 'percent')} of sales${top.roas ? ' · ' + fmtVal(top.roas, 'ratio') + ' ROAS' : ''}` : 'No channel revenue yet'}</div>`)}
   </div>`;
 
-  // What each change compares with.
-  const prevWhy = state.month === 'YTD' ? 'none for Year to Date' : 'none while the quarter is in progress';
+  // Compare switch + what the changes compare with.
+  const prevBtnLabel = 'vs last ' + periodWord;
+  const prevDisabledWhy = state.month === 'YTD' ? 'Year to Date has no previous period to compare with' : 'A quarter still in progress has no like-for-like previous quarter';
+  const cmpText = mode === 'yoy'
+    ? `Changes compare ${c4RangeText(ranges.cur)} with ${c4RangeText(ranges.yoy)}`
+    : `Changes compare ${c4RangeText(ranges.cur)} with ${c4RangeText(ranges.prev)}${pace ? ` (P&amp;L-sheet channels: per day vs all of ${prevName})` : ''}`;
   const head = `<div class="c4-head">
-    <div class="c4-period"><b>YoY</b> compares ${c4RangeText(ranges.cur)} with ${c4RangeText(ranges.yoy)} · <b>${momLabel()}</b> ${prevAvailable ? 'with ' + c4RangeText(ranges.prev) : '— ' + prevWhy}${pace ? ` (P&amp;L-sheet channels: per day vs all of ${prevName})` : ''}</div>
+    <div class="c4-cmp" role="group" aria-label="Compare with">
+      <span class="c4-cmp-lbl">Compare</span>
+      <span class="c4-seg">
+        <button type="button" data-c4cmp="yoy" aria-pressed="${mode === 'yoy'}">vs last year</button>
+        <button type="button" data-c4cmp="prev" aria-pressed="${mode === 'prev'}"${prevAvailable ? '' : ` disabled title="${prevDisabledWhy}"`}>${prevBtnLabel}</button>
+      </span>
+    </div>
+    <div class="c4-period">${cmpText}</div>
   </div>`;
 
   const attNote = state.site === 'com'
@@ -3176,7 +3195,7 @@ function renderChannels(monthData) {
       <li><b>Avg order</b> — channel revenue ÷ the orders attributed to it (Triple Whale Pixel orders, or the channel’s own reported conversions for Channel-CV channels). <b>Collabs Affiliate</b>: Shopify has no “Collabs order” flag, so its Avg order uses the orders that used a Collabs creator code — their sales after discount ÷ their number. The Collabs app’s revenue also includes link-only orders without a code, so those orders aren’t in this figure.</li>
       <li><b>Share of sales</b> — the channel’s revenue as a share of total gross sales. The bar is scaled to the biggest channel.</li>
       ${monthData.c4_gross ? `<li><b>Organic</b> — Gross Sales (${fmtVal(monthData.c4_gross, 'currency-full')}, as in Key Metrics) minus every other channel above, so the Total always equals Gross Sales. The P&amp;L sheet’s Organic row works the same way, but several channels here come live from Triple Whale rather than from the sheet, so it’s recomputed on the dashboard’s own figures${(() => { const o = monthData.channels.find(c => c.plug); return o && o.sheet_revenue != null ? ` (the sheet’s Organic figure: ${fmtVal(o.sheet_revenue, 'currency-full')})` : ''; })()}.${state.month === DATA.meta.current_month ? ' For the month in progress, channels from the sheet run through its last update, so Organic also picks up the days the sheet hasn’t reached yet.' : ''}</li>` : ''}
-      <li><b>YoY and ${momLabel()}</b> — Triple Whale channels compare the same dates last year and ${prevAvailable ? 'in the previous ' + periodWord : '(no previous period here)'}. Channels from the P&amp;L sheet (Organic, TikTok Affiliates, TikTok Organic, Collabs, Attentive…) have no YoY: the sheet’s 2025 columns only hold Gross and Net Sales, not channels. Their ${momLabel()} compares the previous closed ${periodWord} on this dashboard${isCurMonth ? `; for the month in progress the sheet has one month-to-date figure, so it compares per day — this month’s figure ÷ the days it covers against last month’s full figure ÷ its days (ROAS as is). The days covered come from the sheet’s own Gross Sales as a share of Shopify’s so far${pace ? ` (${Math.round(pace.share * 100)}% of ${pace.elapsed} days ≈ ${pace.curDays.toFixed(1)} days)` : ''}. Those chips have a dotted underline; hover one for details` : ''}. The Total’s changes and Avg order cover the Triple Whale channels. Spend changes are grey — more spend isn’t good or bad by itself. Hover a “—” to see why it’s blank.</li>
+      <li><b>Changes (switch: vs last year / vs last ${periodWord})</b> — Triple Whale channels compare the same dates last year and ${prevAvailable ? 'in the previous ' + periodWord : '(no previous period here)'}. Channels from the P&amp;L sheet (Organic, TikTok Affiliates, TikTok Organic, Collabs, Attentive…) have no YoY: the sheet’s 2025 columns only hold Gross and Net Sales, not channels. Their ${momLabel()} compares the previous closed ${periodWord} on this dashboard${isCurMonth ? `; for the month in progress the sheet has one month-to-date figure, so it compares per day — this month’s figure ÷ the days it covers against last month’s full figure ÷ its days (ROAS as is). The days covered come from the sheet’s own Gross Sales as a share of Shopify’s so far${pace ? ` (${Math.round(pace.share * 100)}% of ${pace.elapsed} days ≈ ${pace.curDays.toFixed(1)} days)` : ''}. Those chips have a dotted underline; hover one for details` : ''}. The Total’s changes and Avg order cover the Triple Whale channels. Spend changes are grey — more spend isn’t good or bad by itself. Hover a “—” to see why it’s blank.</li>
       ${attNote}
       ${monthData.channels_note ? `<li><b>Sources</b> — ${monthData.channels_note}</li>` : ''}
       ${chg && chg.partial ? '<li>Some sites’ Triple Whale data didn’t load, so the changes cover the rest.</li>' : ''}
@@ -3190,6 +3209,13 @@ function renderChannels(monthData) {
   </table></div>
   ${notes}`;
 }
+document.getElementById('section-4').addEventListener('click', (ev) => {
+  const btn = ev.target.closest('button[data-c4cmp]');
+  if (!btn || btn.disabled) return;
+  chCompareMode = btn.getAttribute('data-c4cmp');
+  try { localStorage.setItem('nd.c4.compare', chCompareMode); } catch (e) { /* per-device preference only */ }
+  renderChannels(getMonthData());
+});
 document.getElementById('section-4').addEventListener('toggle', (ev) => {
   if (ev.target.classList && ev.target.classList.contains('c4-notes')) c4NotesOpen = ev.target.open;
 }, true);
