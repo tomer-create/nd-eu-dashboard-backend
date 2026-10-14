@@ -58,8 +58,31 @@ const STABLE_AFTER_DAYS = 45;
 // v7 (2026-10-14): perf_partial flag; partial copies refresh after 1 hour.
 // Bumped so the partial Oct 1–14 copy saved that morning (8 of 14 days) is
 // re-pulled.
-const PAYLOAD_VERSION = 7;
+// v8 (2026-10-14): core Shop Performance fields pulled on their own (see
+// PERF_CORE_FIELDS) — v7 copies have days missing.
+const PAYLOAD_VERSION = 8;
 
+// Core Shop Performance fields — the ones the dashboard's numbers come from.
+// Pulled on their own (2026-10-14): asking Windsor for these together with
+// the traffic breakdowns below drops whole days — for Oct 1–14 it returned 8
+// of 13 days ($97.5K GMV) with the breakdowns vs all 13 days ($170.6K)
+// without them.
+const PERF_CORE_FIELDS = [
+  'date',
+  'shop_performance_gmv_amount',
+  'shop_performance_gmv_breakdowns_live_amount',
+  'shop_performance_gmv_breakdowns_video_amount',
+  'shop_performance_gmv_breakdowns_product_card_amount',
+  'shop_performance_orders',
+  'shop_performance_units_sold',
+  'shop_performance_buyers',
+  'shop_performance_product_impressions',
+  'shop_performance_product_page_views',
+  'shop_performance_refunds_amount',
+  'shop_performance_cancellations_and_returns',
+];
+// Traffic breakdowns (no longer shown on the dashboard) — separate query, a
+// failure or missing days here never touch the core figures.
 const PERF_FIELDS = [
   'date',
   'shop_performance_gmv_amount',
@@ -307,12 +330,13 @@ function sumRows(rows, field) { return rows.reduce((a, r) => a + num(r[field]), 
 const START_OF_OPS_RE = /start of operations/i;
 async function pullShopPerformance(start, dateTo) {
   const tryFrom = async (from) => {
-    const [perf, fees, statements] = await Promise.all([
-      windsorQuery(PERF_FIELDS, from, dateTo),
+    const [perf, traffic, fees, statements] = await Promise.all([
+      windsorQuery(PERF_CORE_FIELDS, from, dateTo),
+      windsorQuery(PERF_FIELDS, from, dateTo).catch((err) => { console.error('windsor-tiktok: traffic breakdowns failed:', err.message); return []; }),
       windsorQuery(['date', ...Object.keys(FEE_FIELDS)], from, dateTo),
       windsorQuery(STATEMENT_FIELDS, from, dateTo),
     ]);
-    return { perf, fees, statements, perfFrom: from, perfError: null };
+    return { perf, traffic, fees, statements, perfFrom: from, perfError: null };
   };
   let from = start;
   for (let i = 0; i < 13; i++) {
@@ -357,6 +381,7 @@ async function pullSellerCenter(start, end) {
     soft(pullSampleShipping(start, end), 'sample shipping'),
   ]);
   const { perf, fees, statements, perfFrom, perfError } = sc;
+  const traffic = sc.traffic || [];
   // No shop data at all for the period AND no sample orders: TikTok simply has
   // no history that far back — report samples as unavailable, not as $0.
   const samplesOut = (!perf.length && perfError && samples && !samples.error && samples.samples_shipped === 0)
@@ -368,7 +393,13 @@ async function pullSellerCenter(start, end) {
     video: s(base + '_video_amount'),
     product_card: s(base + '_product_card_amount'),
   });
-  const visitorDays = s('avg_product_page_visitors');
+  const t = (f) => sumRows(traffic, 'shop_performance_' + f);
+  const visitorDays = t('avg_product_page_visitors');
+  const tByType = (base) => ({
+    live: t(base + '_live_amount'),
+    video: t(base + '_video_amount'),
+    product_card: t(base + '_product_card_amount'),
+  });
   const feeLines = Object.entries(FEE_FIELDS)
     .map(([field, label]) => ({ key: field.replace('statement_transaction_fee_', '').replace(/_amount$/, ''), label, amount: -sumRows(fees, field) }))
     .filter((l) => Math.abs(l.amount) >= 0.005);
@@ -387,14 +418,14 @@ async function pullSellerCenter(start, end) {
     gmv_by_type: byType('gmv_breakdowns'),
     orders: s('orders'),
     units: s('units_sold'),
-    sku_orders: s('sku_orders'),
+    sku_orders: t('sku_orders'),
     buyers: s('buyers'),
-    buyers_by_type: byType('buyer_breakdowns'),
+    buyers_by_type: tByType('buyer_breakdowns'),
     impressions: s('product_impressions'),
-    impressions_by_type: byType('product_impression_breakdowns'),
+    impressions_by_type: tByType('product_impression_breakdowns'),
     page_views: s('product_page_views'),
-    page_views_by_type: byType('product_page_view_breakdowns'),
-    avg_daily_visitors: days ? visitorDays / days : null,
+    page_views_by_type: tByType('product_page_view_breakdowns'),
+    avg_daily_visitors: traffic.length ? visitorDays / traffic.length : null,
     refunds: s('refunds_amount'),
     cancellations_and_returns: s('cancellations_and_returns'),
     fees: {
