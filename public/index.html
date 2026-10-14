@@ -2365,7 +2365,8 @@ function renderTikTokShop(monthData) {
       const expected = Math.round((Date.parse(lastIso + 'T00:00:00Z') - Date.parse(gmvRange.start + 'T00:00:00Z')) / 86400000);
       covered = !d.perf_partial && d.days_with_data >= expected - 2;
       // TikTok's analytics run about a day behind: today has no figure yet.
-      if (covered && gmvRange.end > todayIso) through = new Date(Date.parse(todayIso + 'T00:00:00Z') - 86400000).toISOString().slice(0, 10);
+      // perf_through (backend, 2026-10-14) = the last day TikTok has a figure for.
+      if (covered && gmvRange.end > todayIso) through = d.perf_through || new Date(Date.parse(todayIso + 'T00:00:00Z') - 86400000).toISOString().slice(0, 10);
     }
     const loading = !gmvSC || gmvSC.status === 'loading';
     const why = loading ? 'loading TikTok’s figure…' : d && d.perf_error ? 'TikTok’s analytics don’t go back to this period' : d && d.perf_from && d.perf_from > gmvRange.start ? 'TikTok’s analytics start ' + c4RangeText({ start: d.perf_from, end: new Date(Date.parse(d.perf_from + 'T00:00:00Z') + 86400000).toISOString().slice(0, 10) }) : 'TikTok’s figure isn’t complete for this period yet';
