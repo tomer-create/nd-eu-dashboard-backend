@@ -1243,7 +1243,43 @@ function mergeLiveIntoMonthData(monthData, live, site) {
 function getSingleSiteMonthData(site, month) {
   const base = DATA.sites[site].months[month];
   const cached = liveCache[site + '|' + month];
-  return cached ? mergeLiveIntoMonthData(base, cached.data, site) : base;
+  return applyCogsRule(site, cached ? mergeLiveIntoMonthData(base, cached.data, site) : base);
+}
+// ND.IL Product Cost / COGS (2026-10-15, Tomer: "the product cost for ND.IL
+// is wrong"; he chose "20% of Net Sales"). Same as the P&L sheet's IL
+// "Landing cost" row (Product Cost = Net Sales × 20%, cell C44) from
+// September on. Replaces the 30%-of-catalog-retail-value estimate set up in
+// August (server.js RETAIL_COGS_SITES), which came out ~2.3× the sheet
+// (Sep ₪167,583 vs ₪71,695). Applied here, after the live merge, so baked
+// months, synced months, quarters, YTD and All Sites all use it. Changes
+// follow Net Sales (COGS is a fixed share of it). Profit isn't affected —
+// it uses the sheet's own Total Cost.
+const COGS_PCT_OF_NET = { il: 0.2 };
+function applyCogsRule(site, md) {
+  const pct = COGS_PCT_OF_NET[site];
+  if (pct == null || !md || !md.kpis) return md;
+  const net = md.kpis.find(k => k.label === 'Net Sales');
+  if (!net || net.no_data || typeof net.actual !== 'number') return md;
+  const cogs = net.actual * pct;
+  const out = Object.assign({}, md);
+  out.kpis = md.kpis.map(k => k.label !== 'COGS' ? k : Object.assign({}, k, {
+    actual: cogs, no_data: false, yoy: net.yoy, mom: net.mom,
+    pct_of_goal: k.goal ? cogs / k.goal : null,
+  }));
+  if (md.other_costs) {
+    let delta = 0;
+    out.other_costs = md.other_costs.map(o => {
+      if (o.label !== 'Product Cost') return o;
+      delta += cogs - (o.actual || 0);
+      return Object.assign({}, o, { actual: cogs, no_data: false, note: 'ND.IL: 20% of Net Sales' });
+    });
+    if (delta && typeof md.total_other_costs_actual === 'number') {
+      out.total_other_costs_actual = md.total_other_costs_actual + delta;
+      const t = out.total_other_costs_actual;
+      out.other_costs = out.other_costs.map(o => Object.assign({}, o, { ratio_of_total: t ? (o.actual || 0) / t : null }));
+    }
+  }
+  return out;
 }
 
 /* ==================================================================
