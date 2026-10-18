@@ -217,7 +217,19 @@ const CHANNEL_MAP = [
   // to him; switch to 'channel' here (and update the channels_note string
   // in dashboard_v2.html) if he confirms that's what he wants.
   { ids: ['microsoft-ads', 'bing-ads', 'bing'], label: 'Microsoft Ads', cv: 'pixel' },
-  { ids: ['criteo'], label: 'Criteo', cv: 'pixel' },
+  // Criteo -> RTB House (2026-10-18, Tomer: "Criteo was changed to RTB House
+  // and you pull the data from triple whale under source/medium - rtbhouse /
+  // retargeting"). Triple Whale's pixel channel id for that source is
+  // 'rtbhouse' (checked live: ND.COM Oct 1-17 2026 Last-Click CV $79.81 from
+  // 2 orders, ~10.9K visitors; nothing before October; none yet on EU / IL).
+  // Triple Whale has no RTB House ad connection, so spend comes back 0, as
+  // it always did for Criteo. Each entry only counts its own dates: Criteo
+  // up to Sep 30 2026, RTB House from Oct 1 2026 — so a closed month before
+  // October still shows Criteo, and a period spanning both (Year to Date)
+  // shows each for its own months. An entry whose dates don't overlap the
+  // requested period is left out of the result entirely.
+  { ids: ['criteo'], label: 'Criteo', cv: 'pixel', until: '2026-10-01' },
+  { ids: ['rtbhouse'], label: 'RTB House', cv: 'pixel', from: '2026-10-01' },
   // Switched to Channel CV 2026-09-07 per Tomer: "for Pinterest and Snapchat
   // sources pull the actual CV from triple whale and not the pixel cv as
   // it's pulling right now." Was 'pixel' since this file was first built
@@ -246,6 +258,11 @@ const CHANNEL_MAP = [
 ];
 
 const ALL_CHANNEL_IDS = CHANNEL_MAP.flatMap((c) => c.ids);
+
+// Whether an entry's date window overlaps [start, end) (end exclusive).
+function inWindow(c, start, end) {
+  return !(c.from && end <= c.from) && !(c.until && start >= c.until);
+}
 
 // Fetches spend + CV per channel for one site over [start, end] (inclusive,
 // YYYY-MM-DD, same range as the rest of a sync). Returns an array shaped
@@ -285,6 +302,7 @@ async function fetchChannelPerformance(site, start, end) {
   const query = `
     SELECT
       channel,
+      toStartOfMonth(event_date) AS month_start,
       SUM(spend) AS spend,
       SUM(channel_reported_conversion_value) AS channel_cv,
       SUM(order_revenue) AS pixel_cv,
@@ -294,7 +312,7 @@ async function fetchChannelPerformance(site, start, end) {
     WHERE event_date >= '${start}' AND event_date < '${end}'
       AND model = 'Last Click'
       AND channel IN (${ALL_CHANNEL_IDS.map((id) => `'${id}'`).join(',')})
-    GROUP BY channel
+    GROUP BY channel, month_start
   `.trim();
 
   let json;
@@ -319,9 +337,25 @@ async function fetchChannelPerformance(site, start, end) {
   const rows = Array.isArray(json) ? json : json.rows || json.data || [];
   if (!Array.isArray(rows) || !rows.length) return [];
 
-  const byChannelId = new Map(rows.map((r) => [r.channel, r]));
+  // Rows come per channel per month (so each CHANNEL_MAP entry can keep only
+  // its own months — Criteo until Sep 2026, RTB House from Oct 2026). A
+  // WHERE condition mixing channel and date is rejected by Triple Whale's
+  // SQL layer ("Unknown expression ... metrics.channel", checked live
+  // 2026-10-18), hence the per-month grouping and the filter here. Months
+  // are added back up per channel.
+  const winOf = new Map(CHANNEL_MAP.flatMap((c) => c.ids.map((id) => [id, c])));
+  const byChannelId = new Map();
+  const SUM_FIELDS = ['spend', 'channel_cv', 'pixel_cv', 'pixel_orders', 'channel_orders'];
+  rows.forEach((r) => {
+    const c = winOf.get(r.channel);
+    const m = String(r.month_start || '').slice(0, 10);
+    if (c && m && ((c.from && m < c.from) || (c.until && m >= c.until))) return;
+    const acc = byChannelId.get(r.channel) || { channel: r.channel };
+    SUM_FIELDS.forEach((f) => { acc[f] = (acc[f] || 0) + Number(r[f] || 0); });
+    byChannelId.set(r.channel, acc);
+  });
 
-  return CHANNEL_MAP.map((c) => {
+  return CHANNEL_MAP.filter((c) => inWindow(c, start, end)).map((c) => {
     const row = c.ids.map((id) => byChannelId.get(id)).find(Boolean);
     if (!row) return { label: c.label, no_data: true };
     const spend = Number(row.spend || 0);
