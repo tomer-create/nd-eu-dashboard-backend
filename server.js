@@ -7,7 +7,7 @@ const { aggregate } = require('./src/aggregate');
 const { fetchChannelPerformance } = require('./src/triplewhale');
 const { fetchTikTokShop, fetchGmvEstimate } = require('./src/tiktokshop');
 const { getSellerCenter } = require('./src/windsor-tiktok');
-const { fetchPnlSheetChannels, fetchPnlSheetOtherCosts, fetchPnlSheetTotalCost, fetchPnlSheetMarketingSpend, fetchPnlSheetShopPpc, fetchPnlSheetGoals } = require('./src/googlesheets');
+const { fetchPnlSheetChannels, fetchPnlSheetOtherCosts, fetchPnlSheetTotalCost, fetchPnlSheetMarketingSpend, fetchPnlSheetShopPpc, fetchPnlSheetRtbHouseSpend, fetchPnlSheetGoals } = require('./src/googlesheets');
 const { VALID_SITES: YOTPO_VALID_SITES, ensureYotpoSchema, recordYotpoEvent, getYotpoSummary, getYotpoCustomerTierMap, getPool: getYotpoPool } = require('./src/yotpo');
 const { registerYotpoWebhooksForSite, addYotpoTopicsForSite } = require('./src/yotpo-setup');
 const { importYotpoHistory } = require('./src/yotpo-import');
@@ -378,6 +378,7 @@ async function buildDataResponse({ site, start, end, compare }) {
     pnlSheetMarketingSpend,
     pnlSheetMarketingSpendMom,
     pnlSheetShopPpc,
+    pnlSheetRtbHouse,
   ] = await Promise.all([
     fetchOrders(site, start, end),
     wantYoy ? fetchOrdersLight(site, yoyRange.start, yoyRange.end) : Promise.resolve(null),
@@ -477,6 +478,15 @@ async function buildDataResponse({ site, start, end, compare }) {
       console.error(`fetchPnlSheetShopPpc threw for site=${site}:`, err.message);
       return null;
     }),
+    // RTB House spend from the sheet's "RTB House Ads" row (2026-10-18) —
+    // only for periods from October 2026, when RTB House replaced Criteo
+    // (before that the same sheet row holds Criteo's cost).
+    start >= RTB_HOUSE_FROM
+      ? fetchPnlSheetRtbHouseSpend(site, start).catch((err) => {
+          console.error(`fetchPnlSheetRtbHouseSpend threw for site=${site}:`, err.message);
+          return null;
+        })
+      : Promise.resolve(null),
   ]);
 
   // fetchCountryBreakdown now returns { rows, groupedBy, fallbackReason? }
@@ -646,6 +656,22 @@ async function buildDataResponse({ site, start, end, compare }) {
       };
     }
   }
+  // RTB House spend patch (2026-10-18, Tomer: "the RTB HOUSE ADS Spend you
+  // pull from the spreadsheet") — same idea as Shop App above: Triple Whale
+  // keeps the revenue (channel "rtbhouse"), the sheet's "RTB House Ads" row
+  // supplies the spend. If Triple Whale has no RTB House revenue yet but
+  // the sheet has spend, the row is added with that spend and $0 revenue.
+  if (pnlSheetRtbHouse && !pnlSheetRtbHouse.no_data) {
+    const list = mergedChannels || [];
+    const i = list.findIndex((c) => c.label === 'RTB House' && !c.no_data);
+    if (i !== -1) list[i] = { ...list[i], spend_actual: pnlSheetRtbHouse.actual, spend_source: 'pnl_sheet' };
+    else if (pnlSheetRtbHouse.actual) {
+      const j = list.findIndex((c) => c.label === 'RTB House');
+      const row = { label: 'RTB House', no_data: false, spend_actual: pnlSheetRtbHouse.actual, revenue_actual: 0, orders: 0, cv_source: 'pixel', spend_source: 'pnl_sheet' };
+      if (j !== -1) list[j] = row; else list.push(row);
+    }
+    if (!mergedChannels && list.length) result.channels = list;
+  }
   if (mergedChannels) {
     result.channels = mergedChannels;
   }
@@ -707,6 +733,9 @@ async function buildDataResponse({ site, start, end, compare }) {
 // Whale left as `no_data: true` or never mentioned at all. Returns null
 // only when there's truly nothing from either source, so callers can keep
 // their existing "omit `channels` if falsy" behavior unchanged.
+// First day RTB House replaced Criteo (see CHANNEL_MAP in src/triplewhale.js).
+const RTB_HOUSE_FROM = '2026-10-01';
+
 function mergeChannelSources(twChannels, sheetChannels) {
   if (!twChannels && !sheetChannels) return null;
   const byLabel = new Map();
