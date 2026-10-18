@@ -593,7 +593,7 @@ function monthDateRange(month, isCurrent) {
 // cache and pull fresh from Shopify (see src/month-cache.js). The Sync button
 // always sends it — a manual Sync should mean "fresh numbers"; the automatic
 // closed-month fill below doesn't, so it gets the cached copy instantly.
-async function fetchLiveData(site, month, isCurrent, opts) {
+async function fetchLiveData(site, month, isCurrent, opts, attempt = 0) {
   const { start, end } = monthDateRange(month, isCurrent);
   const refreshParam = opts && opts.refresh ? '&refresh=1' : '';
   const url = `${BACKEND_URL}/api/data?site=${encodeURIComponent(site)}&start=${start}&end=${end}&compare=yoy,mom${refreshParam}`;
@@ -615,7 +615,20 @@ async function fetchLiveData(site, month, isCurrent, opts) {
   const timeout = setTimeout(() => controller.abort(), 240000);
   try {
     const res = await fetch(url, { signal: controller.signal });
-    const body = await res.json();
+    const text = await res.text();
+    let body;
+    try { body = JSON.parse(text); } catch (e) {
+      // Render answers with an HTML page instead of JSON while a new version
+      // is deploying (the old server stops mid-request) — 18 Oct 2026: "Failed:
+      // ND.COM (Unexpected token '<', "<!DOCTYPE "... is not valid JSON)". Wait
+      // and try again (up to ~2 minutes) instead of failing the sync.
+      if (attempt < 8) {
+        clearTimeout(timeout);
+        await new Promise(r => setTimeout(r, 15000));
+        return fetchLiveData(site, month, isCurrent, opts, attempt + 1);
+      }
+      throw new Error('The server is restarting (an update was just deployed) — click Sync again in a minute');
+    }
     if (!res.ok) throw new Error(body.error || `Backend returned ${res.status}`);
     return body;
   } finally {
