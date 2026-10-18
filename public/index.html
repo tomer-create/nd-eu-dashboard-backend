@@ -164,6 +164,18 @@
   body.mobile-mode table.dtable tr.c4-group { border:none; background:transparent; padding:10px 2px 0; margin-bottom:4px; }
   body.mobile-mode table.dtable tr.c4-group td { border:none; padding:0; margin:0; }
   body.mobile-mode table.dtable tr.c4-gtotal { border:1.5px solid var(--border); background:var(--surface-1); }
+  /* Separate group blocks (2026-10-18) */
+  .c4-blocks { display:flex; flex-direction:column; gap:14px; }
+  .c4-block { border:1px solid var(--border); border-radius:10px; padding:14px 14px 6px; background:var(--surface-1); }
+  .c4-block-head { display:flex; align-items:baseline; flex-wrap:wrap; gap:4px 10px; margin-bottom:10px; }
+  .c4-block-name { margin:0; font-size:13px; font-weight:700; letter-spacing:.04em; text-transform:uppercase; color:var(--text-primary); }
+  .c4-block-meta { font-size:11.5px; color:var(--text-muted); }
+  .c4-gtiles { margin-bottom:10px; }
+  /* same column widths in every block so the blocks line up */
+  body:not(.mobile-mode) table.c4-table { table-layout:fixed; min-width:760px; }
+  body:not(.mobile-mode) table.c4-table th:nth-child(1) { width:27%; } body:not(.mobile-mode) table.c4-table th:nth-child(2), body:not(.mobile-mode) table.c4-table th:nth-child(3) { width:18%; }
+  body:not(.mobile-mode) table.c4-table th:nth-child(4) { width:12%; } body:not(.mobile-mode) table.c4-table th:nth-child(5) { width:10%; } body:not(.mobile-mode) table.c4-table th:nth-child(6) { width:15%; }
+  body.mobile-mode .c4-block { padding:10px 10px 4px; }
   table.c4-table tr.c4-idle td:first-child { font-style:normal; font-weight:650; color:var(--text-secondary); }
   .c4-notes { margin-top:12px; border-top:1px solid var(--gridline); padding-top:10px; }
   .c4-notes summary { cursor:pointer; font-size:12px; font-weight:650; color:var(--text-secondary); list-style:none; display:inline-flex; align-items:center; gap:6px; }
@@ -3208,15 +3220,26 @@ function renderChannels(monthData) {
       <td>${c4Share(c.revenue_ratio)}</td>
     </tr>`;
   };
-  // Groups: header, channels (by revenue), then the group's combined row —
-  // total cost (spend), revenue, combined ROAS, combined average order
-  // (revenue ÷ orders over the channels with an order count) and share of
-  // Gross Sales.
+  // Summary tiles (the whole section's strip and each group's).
+  const tile = (label, valueHtml, chipHtml, extra) => `<div class="kpi-tile c4-tile"><div class="kpi-top"><span class="kpi-label">${label}</span>${chipHtml ? `<span class="c4-tchip"><span class="lbl">${cmpLbl}</span>${chipHtml}</span>` : ''}</div><div class="kpi-value">${valueHtml}</div>${extra}</div>`;
+  const pctTile = (actual, goal, kind) => {
+    const pct = goal ? actual / goal : null;
+    if (pct === null) return `<div class="pbar-pct">No ${kind === 'spend' ? 'budget' : 'goal'} set</div>`;
+    const cls = c4BarClass(pct, kind, isCurrent);
+    return `<div class="pbar-track"><div class="pbar-fill ${cls}" style="width:${Math.max(0, Math.min(pct * 100, 100))}%"></div></div><div class="pbar-pct">${pctLabel(pct)} of ${fmtVal(goal, 'currency-full')} ${kind === 'spend' ? 'budget' : 'goal'}</div>`;
+  };
+  // Groups (2026-10-18, Tomer: "separate the groups completely, each with the
+  // summary strip the whole section has — spend, revenue, overall ROAS, avg
+  // AOV — and keep the summary row"). Each group is its own block: title,
+  // four tiles, then its own table of channels (by revenue) closed by the
+  // group's total row — total cost (spend), revenue, combined ROAS, combined
+  // average order (revenue ÷ orders over the channels with an order count)
+  // and share of Gross Sales.
   const grouped = C4_GROUPS.map(g => ({ ...g, chans: activeChannels.filter(c => g.labels.includes(c.label)) }));
   const otherChans = activeChannels.filter(c => !C4_GROUPS.some(g => g.labels.includes(c.label)));
   if (otherChans.length) grouped.push({ key: 'other', name: 'Other channels', chans: otherChans });
-  const groupSummaries = [];
-  let rows = grouped.filter(g => g.chans.length).map(g => {
+  const theadHtml = `<thead><tr><th style="text-align:left">Channel</th><th>Spend vs budget</th><th>Revenue vs goal</th><th title="Return on ad spend: revenue ÷ spend">ROAS</th><th title="Average order value: channel revenue ÷ attributed orders">Avg order</th><th title="Channel revenue as a share of total gross sales">Share of sales</th></tr></thead>`;
+  const groupBlocks = grouped.filter(g => g.chans.length).map(g => {
     const chs = g.chans.map(rowChanges);
     const sp = g.chans.reduce((t, c) => t + (c.spend_actual || 0), 0);
     const spG = g.chans.reduce((t, c) => t + (c.spend_goal || 0), 0);
@@ -3227,18 +3250,29 @@ function renderChannels(monthData) {
     const gch = groupChanges(g.chans, chs);
     gch.aov = aOrd ? aRev / aOrd : null;
     const withAov = chs.filter(ch => ch.aovOrders).length;
-    groupSummaries.push({ name: g.name, spend: sp, revenue: rv, share });
-    return `<tr class="c4-group"><td colspan="6"><span class="c4-group-name">${g.name}</span><span class="c4-group-meta">${g.chans.length} channel${g.chans.length === 1 ? '' : 's'}</span></td></tr>`
-      + g.chans.map((c, j) => channelRow(c, chs[j])).join('')
-      + `<tr class="c4-gtotal">
-      <td><span class="c4-name">${g.name} — combined</span><span class="c4-src">Total cost, revenue and ROAS of the channels above</span></td>
+    const gRoas = sp ? rv / sp : null;
+    const aovWhy = `Revenue ÷ orders of the ${withAov} channel${withAov === 1 ? '' : 's'} here with an order count`;
+    const gTiles = `<div class="c4-tiles c4-gtiles">
+      ${tile('Spend', fmtVal(sp, 'currency-full'), oneChip(gch, 'spend', 'spend'), pctTile(sp, spG, 'spend'))}
+      ${tile('Revenue', fmtVal(rv, 'currency-full'), oneChip(gch, 'revenue', 'revenue'), pctTile(rv, rvG, 'revenue'))}
+      ${tile('Overall ROAS', gRoas !== null ? fmtVal(gRoas, 'ratio') : '—', oneChip(gch, 'roas', 'roas'), `<div class="pbar-pct c4-tile-sub">${gRoas !== null ? `Every ${sym()}1 spent brought back ${sym()}${gRoas.toFixed(2)}` : 'No spend this period'}</div>`)}
+      ${tile('Avg order value', gch.loading ? '…' : (gch.aov !== null ? fmtVal(gch.aov, 'currency-full') : '—'), null, `<div class="pbar-pct c4-tile-sub">${gch.loading ? 'Loading…' : (gch.aov !== null ? `${aovWhy} (${fmtVal(aOrd, 'number')} orders)` : 'No order counts for the channels in this group')}</div>`)}
+    </div>`;
+    const gTotal = `<tr class="c4-gtotal">
+      <td><span class="c4-name">${g.name} — total</span><span class="c4-src">Total cost, revenue and ROAS of the channels above</span></td>
       <td>${c4Fig(sp, spG || null, 'spend', chip(gch, 'spend', 'spend'), isCurrent)}</td>
       <td>${c4Fig(rv, rvG || null, 'revenue', chip(gch, 'revenue', 'revenue'), isCurrent)}</td>
-      <td>${c4Roas(sp ? rv / sp : null, chip(gch, 'roas', 'roas'))}</td>
-      <td>${gch.loading ? '<span class="c4-dim">…</span>' : (gch.aov !== null ? `<span title="Revenue ÷ orders of the ${withAov} channel${withAov === 1 ? '' : 's'} here with an order count">${fmtVal(gch.aov, 'currency-full')}</span>` : '<span class="c4-dim" title="No order counts for the channels in this group">—</span>')}</td>
+      <td>${c4Roas(gRoas, chip(gch, 'roas', 'roas'))}</td>
+      <td>${gch.loading ? '<span class="c4-dim">…</span>' : (gch.aov !== null ? `<span title="${aovWhy}">${fmtVal(gch.aov, 'currency-full')}</span>` : '<span class="c4-dim" title="No order counts for the channels in this group">—</span>')}</td>
       <td>${c4Share(share)}</td>
     </tr>`;
+    return `<section class="c4-block" data-group="${g.key}">
+      <div class="c4-block-head"><h3 class="c4-block-name">${g.name}</h3><span class="c4-block-meta">${g.chans.length} channel${g.chans.length === 1 ? '' : 's'} · ${fmtVal(share, 'percent')} of Gross Sales</span></div>
+      ${gTiles}
+      <div class="c4-table-wrap"><table class="dtable c4-table">${theadHtml}<tbody>${g.chans.map((c, j) => channelRow(c, chs[j])).join('')}${gTotal}</tbody></table></div>
+    </section>`;
   }).join('');
+  let rows = '';
   if (idleChannels.length) {
     rows += `<tr class="no-data-row c4-idle"><td>No activity</td><td colspan="5">${idleChannels.map(c => c4Name(c.label)).join(', ')} — no spend, revenue or goal this period</td></tr>`;
   }
@@ -3293,13 +3327,6 @@ function renderChannels(monthData) {
   const top = activeChannels.filter(c => c.label !== 'Organic' && (c.revenue_actual || 0) > 0)[0];
   // Tiles: the chosen comparison's chip top-right.
   const tileChips = (key, kind) => oneChip(totCh, key, kind);
-  const tile = (label, valueHtml, chipHtml, extra) => `<div class="kpi-tile c4-tile"><div class="kpi-top"><span class="kpi-label">${label}</span>${chipHtml ? `<span class="c4-tchip"><span class="lbl">${cmpLbl}</span>${chipHtml}</span>` : ''}</div><div class="kpi-value">${valueHtml}</div>${extra}</div>`;
-  const pctTile = (actual, goal, kind) => {
-    const pct = goal ? actual / goal : null;
-    if (pct === null) return `<div class="pbar-pct">No ${kind === 'spend' ? 'budget' : 'goal'} set</div>`;
-    const cls = c4BarClass(pct, kind, isCurrent);
-    return `<div class="pbar-track"><div class="pbar-fill ${cls}" style="width:${Math.max(0, Math.min(pct * 100, 100))}%"></div></div><div class="pbar-pct">${pctLabel(pct)} of ${fmtVal(goal, 'currency-full')} ${kind === 'spend' ? 'budget' : 'goal'}</div>`;
-  };
   const totRoasBack = totRoas !== null ? (sym() + totRoas.toFixed(2)) : null;
   const tiles = `<div class="c4-tiles">
     ${tile('Marketing spend', fmtVal(totSpendActual, 'currency-full'), tileChips('spend', 'spend'), pctTile(totSpendActual, totSpendGoal, 'spend'))}
@@ -3335,7 +3362,7 @@ function renderChannels(monthData) {
       <li><b>ROAS</b> — revenue ÷ spend: how much revenue each ${sym()}1 of spend brought back.</li>
       <li><b>Avg order</b> — channel revenue ÷ the orders attributed to it (Triple Whale Pixel orders, or the channel’s own reported conversions for Channel-CV channels). <b>Collabs Affiliate</b>: Shopify has no “Collabs order” flag, so its Avg order uses the orders that used a Collabs creator code — their sales after discount ÷ their number. The Collabs app’s revenue also includes link-only orders without a code, so those orders aren’t in this figure.</li>
       <li><b>Share of sales</b> — the channel’s revenue as a share of total Gross Sales; the bar shows that share (a full bar = 100%).</li>
-      <li><b>Groups</b> — Paid ads (Google, Meta, Snapchat, Pinterest, Shop App, Microsoft, TikTok Ads, ChatGPT Ads), Email, SMS &amp; retargeting (Attentive, Criteo), Affiliates (Collabs, impact.com, TikTok Affiliates) and Organic (Organic, TikTok Organic). Each group’s combined row adds up its channels’ spend (total cost) and revenue; combined ROAS = group revenue ÷ group spend; combined Avg order = revenue ÷ orders of the group’s channels that have an order count; its change adds up the channels that have that comparison, shown when they make up at least 80% of the group.</li>
+      <li><b>Groups</b> — Paid ads (Google, Meta, Snapchat, Pinterest, Shop App, Microsoft, TikTok Ads, ChatGPT Ads), Email, SMS &amp; retargeting (Attentive, Criteo), Affiliates (Collabs, impact.com, TikTok Affiliates) and Organic (Organic, TikTok Organic). Each group is its own block: four tiles (Spend, Revenue, Overall ROAS, Avg order value), its channels, and a total row. The group’s spend (total cost) and revenue add up its channels; Overall ROAS = group revenue ÷ group spend; Avg order value = revenue ÷ orders of the group’s channels that have an order count; its change adds up the channels that have that comparison, shown when they make up at least 80% of the group. The <b>All channels</b> block at the bottom holds the overall Total (equal to Gross Sales).</li>
       ${monthData.c4_gross ? `<li><b>Organic</b> — Gross Sales (${fmtVal(monthData.c4_gross, 'currency-full')}, as in Key Metrics) minus every other channel above, so the Total always equals Gross Sales. The P&amp;L sheet’s Organic row works the same way, but several channels here come live from Triple Whale rather than from the sheet, so it’s recomputed on the dashboard’s own figures${(() => { const o = monthData.channels.find(c => c.plug); return o && o.sheet_revenue != null ? ` (the sheet’s Organic figure: ${fmtVal(o.sheet_revenue, 'currency-full')})` : ''; })()}.${state.month === DATA.meta.current_month ? ' For the month in progress, channels from the sheet run through its last update, so Organic also picks up the days the sheet hasn’t reached yet.' : ''}</li>` : ''}
       <li><b>Changes (switch: vs last year / vs last ${periodWord})</b> — Triple Whale channels compare the same dates last year and ${prevAvailable ? 'in the previous ' + periodWord : '(no previous period here)'}. Channels from the P&amp;L sheet (Organic, TikTok Affiliates, TikTok Organic, Collabs, Attentive…) have no YoY: the sheet’s 2025 columns only hold Gross and Net Sales, not channels. Their ${momLabel()} compares the previous closed ${periodWord} on this dashboard${isCurMonth ? `; for the month in progress the sheet has one month-to-date figure, so it compares per day — this month’s figure ÷ the days it covers against last month’s full figure ÷ its days (ROAS as is). The days covered come from the sheet’s own Gross Sales as a share of Shopify’s so far${pace ? ` (${Math.round(pace.share * 100)}% of ${pace.elapsed} days ≈ ${pace.curDays.toFixed(1)} days)` : ''}. Those chips have a dotted underline; hover one for details` : ''}. The Total’s changes and Avg order cover the Triple Whale channels. Spend changes are grey — more spend isn’t good or bad by itself. Hover a “—” to see why it’s blank.</li>
       ${attNote}
@@ -3345,10 +3372,12 @@ function renderChannels(monthData) {
   </details>`;
 
   el.innerHTML = `${head}${tiles}
-  <div class="c4-table-wrap"><table class="dtable c4-table">
-    <thead><tr><th style="text-align:left">Channel</th><th>Spend vs budget</th><th>Revenue vs goal</th><th title="Return on ad spend: revenue ÷ spend">ROAS</th><th title="Average order value: channel revenue ÷ attributed orders">Avg order</th><th title="Channel revenue as a share of total gross sales">Share of sales</th></tr></thead>
-    <tbody>${rows}${totalRow}</tbody>
-  </table></div>
+  <div class="c4-blocks">${groupBlocks}
+    <section class="c4-block c4-block-all">
+      <div class="c4-block-head"><h3 class="c4-block-name">All channels</h3><span class="c4-block-meta">The groups above together</span></div>
+      <div class="c4-table-wrap"><table class="dtable c4-table">${theadHtml}<tbody>${rows}${totalRow}</tbody></table></div>
+    </section>
+  </div>
   ${notes}`;
 }
 document.getElementById('section-4').addEventListener('click', (ev) => {
