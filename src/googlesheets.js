@@ -871,6 +871,29 @@ async function fetchPnlSheetShopPpc(site, start) {
   return { no_data: false, actual, source: 'pnl_sheet' };
 }
 
+// RTB House spend (added 2026-10-18, Tomer: "the RTB HOUSE ADS Spend you
+// pull from the spreadsheet"). Triple Whale has no RTB House ad connection,
+// so its spend is always 0 there; the real figure is the sheet's "RTB House
+// Ads" cost row (formerly "Criteo Ads"). Same shape / failure behaviour as
+// fetchPnlSheetShopPpc above.
+async function fetchPnlSheetRtbHouseSpend(site, start) {
+  if (!start) return null;
+  const rows = await fetchSheetRows(site);
+  if (!rows) return null;
+  const actualColIdx = findActualColIdx(rows, start, site);
+  if (actualColIdx === -1) return null;
+  const { costRows } = findRevenueAndCostRows(rows);
+  if (costRows.size === 0) return null;
+  const rIdx = costRows.get(['RTB House Ads', 'Criteo Ads']);
+  if (rIdx === undefined) {
+    console.error(`googlesheets: could not find an "RTB House Ads" row in the ${site} CSV's Cost section`);
+    return { no_data: true };
+  }
+  const actual = parseNum(rows[rIdx] ? rows[rIdx][actualColIdx] : undefined);
+  if (actual === null) return { no_data: true };
+  return { no_data: false, actual, source: 'pnl_sheet' };
+}
+
 // Marketing-only cost rows — added 2026-09-07 to make Section 1's "Blended
 // ROAS" tile live (previously 100% frozen at the embedded snapshot, even for
 // the CURRENT month — unlike every other KPI tile, it had no live-sync path
@@ -1133,6 +1156,7 @@ module.exports = {
   fetchPnlSheetTotalCost,
   fetchPnlSheetMarketingSpend,
   fetchPnlSheetShopPpc,
+  fetchPnlSheetRtbHouseSpend,
   fetchPnlSheetGoals,
   CHANNEL_ROWS,
   OTHER_COST_ROWS,
