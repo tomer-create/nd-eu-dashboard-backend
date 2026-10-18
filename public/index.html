@@ -170,7 +170,7 @@
   .c4-block-head { display:flex; align-items:baseline; flex-wrap:wrap; gap:4px 10px; margin-bottom:10px; }
   .c4-block-name { margin:0; font-size:13px; font-weight:700; letter-spacing:.04em; text-transform:uppercase; color:var(--text-primary); }
   .c4-block-meta { font-size:11.5px; color:var(--text-muted); }
-  .c4-gtiles { margin-bottom:10px; }
+  .c4-gtiles, .c4-block-all > .c4-tiles { margin-bottom:10px; }
   /* same column widths in every block so the blocks line up */
   body:not(.mobile-mode) table.c4-table { table-layout:fixed; min-width:760px; }
   body:not(.mobile-mode) table.c4-table th:nth-child(1) { width:27%; } body:not(.mobile-mode) table.c4-table th:nth-child(2), body:not(.mobile-mode) table.c4-table th:nth-child(3) { width:18%; }
@@ -3328,7 +3328,7 @@ function renderChannels(monthData) {
     };
   }
   const totalRow = `<tr class="total-row">
-      <td><span class="c4-name">Total</span><span class="c4-src">All channels above</span></td>
+      <td><span class="c4-name">Total</span><span class="c4-src">All channels in the groups below</span></td>
       <td>${c4Fig(totSpendActual, totSpendGoal, 'spend', chip(totCh, 'spend', 'spend'), isCurrent)}</td>
       <td>${c4Fig(totRevActual, totRevGoal, 'revenue', chip(totCh, 'revenue', 'revenue'), isCurrent)}</td>
       <td>${c4Roas(totRoas, chip(totCh, 'roas', 'roas'))}</td>
@@ -3342,7 +3342,7 @@ function renderChannels(monthData) {
   const tileChips = (key, kind) => oneChip(totCh, key, kind);
   const totRoasBack = totRoas !== null ? (sym() + totRoas.toFixed(2)) : null;
   const tiles = `<div class="c4-tiles">
-    ${tile('Marketing spend', fmtVal(totSpendActual, 'currency-full'), tileChips('spend', 'spend'), pctTile(totSpendActual, totSpendGoal, 'spend'))}
+    ${tile('Total Marketing Spend', fmtVal(totSpendActual, 'currency-full'), tileChips('spend', 'spend'), pctTile(totSpendActual, totSpendGoal, 'spend'))}
     ${tile('Revenue from channels', fmtVal(totRevActual, 'currency-full'), tileChips('revenue', 'revenue'), pctTile(totRevActual, totRevGoal, 'revenue'))}
     ${tile('Overall ROAS', totRoas !== null ? fmtVal(totRoas, 'ratio') : '—', tileChips('roas', 'roas'), `<div class="pbar-pct c4-tile-sub">${totRoasBack ? `Every ${sym()}1 spent brought back ${totRoasBack}` : 'No spend this period'}</div>`)}
     ${tile('Top revenue channel', top ? c4Name(top.label) : '—', null, `<div class="pbar-pct c4-tile-sub">${top ? `${fmtVal(top.revenue_actual, 'currency-full')} · ${fmtVal(top.revenue_ratio, 'percent')} of sales${top.roas ? ' · ' + fmtVal(top.roas, 'ratio') + ' ROAS' : ''}` : 'No channel revenue yet'}</div>`)}
@@ -3375,7 +3375,7 @@ function renderChannels(monthData) {
       <li><b>ROAS</b> — revenue ÷ spend: how much revenue each ${sym()}1 of spend brought back.</li>
       <li><b>Avg order</b> — channel revenue ÷ the orders attributed to it (Triple Whale Pixel orders, or the channel’s own reported conversions for Channel-CV channels). <b>Collabs Affiliate</b>: Shopify has no “Collabs order” flag, so its Avg order uses the orders that used a Collabs creator code — their sales after discount ÷ their number. The Collabs app’s revenue also includes link-only orders without a code, so those orders aren’t in this figure.</li>
       <li><b>Share of sales</b> — the channel’s revenue as a share of total Gross Sales; the bar shows that share (a full bar = 100%).</li>
-      <li><b>Groups</b> — Paid ads (Google, Meta, Snapchat, Pinterest, Shop App, Microsoft, TikTok Ads, ChatGPT Ads), Email, SMS &amp; retargeting (Attentive, RTB House — Criteo until September 2026), Affiliates (Collabs, impact.com, TikTok Affiliates) and Organic (Organic, TikTok Organic). Each group is its own block: four tiles (Spend, Revenue, Overall ROAS, Avg order value), its channels, and a total row. The group’s spend (total cost) and revenue add up its channels; Overall ROAS = group revenue ÷ group spend; Avg order value = revenue ÷ orders of the group’s channels that have an order count; its change adds up the channels that have that comparison, shown when they make up at least 80% of the group. The <b>All channels</b> block at the bottom holds the overall Total (equal to Gross Sales).</li>
+      <li><b>Groups</b> — Paid ads (Google, Meta, Snapchat, Pinterest, Shop App, Microsoft, TikTok Ads, ChatGPT Ads), Email, SMS &amp; retargeting (Attentive, RTB House — Criteo until September 2026), Affiliates (Collabs, impact.com, TikTok Affiliates) and Organic (Organic, TikTok Organic). Each group is its own block: four tiles (Spend, Revenue, Overall ROAS, Avg order value), its channels, and a total row. The group’s spend (total cost) and revenue add up its channels; Overall ROAS = group revenue ÷ group spend; Avg order value = revenue ÷ orders of the group’s channels that have an order count; its change adds up the channels that have that comparison, shown when they make up at least 80% of the group. The <b>All channels</b> block at the top holds the section’s summary tiles and the overall Total (equal to Gross Sales).</li>
       ${monthData.c4_gross ? `<li><b>Organic</b> — Gross Sales (${fmtVal(monthData.c4_gross, 'currency-full')}, as in Key Metrics) minus every other channel above, so the Total always equals Gross Sales. The P&amp;L sheet’s Organic row works the same way, but several channels here come live from Triple Whale rather than from the sheet, so it’s recomputed on the dashboard’s own figures${(() => { const o = monthData.channels.find(c => c.plug); return o && o.sheet_revenue != null ? ` (the sheet’s Organic figure: ${fmtVal(o.sheet_revenue, 'currency-full')})` : ''; })()}.${state.month === DATA.meta.current_month ? ' For the month in progress, channels from the sheet run through its last update, so Organic also picks up the days the sheet hasn’t reached yet.' : ''}</li>` : ''}
       <li><b>Changes (switch: vs last year / vs last ${periodWord})</b> — Triple Whale channels compare the same dates last year and ${prevAvailable ? 'in the previous ' + periodWord : '(no previous period here)'}. Channels from the P&amp;L sheet (Organic, TikTok Affiliates, TikTok Organic, Collabs, Attentive…) have no YoY: the sheet’s 2025 columns only hold Gross and Net Sales, not channels. Their ${momLabel()} compares the previous closed ${periodWord} on this dashboard${isCurMonth ? `; for the month in progress the sheet has one month-to-date figure, so it compares per day — this month’s figure ÷ the days it covers against last month’s full figure ÷ its days (ROAS as is). The days covered come from the sheet’s own Gross Sales as a share of Shopify’s so far${pace ? ` (${Math.round(pace.share * 100)}% of ${pace.elapsed} days ≈ ${pace.curDays.toFixed(1)} days)` : ''}. Those chips have a dotted underline; hover one for details` : ''}. The Total’s changes and Avg order cover the Triple Whale channels. Spend changes are grey — more spend isn’t good or bad by itself. Hover a “—” to see why it’s blank.</li>
       ${attNote}
@@ -3384,12 +3384,18 @@ function renderChannels(monthData) {
     </ul>
   </details>`;
 
-  el.innerHTML = `${head}${tiles}
-  <div class="c4-blocks">${groupBlocks}
+  // All channels: the section's summary tiles and the overall Total row in
+  // one block at the top (2026-10-18, Tomer: "take the All channels ... and
+  // move it right under the line of the Marketing spend ... add them
+  // together to 1 section"), then the four group blocks.
+  el.innerHTML = `${head}
+  <div class="c4-blocks">
     <section class="c4-block c4-block-all">
-      <div class="c4-block-head"><h3 class="c4-block-name">All channels</h3><span class="c4-block-meta">The groups above together</span></div>
+      <div class="c4-block-head"><h3 class="c4-block-name">All channels</h3><span class="c4-block-meta">Every channel below together</span></div>
+      ${tiles}
       <div class="c4-table-wrap"><table class="dtable c4-table">${theadHtml}<tbody>${rows}${totalRow}</tbody></table></div>
     </section>
+    ${groupBlocks}
   </div>
   ${notes}`;
 }
