@@ -899,7 +899,8 @@ const MARKETING_COST_ROWS = [
   'TikTok Shop Ads',
   'Commision', // sheet's own spelling (not a typo in this file) — exact-match lookup
   'TikTok Gifting',
-  'Criteo Ads',
+  'Criteo Ads', // renamed 'RTB House Ads' in the sheet (Oct 2026) — whichever exists is counted
+  'RTB House Ads',
   'PPC Agency Fee',
   'Shop PPC',
   'Impact TBU',
@@ -990,7 +991,12 @@ const GOAL_CHANNELS = [
   { label: 'Google Ads', rev: ['Google Revenue'], cost: ['Google Ads'] },
   { label: 'Meta Ads', rev: ['Meta Revenue'], cost: ['Meta ads'] },
   { label: 'TikTok Ads', rev: ['TikTok Ads'], cost: ['TikTok Shop Ads'] },
-  { label: 'Criteo', rev: ['Criteo'], cost: ['Criteo Ads'] },
+  // The sheet renamed its Criteo rows to "RTB House" / "RTB House Ads" (Oct
+  // 2026, Criteo replaced by RTB House). The same rows hold Criteo's goals
+  // up to September and RTB House's from October, so each dashboard row
+  // only takes its own months (months = index range in GOAL_MONTHS).
+  { label: 'Criteo', rev: ['RTB House', 'Criteo'], cost: ['RTB House Ads', 'Criteo Ads'], months: [0, 8] },
+  { label: 'RTB House', rev: ['RTB House', 'Criteo'], cost: ['RTB House Ads', 'Criteo Ads'], months: [9, 11] },
   { label: 'Shop App', rev: ['Shop'], cost: ['Shop PPC'] },
   // impact.com spend goal: affiliate fees; on EU / IL the dashboard has always
   // included Impact TBU too (COM shows Impact TBU as its own Other Costs line).
@@ -1083,6 +1089,7 @@ async function fetchPnlSheetGoals(site) {
     const organicBroken = REVENUE_GOAL_HOLD.includes(site) || (gross !== null && at(revenueRows, 'Organic Revenue (P.N)') === null);
     const channels = {};
     for (const c of GOAL_CHANNELS) {
+      if (c.months && (GOAL_MONTHS.indexOf(mon) < c.months[0] || GOAL_MONTHS.indexOf(mon) > c.months[1])) continue;
       const g = {};
       if (!(c.organicGuard && organicBroken)) {
         let rev = at(revenueRows, c.rev);
