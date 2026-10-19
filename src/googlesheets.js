@@ -1126,6 +1126,16 @@ async function fetchPnlSheetGoals(site) {
         if (plus !== null) sp = (sp || 0) + plus;
         if (sp !== null) g.spend_goal = sp;
       }
+      // ROAS goal (2026-10-19, Tomer: "for the ROAS we entering a goal, you
+      // pull the goal from the spreadsheet next to the Revenue Breakdown on
+      // column C"). Column C of the channel's Revenue Breakdown row (column
+      // A says "ROAS"); the same figure for every month.
+      if (c.rev) {
+        const ri = revenueRows.get(c.rev);
+        const raw = ri === undefined || !rows[ri] ? null : rows[ri][2];
+        const roas = raw == null ? null : parseNum(String(raw).replace(/[x×]/gi, ''));
+        if (roas !== null && roas > 0) g.roas_goal = roas;
+      }
       if (Object.keys(g).length) channels[c.label] = g;
     }
 
