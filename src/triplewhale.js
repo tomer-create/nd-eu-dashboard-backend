@@ -259,6 +259,13 @@ const CHANNEL_MAP = [
   // revenue, but never any ad spend (it's not a paid platform), so `spend`
   // will consistently come back 0/absent for this id, same as impact.com.
   { ids: ['shop_app'], label: 'Shop App', cv: 'pixel' },
+  // Organic Avg order (2026-10-19, Tomer chose "Triple Whale organic
+  // orders"): Triple Whale's organic channels — Organic & Social and Direct —
+  // revenue ÷ their orders, the same way every other channel's Avg order is
+  // worked out. Hidden: never shown as its own Section 4 row (server.js
+  // drops it from /api/data's channels); only /api/channels-change carries
+  // it, for the Organic block's Avg order value.
+  { ids: ['organic_and_social', 'Direct'], label: 'Organic (Triple Whale)', cv: 'pixel', hidden: true },
 ];
 
 const ALL_CHANNEL_IDS = CHANNEL_MAP.flatMap((c) => c.ids);
@@ -360,8 +367,12 @@ async function fetchChannelPerformance(site, start, end) {
   });
 
   return CHANNEL_MAP.filter((c) => inWindow(c, start, end)).map((c) => {
-    const row = c.ids.map((id) => byChannelId.get(id)).find(Boolean);
-    if (!row) return { label: c.label, no_data: true };
+    // Several ids for one entry (e.g. the hidden organic one) are added up.
+    const found = c.ids.map((id) => byChannelId.get(id)).filter(Boolean);
+    const row = found.length > 1
+      ? found.reduce((t, r) => { ['spend', 'channel_cv', 'pixel_cv', 'pixel_orders', 'channel_orders'].forEach((f) => { t[f] = (t[f] || 0) + Number(r[f] || 0); }); return t; }, {})
+      : found[0];
+    if (!row) return { label: c.label, hidden: c.hidden || undefined, no_data: true };
     const spend = Number(row.spend || 0);
     const revenue = Number((c.cv === 'channel' ? row.channel_cv : row.pixel_cv) || 0);
     // Orders on the same basis as the revenue (added 2026-10-08 for Section
@@ -370,6 +381,7 @@ async function fetchChannelPerformance(site, start, end) {
     const orders = Number((c.cv === 'channel' ? row.channel_orders : row.pixel_orders) || 0);
     return {
       label: c.label,
+      hidden: c.hidden || undefined,
       no_data: false,
       spend_actual: spend,
       revenue_actual: revenue,
