@@ -721,7 +721,7 @@ async function fetchSalesSummary(site, startISO, endISOExclusive) {
   untilDate.setUTCDate(untilDate.getUTCDate() - 1);
   const untilISO = untilDate.toISOString().slice(0, 10);
 
-  const shopifyqlQueryString = `FROM sales SHOW gross_sales, discounts, orders SINCE ${startISO} UNTIL ${untilISO}`;
+  const shopifyqlQueryString = `FROM sales SHOW gross_sales, discounts, orders, average_order_value SINCE ${startISO} UNTIL ${untilISO}`;
   const gqlQuery = `
     query SalesSummary($q: String!) {
       shopifyqlQuery(query: $q) {
@@ -748,7 +748,7 @@ async function fetchSalesSummary(site, startISO, endISOExclusive) {
   // hardcoded key/positional assumption.
   const colNames = (result.tableData.columns || []).map((c) => c.name);
   const rows = result.tableData.rows || [];
-  if (!rows.length) return { gross_sales: 0, discounts_total: 0, orders: 0 };
+  if (!rows.length) return { gross_sales: 0, discounts_total: 0, orders: 0, average_order_value: null };
   const row = rows[0];
   const values = Array.isArray(row) ? row : colNames.map((name) => row[name]);
   const obj = {};
@@ -760,6 +760,10 @@ async function fetchSalesSummary(site, startISO, endISOExclusive) {
     // a positive dollar figure, this file's convention throughout.
     discounts_total: Math.abs(Number(obj.discounts) || 0),
     orders: Number(obj.orders) || 0,
+    // Shopify's own AOV (2026-10-19, Tomer: "you should take Shopify data
+    // for AOV") — Shopify defines it as (gross sales − discounts) ÷ orders,
+    // i.e. returns are NOT taken off.
+    average_order_value: obj.average_order_value != null && obj.average_order_value !== '' && Number.isFinite(Number(obj.average_order_value)) ? Number(obj.average_order_value) : null,
   };
 }
 
