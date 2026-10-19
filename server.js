@@ -213,10 +213,13 @@ async function buildDataResponse({ site, start, end, compare }) {
   // TikTok Shop section (ND.COM only, added 2026-10-07 — see
   // src/tiktokshop.js). Started here so it runs alongside the Shopify pulls
   // below; resolves to null for other sites or on any Triple Whale error.
-  const tiktokShopPromise = fetchTikTokShop(site, start, end, { yoyRange, momRange }).catch((err) => {
+  // Per-source timing (2026-10-19, speeding up Sync): one log line per
+  // sync listing how long each source took, slowest first.
+  const timing = { t0: Date.now(), parts: {} };
+  const tiktokShopPromise = timeParts(timing, ['tiktokShop'], [fetchTikTokShop(site, start, end, { yoyRange, momRange }).catch((err) => {
     console.error(`fetchTikTokShop threw for site=${site}:`, err.message);
     return null;
-  });
+  })])[0];
 
   // YTD range for Section 3's "Return Ratio (YTD)" column — added 2026-08-25
   // per Tomer's request to fix it for ND.EU. Until now the live-sync path
@@ -379,7 +382,7 @@ async function buildDataResponse({ site, start, end, compare }) {
     pnlSheetMarketingSpendMom,
     pnlSheetShopPpc,
     pnlSheetRtbHouse,
-  ] = await Promise.all([
+  ] = await Promise.all(timeParts(timing, SYNC_PARTS, [
     fetchOrders(site, start, end),
     wantYoy ? fetchOrdersLight(site, yoyRange.start, yoyRange.end) : Promise.resolve(null),
     wantMom ? fetchOrdersLight(site, momRange.start, momRange.end) : Promise.resolve(null),
@@ -487,7 +490,7 @@ async function buildDataResponse({ site, start, end, compare }) {
           return null;
         })
       : Promise.resolve(null),
-  ]);
+  ]));
 
   // fetchCountryBreakdown now returns { rows, groupedBy, fallbackReason? }
   // instead of a bare array — added 2026-08-25 when Tomer asked for Sales by
@@ -721,7 +724,20 @@ async function buildDataResponse({ site, start, end, compare }) {
 
   const tiktokShop = await tiktokShopPromise;
   if (tiktokShop) result.tiktok_shop = tiktokShop;
+  const slow = Object.entries(timing.parts).sort((a, b) => b[1] - a[1]).slice(0, 8).map(([k, ms]) => `${k} ${(ms / 1000).toFixed(1)}s`).join(', ');
+  console.log(`sync timing site=${site} ${start}..${end}: total ${((Date.now() - timing.t0) / 1000).toFixed(1)}s — slowest: ${slow}`);
   return result;
+}
+
+// Names of the buildDataResponse Promise.all results, in order (for timing).
+const SYNC_PARTS = ['orders', 'yoyOrders', 'momOrders', 'currentReversals', 'yoyReversals', 'momReversals', 'currentCogs', 'yoyCogs', 'momCogs', 'topReturns', 'ytdTopReturns', 'currentCountryResult', 'yoyCountryResult', 'momCountryResult', 'currentSalesSummary', 'yoySalesSummary', 'momSalesSummary', 'currentAcquisition', 'yoyAcquisition', 'momAcquisition', 'retailPrices', 'channelPerformance', 'pnlSheetChannels', 'pnlSheetOtherCosts', 'pnlSheetTotalCost', 'pnlSheetTotalCostMom', 'pnlSheetMarketingSpend', 'pnlSheetMarketingSpendMom', 'pnlSheetShopPpc', 'pnlSheetRtbHouse'];
+// Wraps each promise so its time-to-settle is recorded under its name.
+function timeParts(timing, names, promises) {
+  return promises.map((p, i) => {
+    const t = Date.now();
+    const done = () => { timing.parts[names[i] || ('part' + i)] = Date.now() - t; };
+    return Promise.resolve(p).then((v) => { done(); return v; }, (e) => { done(); throw e; });
+  });
 }
 
 // Combines Section 4 channel data from Triple Whale and the P&L Google
