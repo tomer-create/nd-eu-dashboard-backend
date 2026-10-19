@@ -208,6 +208,18 @@ function splitDateRange(startISO, endISO) {
   }
   return out;
 }
+// Shopify's order search reads a plain date in `created_at:<DATE` as "up to
+// the END of DATE" (checked live 2026-10-19 on ND.COM: created_at:>=2026-10-01
+// created_at:<2026-10-02 returned 1,222 orders = Oct 1 + Oct 2, while Oct 1
+// alone is 633). So [start, end) is written as >= start and <= the day
+// before end. This also fixes the old single query, which picked up the
+// whole `end` day too (e.g. September's figures included Oct 1's orders).
+function orderSearchQuery(startISO, endISO) {
+  const re = /^\d{4}-\d{2}-\d{2}$/;
+  if (!re.test(endISO)) return `created_at:>=${startISO} created_at:<${endISO} -financial_status:voided`;
+  const last = new Date(Date.parse(endISO + 'T00:00:00Z') - 86400000).toISOString().slice(0, 10);
+  return `created_at:>=${startISO} created_at:<=${last} -financial_status:voided`;
+}
 // Every order created in [startISO, endISO) (voided orders excluded), for
 // the given orders query.
 async function fetchOrdersChunked(site, query, startISO, endISO, label) {
@@ -216,7 +228,7 @@ async function fetchOrdersChunked(site, query, startISO, endISO, label) {
   let pages = 0;
   const chunks = splitDateRange(startISO, endISO);
   const lists = await Promise.all(chunks.map(async ([a, b]) => {
-    const searchQuery = `created_at:>=${a} created_at:<${b} -financial_status:voided`;
+    const searchQuery = orderSearchQuery(a, b);
     const orders = [];
     let cursor = null;
     let hasNextPage = true;
@@ -230,7 +242,13 @@ async function fetchOrdersChunked(site, query, startISO, endISO, label) {
     }
     return orders;
   }));
-  const all = [].concat(...lists);
+  // Belt and braces: never count an order twice even if two chunks overlap.
+  const seen = new Set();
+  const all = [];
+  for (const list of lists) for (const o of list) {
+    if (o.id) { if (seen.has(o.id)) continue; seen.add(o.id); }
+    all.push(o);
+  }
   console.log(`shopify orders ${label} site=${site} ${startISO}..${endISO}: ${all.length} orders, ${pages} pages, ${chunks.length} chunks, ${Date.now() - t0}ms (throttle retries during: ${ordersStats.throttled - thr0})`);
   return all;
 }
@@ -346,6 +364,7 @@ const ORDERS_QUERY_TIER_REVENUE = `
       pageInfo { hasNextPage endCursor }
       edges {
         node {
+          id
           customer { email }
           totalDiscountsSet { shopMoney { amount } }
           lineItems(first: 100) {
@@ -434,6 +453,7 @@ const ORDERS_QUERY_LIGHT = `
       pageInfo { hasNextPage endCursor }
       edges {
         node {
+          id
           totalDiscountsSet { shopMoney { amount } }
           lineItems(first: 100) {
             edges {
