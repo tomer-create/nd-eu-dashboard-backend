@@ -171,6 +171,15 @@
   .c4-block-name { margin:0; font-size:13px; font-weight:700; letter-spacing:.04em; text-transform:uppercase; color:var(--text-primary); }
   .c4-block-meta { font-size:11.5px; color:var(--text-muted); }
   .c4-gtiles, .c4-block-all > .c4-tiles { margin-bottom:10px; }
+  table.oc-table .c4-fig { align-items:flex-end; }
+  table.oc-table td { vertical-align:middle; }
+  .c4-toggle { margin-left:auto; border:1px solid var(--border); background:var(--surface-1); color:var(--text-secondary); border-radius:7px; padding:5px 11px; font:inherit; font-size:11.5px; font-weight:650; cursor:pointer; display:inline-flex; align-items:center; gap:6px; }
+  .c4-toggle::after { content:'▾'; font-size:10px; transition:transform .15s ease; }
+  .c4-block.is-open .c4-toggle::after { transform:rotate(180deg); }
+  .c4-toggle:hover { color:var(--text-primary); border-color:var(--text-muted); }
+  .c4-toggle:focus-visible { outline:2px solid var(--series-1); outline-offset:2px; }
+  .c4-block:not(.is-open) .c4-gtiles { margin-bottom:8px; }
+  @media (prefers-reduced-motion: reduce) { .c4-toggle::after { transition:none; } }
   /* same column widths in every block so the blocks line up */
   body:not(.mobile-mode) table.c4-table { table-layout:fixed; min-width:760px; }
   body:not(.mobile-mode) table.c4-table th:nth-child(1) { width:27%; } body:not(.mobile-mode) table.c4-table th:nth-child(2), body:not(.mobile-mode) table.c4-table th:nth-child(3) { width:18%; }
@@ -1519,6 +1528,7 @@ function combineChannels(entries) {
   const labels = [...new Set(entries.flatMap(e => e.monthData.channels.map(c => c.label)))];
   return labels.map(label => {
     let spend_actual = 0, spend_goal = 0, revenue_actual = 0, revenue_goal = 0, dataCount = 0;
+    let roasW = 0, roasWS = 0, roasN = 0, roasSum = 0; // ROAS goal: budget-weighted across months / sites
     entries.forEach(e => {
       // A site can have this channel removed entirely (e.g. ND.EU dropped
       // Microsoft Ads/TikTok Ads/Pinterest/TikTok Affiliates + Organic on
@@ -1544,10 +1554,12 @@ function combineChannels(entries) {
       spend_goal += (c.spend_goal || 0) * e.fx;
       revenue_actual += (c.revenue_actual || 0) * e.fx;
       revenue_goal += (c.revenue_goal || 0) * e.fx;
+      if (c.roas_goal) { roasN++; roasSum += c.roas_goal; if (c.spend_goal) { roasW += c.roas_goal * c.spend_goal * e.fx; roasWS += c.spend_goal * e.fx; } }
     });
     if (dataCount === 0) return { label, no_data: true };
+    const roas_goal = roasWS ? roasW / roasWS : (roasN ? roasSum / roasN : null);
     return {
-      label, no_data: false, spend_actual, spend_goal, revenue_actual, revenue_goal,
+      label, no_data: false, spend_actual, spend_goal, revenue_actual, revenue_goal, roas_goal,
       roas: spend_actual ? revenue_actual / spend_actual : null,
       revenue_ratio: null, has_spend: spend_actual > 0,
     };
@@ -3011,14 +3023,33 @@ function c4Fig(actual, goal, kind, chip, isCurrent) {
   const sub = pct !== null ? `${pctLabel(pct)} of ${fmtVal(goal, 'currency-full')} ${goalWord}${over}` : `No ${goalWord} set`;
   return `<div class="c4-fig"><span class="c4-top"><span class="c4-amt">${fmtVal(actual, 'currency-full')}</span></span>${chip}${bar}<span class="c4-sub">${sub}</span></div>`;
 }
-function c4Roas(roas, chip) {
-  if (roas === null || roas === undefined) return `<div class="c4-fig"><span class="c4-top"><span class="c4-amt c4-dim">—</span></span><span class="c4-sub">No spend</span></div>`;
+// ROAS with its goal (2026-10-19, Tomer: "for the ROAS we entering a goal
+// ... show the progress bar according to the actual and the goal"). A
+// channel's goal is column C of its Revenue Breakdown row in the P&L sheet;
+// a group's / the total's is its revenue goal ÷ its budget (the plan's ROAS).
+function c4Roas(roas, chip, goal, goalWhy) {
+  const g = goal && goal > 0 ? goal : null;
+  if (roas === null || roas === undefined) return `<div class="c4-fig"><span class="c4-top"><span class="c4-amt c4-dim">—</span></span><span class="c4-sub">No spend${g ? ` · goal ${fmtVal(g, 'ratio')}` : ''}</span></div>`;
   const back = Math.abs(roas) >= 50 ? sym() + Math.round(roas).toLocaleString('en-US') : sym() + roas.toFixed(2);
-  return `<div class="c4-fig"><span class="c4-top"><span class="c4-amt">${fmtVal(roas, 'ratio')}</span></span>${chip}<span class="c4-sub">${back} back per ${sym()}1</span></div>`;
+  if (!g) return `<div class="c4-fig" title="${back} back per ${sym()}1"><span class="c4-top"><span class="c4-amt">${fmtVal(roas, 'ratio')}</span></span>${chip}<span class="c4-sub">No ROAS goal</span></div>`;
+  const pct = roas / g;
+  const bar = `<span class="c4-bar" role="img" aria-label="${pctLabel(pct)} of ROAS goal"><i class="pbar-fill ${pbarClass(pct, true, false)}" style="width:${Math.max(0, Math.min(pct * 100, 100))}%"></i></span>`;
+  return `<div class="c4-fig" title="${back} back per ${sym()}1${goalWhy ? ' · ' + goalWhy : ''}"><span class="c4-top"><span class="c4-amt">${fmtVal(roas, 'ratio')}</span></span>${chip}${bar}<span class="c4-sub">${pctLabel(pct)} of ${fmtVal(g, 'ratio')} goal</span></div>`;
 }
 // Share of sales bar = the share of Gross Sales itself (2026-10-18, Tomer:
 // "Share of sales change according to the % from the Gross sales") — was
 // scaled to the biggest channel.
+// A group's ROAS goal: its channels' column-C goals weighted by budget when
+// every channel with a budget has one (Paid ads, Email/SMS); otherwise the
+// group's revenue goal ÷ its budget, as the sheet plans it.
+function c4GroupRoasGoal(chans, spG, rvG) {
+  const budgeted = chans.filter(c => (c.spend_goal || 0) > 0);
+  if (budgeted.length && budgeted.every(c => c.roas_goal > 0)) {
+    const w = budgeted.reduce((t, c) => t + c.spend_goal, 0);
+    return { goal: budgeted.reduce((t, c) => t + c.roas_goal * c.spend_goal, 0) / w, why: 'Goal: the channels’ ROAS goals (P&amp;L sheet, column C) weighted by budget' };
+  }
+  return { goal: spG ? rvG / spG : null, why: 'Goal: the group’s revenue goal ÷ its budget' };
+}
 function c4Share(ratio) {
   if (ratio === null || ratio === undefined) return '<span class="c4-dim">—</span>';
   const w = Math.max(ratio > 0 ? 2 : 0, Math.min(100, ratio * 100));
@@ -3026,6 +3057,11 @@ function c4Share(ratio) {
 }
 let c4NotesOpen = false; // keeps "How these numbers work" open across re-renders
 const C4_TW_CHANNELS = ['Google Ads', 'TikTok Ads', 'Meta Ads', 'Microsoft Ads', 'impact.com', 'Criteo', 'RTB House', 'Pinterest', 'Snapchat', 'ChatGPT Ads', 'Shop App'];
+const C4_HIDDEN_ALWAYS = ['TikTok Organic'];
+// Which group blocks are open (2026-10-19, Tomer: show the first line and
+// open the full breakdown on a button). Per device.
+let c4Open = {};
+try { c4Open = JSON.parse(localStorage.getItem('nd.c4.open') || '{}') || {}; } catch (e) { c4Open = {}; }
 function c4Name(label) { return label.replace(/^Attentive - /, 'Attentive · '); }
 // Channel groups (2026-10-18, Tomer: "split Marketing & Sales Channel
 // Performance into 4 groups ... add combined ROAS for each group and Combined
@@ -3070,7 +3106,10 @@ function renderChannels(monthData) {
   // HIDDEN_CHANNELS_BY_SITE, so `hidden` is empty there and every channel
   // still renders (see combineChannels() for how the hidden site's own
   // contribution is zeroed rather than excluded in that combined view).
-  const hidden = HIDDEN_CHANNELS_BY_SITE[state.site] || [];
+  // TikTok Organic isn't shown on its own (2026-10-19, Tomer: "for the organic
+  // section, leave only one line ... don't show the TikTok Organic"): Organic
+  // = Gross Sales − every other channel shown, so it includes TikTok Organic.
+  const hidden = (HIDDEN_CHANNELS_BY_SITE[state.site] || []).concat(C4_HIDDEN_ALWAYS);
   monthData = c4OrganicPlug(monthData, hidden);
   const visibleChannels = hidden.length ? monthData.channels.filter(c => !hidden.includes(c.label)) : monthData.channels;
   const chg = channelsChangeData();
@@ -3228,7 +3267,7 @@ function renderChannels(monthData) {
       <td><span class="c4-name">${c4Name(c.label)}</span>${src ? `<span class="c4-src">${src}</span>` : ''}</td>
       <td>${c4Fig(c.spend_actual || 0, c.spend_goal, 'spend', chip(ch, 'spend', 'spend'), isCurrent)}</td>
       <td>${c4Fig(c.revenue_actual || 0, c.revenue_goal, 'revenue', chip(ch, 'revenue', 'revenue'), isCurrent)}</td>
-      <td>${c4Roas(c.roas, chip(ch, 'roas', 'roas'))}</td>
+      <td>${c4Roas(c.roas, chip(ch, 'roas', 'roas'), c.roas_goal, 'Goal from the P&amp;L sheet (column C)')}</td>
       <td>${aovCell(ch, ch.collabs)}</td>
       <td>${c4Share(c.revenue_ratio)}</td>
     </tr>`;
@@ -3252,6 +3291,12 @@ function renderChannels(monthData) {
   const otherChans = activeChannels.filter(c => !C4_GROUPS.some(g => g.labels.includes(c.label)));
   if (otherChans.length) grouped.push({ key: 'other', name: 'Other channels', chans: otherChans });
   const theadHtml = `<thead><tr><th style="text-align:left">Channel</th><th>Spend vs budget</th><th>Revenue vs goal</th><th title="Return on ad spend: revenue ÷ spend">ROAS</th><th title="Average order value: channel revenue ÷ attributed orders">Avg order</th><th title="Channel revenue as a share of total gross sales">Share of sales</th></tr></thead>`;
+  const roasTile = (roas, goal) => {
+    const back = roas !== null ? `Every ${sym()}1 spent brought back ${sym()}${roas.toFixed(2)}` : 'No spend this period';
+    if (roas === null || !goal) return `<div class="pbar-pct c4-tile-sub">${back}</div>`;
+    const pct = roas / goal;
+    return `<div class="pbar-track"><div class="pbar-fill ${pbarClass(pct, true, false)}" style="width:${Math.max(0, Math.min(pct * 100, 100))}%"></div></div><div class="pbar-pct" title="${back}">${pctLabel(pct)} of ${fmtVal(goal, 'ratio')} goal</div>`;
+  };
   const groupBlocks = grouped.filter(g => g.chans.length).map(g => {
     const chs = g.chans.map(rowChanges);
     const sp = g.chans.reduce((t, c) => t + (c.spend_actual || 0), 0);
@@ -3264,25 +3309,32 @@ function renderChannels(monthData) {
     gch.aov = aOrd ? aRev / aOrd : null;
     const withAov = chs.filter(ch => ch.aovOrders).length;
     const gRoas = sp ? rv / sp : null;
+    const gRG = c4GroupRoasGoal(g.chans, spG, rvG), gRoasGoal = gRG.goal;
+    const oneLine = g.key === 'org';
+    const open = !oneLine && !!c4Open[g.key];
     const aovWhy = `Revenue ÷ orders of the ${withAov} channel${withAov === 1 ? '' : 's'} here with an order count`;
     const gTiles = `<div class="c4-tiles c4-gtiles">
       ${tile('Spend', fmtVal(sp, 'currency-full'), oneChip(gch, 'spend', 'spend'), pctTile(sp, spG, 'spend'))}
       ${tile('Revenue', fmtVal(rv, 'currency-full'), oneChip(gch, 'revenue', 'revenue'), pctTile(rv, rvG, 'revenue'))}
-      ${tile('Overall ROAS', gRoas !== null ? fmtVal(gRoas, 'ratio') : '—', oneChip(gch, 'roas', 'roas'), `<div class="pbar-pct c4-tile-sub">${gRoas !== null ? `Every ${sym()}1 spent brought back ${sym()}${gRoas.toFixed(2)}` : 'No spend this period'}</div>`)}
+      ${tile('Overall ROAS', gRoas !== null ? fmtVal(gRoas, 'ratio') : '—', oneChip(gch, 'roas', 'roas'), roasTile(gRoas, gRoasGoal))}
       ${tile('Avg order value', gch.loading ? '…' : (gch.aov !== null ? fmtVal(gch.aov, 'currency-full') : '—'), null, `<div class="pbar-pct c4-tile-sub">${gch.loading ? 'Loading…' : (gch.aov !== null ? `${aovWhy} (${fmtVal(aOrd, 'number')} orders)` : 'No order counts for the channels in this group')}</div>`)}
     </div>`;
     const gTotal = `<tr class="c4-gtotal">
       <td><span class="c4-name">${g.name} — total</span><span class="c4-src">Total cost, revenue and ROAS of the channels above</span></td>
       <td>${c4Fig(sp, spG || null, 'spend', chip(gch, 'spend', 'spend'), isCurrent)}</td>
       <td>${c4Fig(rv, rvG || null, 'revenue', chip(gch, 'revenue', 'revenue'), isCurrent)}</td>
-      <td>${c4Roas(gRoas, chip(gch, 'roas', 'roas'))}</td>
+      <td>${c4Roas(gRoas, chip(gch, 'roas', 'roas'), gRoasGoal, gRG.why)}</td>
       <td>${gch.loading ? '<span class="c4-dim">…</span>' : (gch.aov !== null ? `<span title="${aovWhy}">${fmtVal(gch.aov, 'currency-full')}</span>` : '<span class="c4-dim" title="No order counts for the channels in this group">—</span>')}</td>
       <td>${c4Share(share)}</td>
     </tr>`;
-    return `<section class="c4-block" data-group="${g.key}">
-      <div class="c4-block-head"><h3 class="c4-block-name">${g.name}</h3><span class="c4-block-meta">${g.chans.length} channel${g.chans.length === 1 ? '' : 's'} · ${fmtVal(share, 'percent')} of Gross Sales</span></div>
+    const meta = oneLine
+      ? `Gross Sales − every other channel · ${fmtVal(share, 'percent')} of Gross Sales`
+      : `${g.chans.length} channel${g.chans.length === 1 ? '' : 's'} · ${fmtVal(share, 'percent')} of Gross Sales`;
+    const toggle = oneLine ? '' : `<button type="button" class="c4-toggle" data-c4toggle="${g.key}" aria-expanded="${open}" aria-controls="c4-detail-${g.key}">${open ? 'Hide breakdown' : `Show breakdown (${g.chans.length} channel${g.chans.length === 1 ? '' : 's'})`}</button>`;
+    return `<section class="c4-block${open ? ' is-open' : ''}" data-group="${g.key}">
+      <div class="c4-block-head"><h3 class="c4-block-name">${g.name}</h3><span class="c4-block-meta">${meta}</span>${toggle}</div>
       ${gTiles}
-      <div class="c4-table-wrap"><table class="dtable c4-table">${theadHtml}<tbody>${g.chans.map((c, j) => channelRow(c, chs[j])).join('')}${gTotal}</tbody></table></div>
+      ${oneLine ? '' : `<div class="c4-table-wrap c4-detail" id="c4-detail-${g.key}"${open ? '' : ' hidden'}><table class="dtable c4-table">${theadHtml}<tbody>${g.chans.map((c, j) => channelRow(c, chs[j])).join('')}${gTotal}</tbody></table></div>`}
     </section>`;
   }).join('');
   let rows = '';
@@ -3299,6 +3351,7 @@ function renderChannels(monthData) {
   const totRevGoal = dataChannels.reduce((s,c) => s + (c.revenue_goal||0), 0);
   const totRevRatio = dataChannels.reduce((s,c) => s + (c.revenue_ratio||0), 0);
   const totRoas = totSpendActual ? totRevActual / totSpendActual : null;
+  const totRoasGoal = totSpendGoal ? totRevGoal / totSpendGoal : null;
   // Total-row changes and AOV cover the Triple Whale channels (the only ones
   // with last-year data and order counts), summed current vs prior.
   let totCh = { loading: true };
@@ -3331,7 +3384,7 @@ function renderChannels(monthData) {
       <td><span class="c4-name">Total</span><span class="c4-src">All channels in the groups below</span></td>
       <td>${c4Fig(totSpendActual, totSpendGoal, 'spend', chip(totCh, 'spend', 'spend'), isCurrent)}</td>
       <td>${c4Fig(totRevActual, totRevGoal, 'revenue', chip(totCh, 'revenue', 'revenue'), isCurrent)}</td>
-      <td>${c4Roas(totRoas, chip(totCh, 'roas', 'roas'))}</td>
+      <td>${c4Roas(totRoas, chip(totCh, 'roas', 'roas'), totRoasGoal, 'Goal: total revenue goal ÷ total budget')}</td>
       <td>${totCh.loading ? '<span class="c4-dim">…</span>' : (totCh.aov !== null ? fmtVal(totCh.aov,'currency-full') : '—')}</td>
       <td>${fmtVal(totRevRatio,'percent')}</td>
     </tr>`;
@@ -3344,7 +3397,7 @@ function renderChannels(monthData) {
   const tiles = `<div class="c4-tiles">
     ${tile('Total Marketing Spend', fmtVal(totSpendActual, 'currency-full'), tileChips('spend', 'spend'), pctTile(totSpendActual, totSpendGoal, 'spend'))}
     ${tile('Revenue from channels', fmtVal(totRevActual, 'currency-full'), tileChips('revenue', 'revenue'), pctTile(totRevActual, totRevGoal, 'revenue'))}
-    ${tile('Overall ROAS', totRoas !== null ? fmtVal(totRoas, 'ratio') : '—', tileChips('roas', 'roas'), `<div class="pbar-pct c4-tile-sub">${totRoasBack ? `Every ${sym()}1 spent brought back ${totRoasBack}` : 'No spend this period'}</div>`)}
+    ${tile('Overall ROAS', totRoas !== null ? fmtVal(totRoas, 'ratio') : '—', tileChips('roas', 'roas'), roasTile(totRoas, totRoasGoal))}
     ${tile('Top revenue channel', top ? c4Name(top.label) : '—', null, `<div class="pbar-pct c4-tile-sub">${top ? `${fmtVal(top.revenue_actual, 'currency-full')} · ${fmtVal(top.revenue_ratio, 'percent')} of sales${top.roas ? ' · ' + fmtVal(top.roas, 'ratio') + ' ROAS' : ''}` : 'No channel revenue yet'}</div>`)}
   </div>`;
 
@@ -3372,10 +3425,10 @@ function renderChannels(monthData) {
     <summary>How these numbers work</summary>
     <ul>
       <li><b>Spend / Revenue vs goal</b> — actual so far against the P&amp;L sheet’s goal. Revenue bar: green at 95%+ of goal, amber 80–95%, red below 80% (blue while the period is still running). Spend bar: blue within budget, amber above 105%, red above 120%.</li>
-      <li><b>ROAS</b> — revenue ÷ spend: how much revenue each ${sym()}1 of spend brought back.</li>
+      <li><b>ROAS</b> — revenue ÷ spend: how much revenue each ${sym()}1 of spend brought back. <b>ROAS goal</b>: a channel’s goal is column C of its Revenue Breakdown row in the P&amp;L sheet; a group’s is its channels’ goals weighted by budget (or, when some channels have no ROAS goal, the group’s revenue goal ÷ its budget); the All channels goal is the total revenue goal ÷ the total budget. The bar shows actual ROAS against that goal (green at 95%+, amber 80–95%, red below 80%).</li>
       <li><b>Avg order</b> — channel revenue ÷ the orders attributed to it (Triple Whale Pixel orders, or the channel’s own reported conversions for Channel-CV channels). <b>Collabs Affiliate</b>: Shopify has no “Collabs order” flag, so its Avg order uses the orders that used a Collabs creator code — their sales after discount ÷ their number. The Collabs app’s revenue also includes link-only orders without a code, so those orders aren’t in this figure.</li>
       <li><b>Share of sales</b> — the channel’s revenue as a share of total Gross Sales; the bar shows that share (a full bar = 100%).</li>
-      <li><b>Groups</b> — Paid ads (Google, Meta, Snapchat, Pinterest, Shop App, Microsoft, TikTok Ads, ChatGPT Ads), Email, SMS &amp; retargeting (Attentive, RTB House — Criteo until September 2026), Affiliates (Collabs, impact.com, TikTok Affiliates) and Organic (Organic, TikTok Organic). Each group is its own block: four tiles (Spend, Revenue, Overall ROAS, Avg order value), its channels, and a total row. The group’s spend (total cost) and revenue add up its channels; Overall ROAS = group revenue ÷ group spend; Avg order value = revenue ÷ orders of the group’s channels that have an order count; its change adds up the channels that have that comparison, shown when they make up at least 80% of the group. The <b>All channels</b> block at the top holds the section’s summary tiles and the overall Total (equal to Gross Sales).</li>
+      <li><b>Groups</b> — Paid ads (Google, Meta, Snapchat, Pinterest, Shop App, Microsoft, TikTok Ads, ChatGPT Ads), Email, SMS &amp; retargeting (Attentive, RTB House — Criteo until September 2026), Affiliates (Collabs, impact.com, TikTok Affiliates) and Organic. Each group is its own block: four tiles (Spend, Revenue, Overall ROAS, Avg order value); “Show breakdown” opens its channels and total row. Organic is one line: Gross Sales minus every other channel, so it includes TikTok Organic, which isn’t shown on its own. The group’s spend (total cost) and revenue add up its channels; Overall ROAS = group revenue ÷ group spend; Avg order value = revenue ÷ orders of the group’s channels that have an order count; its change adds up the channels that have that comparison, shown when they make up at least 80% of the group. The <b>All channels</b> block at the top holds the section’s summary tiles and the overall Total (equal to Gross Sales).</li>
       ${monthData.c4_gross ? `<li><b>Organic</b> — Gross Sales (${fmtVal(monthData.c4_gross, 'currency-full')}, as in Key Metrics) minus every other channel above, so the Total always equals Gross Sales. The P&amp;L sheet’s Organic row works the same way, but several channels here come live from Triple Whale rather than from the sheet, so it’s recomputed on the dashboard’s own figures${(() => { const o = monthData.channels.find(c => c.plug); return o && o.sheet_revenue != null ? ` (the sheet’s Organic figure: ${fmtVal(o.sheet_revenue, 'currency-full')})` : ''; })()}.${state.month === DATA.meta.current_month ? ' For the month in progress, channels from the sheet run through its last update, so Organic also picks up the days the sheet hasn’t reached yet.' : ''}</li>` : ''}
       <li><b>Changes (switch: vs last year / vs last ${periodWord})</b> — Triple Whale channels compare the same dates last year and ${prevAvailable ? 'in the previous ' + periodWord : '(no previous period here)'}. Channels from the P&amp;L sheet (Organic, TikTok Affiliates, TikTok Organic, Collabs, Attentive…) have no YoY: the sheet’s 2025 columns only hold Gross and Net Sales, not channels. Their ${momLabel()} compares the previous closed ${periodWord} on this dashboard${isCurMonth ? `; for the month in progress the sheet has one month-to-date figure, so it compares per day — this month’s figure ÷ the days it covers against last month’s full figure ÷ its days (ROAS as is). The days covered come from the sheet’s own Gross Sales as a share of Shopify’s so far${pace ? ` (${Math.round(pace.share * 100)}% of ${pace.elapsed} days ≈ ${pace.curDays.toFixed(1)} days)` : ''}. Those chips have a dotted underline; hover one for details` : ''}. The Total’s changes and Avg order cover the Triple Whale channels. Spend changes are grey — more spend isn’t good or bad by itself. Hover a “—” to see why it’s blank.</li>
       ${attNote}
@@ -3393,13 +3446,26 @@ function renderChannels(monthData) {
     <section class="c4-block c4-block-all">
       <div class="c4-block-head"><h3 class="c4-block-name">All channels</h3><span class="c4-block-meta">Every channel below together</span></div>
       ${tiles}
-      <div class="c4-table-wrap"><table class="dtable c4-table">${theadHtml}<tbody>${rows}${totalRow}</tbody></table></div>
+      <div class="c4-table-wrap"><table class="dtable c4-table">${theadHtml}<tbody>${totalRow}${rows}</tbody></table></div>
     </section>
     ${groupBlocks}
   </div>
   ${notes}`;
 }
 document.getElementById('section-4').addEventListener('click', (ev) => {
+  const tg = ev.target.closest('button[data-c4toggle]');
+  if (tg) {
+    const k = tg.getAttribute('data-c4toggle');
+    c4Open[k] = !c4Open[k];
+    try { localStorage.setItem('nd.c4.open', JSON.stringify(c4Open)); } catch (e) { /* per-device preference only */ }
+    const sec = tg.closest('.c4-block'), det = sec && sec.querySelector('.c4-detail');
+    if (det) det.hidden = !c4Open[k];
+    if (sec) sec.classList.toggle('is-open', !!c4Open[k]);
+    tg.setAttribute('aria-expanded', String(!!c4Open[k]));
+    const n = det ? det.querySelectorAll('tbody tr:not(.c4-gtotal)').length : 0;
+    tg.textContent = c4Open[k] ? 'Hide breakdown' : `Show breakdown (${n} channel${n === 1 ? '' : 's'})`;
+    return;
+  }
   const btn = ev.target.closest('button[data-c4cmp]');
   if (!btn || btn.disabled) return;
   chCompareMode = btn.getAttribute('data-c4cmp');
@@ -3411,33 +3477,91 @@ document.getElementById('section-4').addEventListener('toggle', (ev) => {
 }, true);
 
 /* ---------------- Section 7: Other Costs ---------------- */
+// Other Costs (2026-10-19, Tomer: "replace the % of Total column with % from
+// gross sales as formula, add the progress bar to the goal and add YOY and
+// MOM like you have on the other sections").
+//  - % of Gross Sales = the cost ÷ Gross Sales (Key Metrics) for the period.
+//  - Bar: actual vs goal, coloured like a budget (blue within, amber above
+//    105%, red above 120%).
+//  - YoY: the P&L sheet has no 2025 cost lines, so only Product Cost has
+//    one (Shopify's COGS change, as on the COGS tile).
+//  - MoM / QoQ: against the previous closed period's own figures. For the
+//    month in progress the sheet holds month-to-date figures, so it compares
+//    per day (as Section 4 does); Product Cost uses Shopify's same-days MoM.
 function renderOtherCosts(monthData) {
   const el = document.getElementById('section-7');
+  const isCurrent = !!monthData.is_current;
+  const kp = (l) => (monthData.kpis || []).find(k => k.label === l);
+  const grossK = kp('Gross Sales');
+  const gross = grossK && !grossK.no_data && grossK.actual > 0 ? grossK.actual : null;
+  const cogsK = kp('COGS');
+  const mLbl = momLabel();
+  const prevMd = chPrevMonthData();
+  const pace = prevMd ? null : c4PaceInfo();
+  const paceMd = pace ? chMonthDataFor(pace.prevKey) : null;
+  const prevOf = (md) => md && md.other_costs ? Object.fromEntries(md.other_costs.map(o => [o.label, o])) : {};
+  const prevBy = prevOf(prevMd || paceMd);
+  const prevName = pace ? (DATA.meta.month_full_names[pace.prevKey] || pace.prevKey) : '';
+  const isCogs = (l) => l === 'Product Cost';
+  const noYoyWhy = 'The P&amp;L sheet has no 2025 figures for this cost line';
+  const momWhy = state.month === 'YTD' ? 'Year to Date has no previous period to compare with'
+    : (isQuarter(state.month) && isQuarterInProgress(state.month)) ? 'A quarter still in progress has no like-for-like previous quarter'
+    : (isCurrent && !pace) ? 'This month can’t be compared per day yet (the sheet’s figures for it aren’t loaded) — click Sync'
+    : 'No figure for this cost in the previous ' + (isQuarter(state.month) ? 'quarter' : 'month');
+  // per-day scale for the month in progress: Shopify-based lines cover all
+  // the days so far, sheet lines the days the sheet covers.
+  const k = (label) => pace ? pace.prevDays / (isCogs(label) || label === 'PR Box Cost + Product Cost' ? pace.elapsed : pace.curDays) : 1;
+  const paceTitle = pace ? `Per day: this month so far vs all of ${prevName}` : null;
+  let curPaced = 0, prevSum = 0, prevAny = false;
+  const changes = (o) => {
+    let yoy = null, mom = null, momPace = null;
+    if (isCogs(o.label) && cogsK && !cogsK.no_data) {
+      yoy = cogsK.yoy ?? null;
+      if (cogsK.mom !== undefined && cogsK.mom !== null) mom = cogsK.mom;
+    }
+    const p = prevBy[o.label];
+    if (p && typeof p.actual === 'number' && typeof o.actual === 'number') {
+      curPaced += o.actual * k(o.label); prevSum += p.actual; prevAny = true;
+      if (mom === null) { mom = chPct(o.actual * k(o.label), p.actual); if (pace) momPace = paceTitle; }
+    }
+    return { yoy, mom, momPace };
+  };
+  const goalCell = (actual, goal) => {
+    const pct = goal ? actual / goal : null;
+    if (pct === null) return '<span class="c4-dim">No goal set</span>';
+    const cls = c4BarClass(pct, 'spend', isCurrent);
+    return `<div class="c4-fig"><span class="c4-bar" role="img" aria-label="${pctLabel(pct)} of goal"><i class="pbar-fill ${cls}" style="width:${Math.max(0, Math.min(pct * 100, 100))}%"></i></span><span class="c4-sub">${pctLabel(pct)} of goal${pct > 1.05 ? ' · over' : ''}</span></div>`;
+  };
+  const ofGross = (v) => gross && typeof v === 'number' ? fmtVal(v / gross, 'percent') : '<span class="c4-dim" title="Gross Sales for this period isn’t loaded yet">—</span>';
   let rows = monthData.other_costs.map(o => {
-    const pct = o.goal ? o.actual / o.goal : null;
+    const ch = changes(o);
     return `<tr>
-      <td>${o.label}${o.note ? ` <span style="color:var(--text-muted);font-weight:400;font-size:10.5px">(${o.note})</span>` : ''}</td>
+      <td>${o.label}${o.note && state.site !== 'all' ? ` <span style="color:var(--text-muted);font-weight:400;font-size:10.5px">(${o.note})</span>` : ''}</td>
       <td>${fmtVal(o.goal, 'currency-full')}</td>
       <td>${fmtVal(o.actual, 'currency-full')}</td>
-      <td>${pctLabel(pct)}</td>
-      <td>${o.ratio_of_total !== null ? fmtVal(o.ratio_of_total, 'percent') : '—'}</td>
+      <td>${goalCell(o.actual, o.goal)}</td>
+      <td>${ofGross(o.actual)}</td>
+      <td>${c4Chip(ch.yoy, 'spend', false, isCogs(o.label) ? 'No Shopify COGS for the same period last year' : noYoyWhy)}</td>
+      <td>${c4Chip(ch.mom, 'spend', false, momWhy, ch.momPace)}</td>
     </tr>`;
   }).join('');
   const totGoal = monthData.total_other_costs_goal;
   const totActual = monthData.total_other_costs_actual;
-  const totPct = totGoal ? totActual / totGoal : null;
+  const totMom = prevAny ? chPct(curPaced, prevSum) : null;
   const totalRow = `<tr class="total-row">
       <td>Total</td>
       <td>${fmtVal(totGoal, 'currency-full')}</td>
       <td>${fmtVal(totActual, 'currency-full')}</td>
-      <td>${pctLabel(totPct)}</td>
-      <td>${fmtVal(1, 'percent')}</td>
+      <td>${goalCell(totActual, totGoal)}</td>
+      <td>${ofGross(totActual)}</td>
+      <td>${c4Chip(null, 'spend', false, 'No 2025 figures for most cost lines, so no total change vs last year')}</td>
+      <td>${c4Chip(totMom, 'spend', false, momWhy, pace && totMom !== null ? paceTitle + ' (lines with a figure in both)' : null)}</td>
     </tr>`;
-  el.innerHTML = `<table class="dtable">
-    <thead><tr><th style="text-align:left">Cost Item</th><th>Goal</th><th>Actual</th><th>vs. Goal</th><th>% of Total</th></tr></thead>
+  el.innerHTML = `<div class="c4-table-wrap"><table class="dtable oc-table">
+    <thead><tr><th style="text-align:left">Cost Item</th><th>Goal</th><th>Actual</th><th>vs. Goal</th><th title="Cost ÷ Gross Sales">% of Gross Sales</th><th>YoY</th><th>${mLbl}</th></tr></thead>
     <tbody>${rows}${totalRow}</tbody>
-  </table>
-  <div style="margin-top:10px;font-size:11px;color:var(--text-muted)">Total includes "PR Box Cost + Product Cost", which intentionally repeats Product Cost per the dashboard spec (so Product Cost is counted twice in this total, by design). Ad-platform spend (Google, Meta, TikTok, Criteo, etc.) is tracked in Section 4, not here.</div>`;
+  </table></div>
+  <div style="margin-top:10px;font-size:11px;color:var(--text-muted)">% of Gross Sales = cost ÷ Gross Sales${gross ? ` (${fmtVal(gross, 'currency-full')})` : ''}. Costs from the P&amp;L sheet have no last-year figures, so YoY only shows for Product Cost (Shopify COGS).${pace ? ` For the month in progress, ${mLbl} compares per day — this month so far against all of ${prevName} (dotted underline; hover for details).` : ''} Changes are grey: a higher cost isn’t good or bad by itself. Total includes "PR Box Cost + Product Cost", which intentionally repeats Product Cost per the dashboard spec (so Product Cost is counted twice in this total, by design). Ad-platform spend (Google, Meta, TikTok, RTB House, etc.) is tracked in Section 4, not here.</div>`;
 }
 
 /* ---------------- Section 8 (DOM id) / displayed as Section 6: Yotpo Loyalty ----------------
@@ -4703,6 +4827,7 @@ function applyPnlGoals(site, payload) {
       if (!x || c.no_data) return;
       if ('spend_goal' in x) c.spend_goal = x.spend_goal;
       if ('revenue_goal' in x) c.revenue_goal = x.revenue_goal;
+      if ('roas_goal' in x) c.roas_goal = x.roas_goal;
     });
     if (g.other_costs && md.other_costs) {
       let touched = false;
