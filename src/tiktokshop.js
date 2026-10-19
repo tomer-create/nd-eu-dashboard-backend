@@ -60,6 +60,26 @@ async function twSql(shopId, query, start, end) {
   return Array.isArray(rows) ? rows : [];
 }
 
+// Past periods (YoY, MoM, QoQ comparisons) don't change, so their results are
+// kept for PAST_TTL_MS instead of re-queried on every Sync (2026-10-19,
+// speeding up Sync). Only ranges that ended at least 3 days ago are kept —
+// Triple Whale can still be filling in the last couple of days.
+const PAST_TTL_MS = 6 * 60 * 60 * 1000;
+const pastCache = new Map(); // key -> { at, value }
+function isSettled(end) {
+  const cutoff = new Date(Date.now() - 3 * 86400000).toISOString().slice(0, 10);
+  return String(end) <= cutoff;
+}
+async function cachedPast(key, end, fn) {
+  if (!isSettled(end)) return fn();
+  const hit = pastCache.get(key);
+  if (hit && Date.now() - hit.at < PAST_TTL_MS) return hit.value;
+  const value = await fn();
+  pastCache.set(key, { at: Date.now(), value });
+  if (pastCache.size > 200) pastCache.delete(pastCache.keys().next().value);
+  return value;
+}
+
 const num = (v) => Number(v || 0);
 const isoOk = (s) => /^\d{4}-\d{2}-\d{2}$/.test(String(s));
 
@@ -177,8 +197,8 @@ async function fetchTikTokShop(site, start, end, { yoyRange, momRange } = {}) {
     const [cur, top, yoy, mom] = await Promise.all([
       fetchTotals(shopId, start, end),
       fetchTopProducts(shopId, start, end),
-      yoyRange ? fetchTotals(shopId, yoyRange.start, yoyRange.end).catch(() => null) : Promise.resolve(null),
-      momRange ? fetchTotals(shopId, momRange.start, momRange.end).catch(() => null) : Promise.resolve(null),
+      yoyRange ? cachedPast(`tot|${shopId}|${yoyRange.start}|${yoyRange.end}`, yoyRange.end, () => fetchTotals(shopId, yoyRange.start, yoyRange.end)).catch(() => null) : Promise.resolve(null),
+      momRange ? cachedPast(`tot|${shopId}|${momRange.start}|${momRange.end}`, momRange.end, () => fetchTotals(shopId, momRange.start, momRange.end)).catch(() => null) : Promise.resolve(null),
     ]);
     // Prior-period sales per top product (absolute values; the dashboard
     // computes the % so quarters / YTD can add months up first):
@@ -186,7 +206,7 @@ async function fetchTikTokShop(site, start, end, { yoyRange, momRange } = {}) {
     //   prev_gross  = previous period (MoM range, same length)
     //   prev3_gross = same period 3 months earlier (used for QoQ)
     const titles = top.map((p) => p.title);
-    const prior = (range) => (range ? fetchProductGross(shopId, range.start, range.end, titles).catch(() => null) : Promise.resolve(null));
+    const prior = (range) => (range ? cachedPast(`pg|${shopId}|${range.start}|${range.end}|${titles.join('\u0001')}`, range.end, () => fetchProductGross(shopId, range.start, range.end, titles)).catch(() => null) : Promise.resolve(null));
     const [pYoy, pMom, pQoq] = await Promise.all([prior(yoyRange), prior(momRange), prior(shiftMonths({ start, end }, 3))]);
     top.forEach((p) => {
       if (pYoy) p.yoy_gross = pYoy.get(p.title) || 0;
