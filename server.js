@@ -637,7 +637,9 @@ async function buildDataResponse({ site, start, end, compare }) {
   // `channels` entirely and the frontend keeps showing the existing
   // P&L-sheet snapshot for Section 4, same as before either feature
   // existed.
-  const mergedChannels = mergeChannelSources(channelPerformance, pnlSheetChannels);
+  // Hidden Triple Whale entries (e.g. 'Organic (Triple Whale)') are only for
+  // /api/channels-change, never their own Section 4 row.
+  const mergedChannels = mergeChannelSources(channelPerformance && channelPerformance.filter((c) => !c.hidden), pnlSheetChannels);
   // Shop App spend patch (added 2026-09-10) — mergeChannelSources above
   // always keeps Triple Whale's "Shop App" row wholesale once it isn't
   // no_data, so the sheet's real Shop PPC spend never gets a chance to fill
