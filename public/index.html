@@ -868,11 +868,15 @@ function mergeLiveIntoMonthData(monthData, live, site) {
     const map = LIVE_KPI_MAP[k.label];
     if (!map || live.kpis[map.key] === undefined) return k;
     const actual = live.kpis[map.key];
-    const yoy = k.label === 'AOV' ? aovYoy : (map.change && live.yoy ? live.yoy[map.change] : k.yoy);
-    const mom = k.label === 'AOV' ? aovMom : (map.change && live.mom ? live.mom[map.change] : k.mom);
+    // AOV from Shopify (2026-10-19): when the backend sends Shopify's own
+    // average_order_value (aov_basis 'shopify'), its change comes from the
+    // backend too; aovOnShopifyBasis() below handles everything else.
+    const shopAov = k.label === 'AOV' && live.kpis.aov_basis === 'shopify';
+    const yoy = shopAov ? (live.yoy && live.yoy.aov_change !== undefined ? live.yoy.aov_change : null) : k.label === 'AOV' ? aovYoy : (map.change && live.yoy ? live.yoy[map.change] : k.yoy);
+    const mom = shopAov ? (live.mom && live.mom.aov_change !== undefined ? live.mom.aov_change : null) : k.label === 'AOV' ? aovMom : (map.change && live.mom ? live.mom[map.change] : k.mom);
     const goal = k.goal;
     const pct_of_goal = (goal !== null && goal !== undefined && goal !== 0) ? actual / goal : null;
-    return Object.assign({}, k, { actual, yoy, mom, pct_of_goal, no_data: false });
+    return Object.assign({}, k, { actual, yoy, mom, pct_of_goal, no_data: false }, k.label === 'AOV' ? { shopify_aov: shopAov } : {});
   });
 
   const totalGross = live.kpis.gross_sales || 0;
@@ -1981,7 +1985,38 @@ function applyQoQ(q, sites, cur) {
 // Returns the monthData to render for the current state — a single
 // site+month (optionally live-synced), a single site's Year-to-Date, all
 // sites for one month (converted to USD), or all sites' Year-to-Date.
-function getMonthData() {
+// AOV on Shopify's basis (2026-10-19, Tomer: "you should take Shopify data
+// for AOV"). Shopify's own average_order_value = (Gross Sales − Discounts) ÷
+// Orders — returns are not taken off (ND.COM Oct 1–19: $69.48). A month
+// synced live carries Shopify's figure as is (shopify_aov); every other
+// view — the built-in months, All Sites, quarters, Year to Date, older saved
+// copies — is computed with the same formula from Gross Sales, Discounts
+// and Orders. The goal is put on the same basis from the P&L sheet's goals
+// for those three (the sheet's own "Avg. Cart Value" is Net Sales ÷ Orders).
+function aovOnShopifyBasis(md) {
+  if (!md || !md.kpis) return md;
+  const find = (l) => md.kpis.find(k => k.label === l);
+  const g = find('Gross Sales'), d = find('Discounts'), o = find('Number of Orders'), a = find('AOV');
+  if (!a || !g || !o || g.no_data || o.no_data || !(o.actual > 0) || typeof g.actual !== 'number') return md;
+  const disc = d && !d.no_data && typeof d.actual === 'number' ? Math.abs(d.actual) : 0;
+  const goal = g.goal && o.goal ? (g.goal - (d && d.goal ? Math.abs(d.goal) : 0)) / o.goal : null;
+  // prior-period AOV from the prior Gross Sales, Discounts and Orders implied
+  // by their own changes (value ÷ (1 + change)).
+  const change = (key) => {
+    const gc = g[key], oc = o[key], dc = d ? d[key] : null;
+    if (gc === null || gc === undefined || oc === null || oc === undefined || 1 + gc === 0 || 1 + oc === 0) return null;
+    if (disc && (dc === null || dc === undefined || 1 + dc === 0)) return null;
+    const prior = (g.actual / (1 + gc) - (disc ? disc / (1 + dc) : 0)) / (o.actual / (1 + oc));
+    return prior ? ((g.actual - disc) / o.actual) / prior - 1 : null;
+  };
+  const na = a.shopify_aov
+    ? Object.assign({}, a, { goal, pct_of_goal: goal ? a.actual / goal : null })
+    : Object.assign({}, a, { actual: (g.actual - disc) / o.actual, goal, no_data: false, yoy: change('yoy'), mom: change('mom') });
+  if (!a.shopify_aov) na.pct_of_goal = goal ? na.actual / goal : null;
+  return Object.assign({}, md, { kpis: md.kpis.map(k => k === a ? na : k) });
+}
+function getMonthData() { return aovOnShopifyBasis(getMonthDataBase()); }
+function getMonthDataBase() {
   const sites = state.site === 'all' ? Object.keys(DATA.sites) : [state.site];
   const isYTD = state.month === 'YTD';
   if (isQuarter(state.month)) return applyQoQ(state.month, sites, getQuarterData(state.month, sites));
@@ -2487,7 +2522,7 @@ function renderTikTokShop(monthData) {
     tileV('TikTok Shop GMV', gmvShown === null ? '—' : fmtVal(gmvShown, 'currency-full'), proxyChange('yoy'), proxyChange('mom'), true, gmvInfo.note, gmvTip),
     tile('Net Sales', tt.net_sales, 'currency-full', 'net_sales', true, 'Gross sales − discounts − refunds'),
     tile('Orders', tt.orders, 'number', 'orders', true, tt.orders && tt.units ? (tt.units / tt.orders).toFixed(1) + ' units per order' : ''),
-    tileV('AOV', fmtVal(aov, 'currency'), aovYoy, aovMom, true, gmvShown !== null && gmvInfo.orders ? fmtVal(gmvShown / gmvInfo.orders, 'currency') + ' GMV per order' : '', 'Average order value: Net Sales ÷ Orders (same basis as the dashboard’s AOV in Key Metrics)'),
+    tileV('AOV', fmtVal(aov, 'currency'), aovYoy, aovMom, true, gmvShown !== null && gmvInfo.orders ? fmtVal(gmvShown / gmvInfo.orders, 'currency') + ' GMV per order' : '', 'Average order value: TikTok Shop Net Sales ÷ Orders (Key Metrics’ AOV is Shopify’s: (Gross Sales − Discounts) ÷ Orders)'),
     tile('Units Sold', tt.units, 'number', 'units', true, ''),
     tile('Refunds', tt.refunds, 'currency-full', 'refunds', false, gmvShown ? fmtVal(tt.refunds / gmvShown, 'percent') + ' of GMV' : ''),
     tileV('Discount Ratio', fmtVal(discRatio, 'percent'), discRatioYoy, discRatioMom, false, hasProdDisc ? fmtVal(prodDisc, 'currency-full') + ' product discounts ÷ gross sales before discounts (excl. ' + fmtVal((tt.discounts || 0) - prodDisc, 'currency-full') + ' shipping discounts)' : 'Product discounts not loaded yet — click Sync', 'Product discounts ÷ Gross Sales TikTok (shipping discounts not included)'),
@@ -3396,6 +3431,9 @@ function renderChannels(monthData) {
   // Summary strip.
   const aovKpi = (monthData.kpis || []).find(k => k.label === 'AOV');
   const storeAov = aovKpi && !aovKpi.no_data && typeof aovKpi.actual === 'number' ? aovKpi.actual : null;
+  // All channels Avg order = the AOV in Key Metrics (Shopify's AOV).
+  const ordersK = (monthData.kpis || []).find(x => x.label === 'Number of Orders');
+  const ordersN = ordersK && !ordersK.no_data && typeof ordersK.actual === 'number' ? ordersK.actual : null;
   const top = activeChannels.filter(c => c.label !== 'Organic' && (c.revenue_actual || 0) > 0)[0];
   // Tiles: the chosen comparison's chip top-right.
   const tileChips = (key, kind) => oneChip(totCh, key, kind);
@@ -3405,7 +3443,7 @@ function renderChannels(monthData) {
     ${tile('Revenue from channels', fmtVal(totRevActual, 'currency-full'), tileChips('revenue', 'revenue'), pctTile(totRevActual, totRevGoal, 'revenue'))}
     ${tile('Overall ROAS', totRoas !== null ? fmtVal(totRoas, 'ratio') : '—', tileChips('roas', 'roas'), roasTile(totRoas, totRoasGoal))}
     ${tile('Top revenue channel', top ? c4Name(top.label) : '—', null, `<div class="pbar-pct c4-tile-sub">${top ? `${fmtVal(top.revenue_actual, 'currency-full')} · ${fmtVal(top.revenue_ratio, 'percent')} of sales${top.roas ? ' · ' + fmtVal(top.roas, 'ratio') + ' ROAS' : ''}` : 'No channel revenue yet'}</div>`)}
-    ${tile('Avg order', totCh.loading ? '…' : (totCh.aov !== null && totCh.aov !== undefined ? fmtVal(totCh.aov, 'currency-full') : '—'), null, `<div class="pbar-pct c4-tile-sub" title="Channel avg order: revenue Triple Whale attributes to the ad channels ÷ the orders it attributes to them. Store AOV (Key Metrics): Net Sales ÷ all orders.">${totCh.aovOrders ? `${fmtVal(totCh.aovOrders, 'number')} attributed orders · ` : ''}Store AOV ${storeAov !== null ? fmtVal(storeAov, 'currency-cents') : '—'}</div>`)}
+    ${tile('Avg order', storeAov !== null ? fmtVal(storeAov, 'currency-cents') : '—', c4Chip(aovKpi ? (mode === 'yoy' ? aovKpi.yoy : aovKpi.mom) : null, 'revenue', false, 'No comparison for AOV'), `<div class="pbar-pct c4-tile-sub" title="Shopify's AOV: (Gross Sales − Discounts) ÷ orders">Shopify AOV${ordersN !== null ? ` · ${fmtVal(ordersN, 'number')} orders` : ''} (same as Key Metrics)</div>`)}
   </div>`;
 
   // Compare switch + what the changes compare with.
@@ -3435,7 +3473,7 @@ function renderChannels(monthData) {
       <li><b>ROAS</b> — revenue ÷ spend: how much revenue each ${sym()}1 of spend brought back. <b>ROAS goal</b>: a channel’s goal is column C of its Revenue Breakdown row in the P&amp;L sheet; a group’s is its channels’ goals weighted by budget (or, when some channels have no ROAS goal, the group’s revenue goal ÷ its budget); the All channels goal is the total revenue goal ÷ the total budget. The bar shows actual ROAS against that goal (green at 95%+, amber 80–95%, red below 80%).</li>
       <li><b>Avg order</b> — channel revenue ÷ the orders attributed to it (Triple Whale Pixel orders, or the channel’s own reported conversions for Channel-CV channels). <b>Collabs Affiliate</b>: Shopify has no “Collabs order” flag, so its Avg order uses the orders that used a Collabs creator code — their sales after discount ÷ their number. The Collabs app’s revenue also includes link-only orders without a code, so those orders aren’t in this figure.</li>
       <li><b>Share of sales</b> — the channel’s revenue as a share of total Gross Sales; the bar shows that share (a full bar = 100%).</li>
-      <li><b>Groups</b> — Paid ads (Google, Meta, Snapchat, Pinterest, Shop App, Microsoft, TikTok Ads, ChatGPT Ads), Email, SMS &amp; retargeting (Attentive, RTB House — Criteo until September 2026), Affiliates (Collabs, impact.com, TikTok Affiliates) and Organic. Each group is its own block: four tiles (Spend, Revenue, Overall ROAS, Avg order value); “Show breakdown” opens its channels and total row. Organic is one line: Gross Sales minus every other channel, so it includes TikTok Organic, which isn’t shown on its own. The group’s spend (total cost) and revenue add up its channels; Overall ROAS = group revenue ÷ group spend; Avg order value = revenue ÷ orders of the group’s channels that have an order count; its change adds up the channels that have that comparison, shown when they make up at least 80% of the group. The <b>All channels</b> block at the top shows the totals for every channel: Total Marketing Spend, Revenue from channels (equals Gross Sales), Overall ROAS, the top revenue channel and Avg order. <b>Avg order</b> there is the ad channels’ attributed revenue ÷ the orders Triple Whale attributes to them, so it differs from the store AOV in Key Metrics (Net Sales ÷ all orders), which is shown under it.</li>
+      <li><b>Groups</b> — Paid ads (Google, Meta, Snapchat, Pinterest, Shop App, Microsoft, TikTok Ads, ChatGPT Ads), Email, SMS &amp; retargeting (Attentive, RTB House — Criteo until September 2026), Affiliates (Collabs, impact.com, TikTok Affiliates) and Organic. Each group is its own block: four tiles (Spend, Revenue, Overall ROAS, Avg order value); “Show breakdown” opens its channels and total row. Organic is one line: Gross Sales minus every other channel, so it includes TikTok Organic, which isn’t shown on its own. The group’s spend (total cost) and revenue add up its channels; Overall ROAS = group revenue ÷ group spend; Avg order value = revenue ÷ orders of the group’s channels that have an order count; its change adds up the channels that have that comparison, shown when they make up at least 80% of the group. The <b>All channels</b> block at the top shows the totals for every channel: Total Marketing Spend, Revenue from channels (equals Gross Sales), Overall ROAS, the top revenue channel and Avg order. <b>Avg order</b> there is Shopify’s AOV — (Gross Sales − Discounts) ÷ orders — the same as AOV in Key Metrics. Each group’s Avg order value is the revenue ÷ orders Triple Whale attributes to that group’s channels.</li>
       ${monthData.c4_gross ? `<li><b>Organic</b> — Gross Sales (${fmtVal(monthData.c4_gross, 'currency-full')}, as in Key Metrics) minus every other channel above, so the Total always equals Gross Sales. The P&amp;L sheet’s Organic row works the same way, but several channels here come live from Triple Whale rather than from the sheet, so it’s recomputed on the dashboard’s own figures${(() => { const o = monthData.channels.find(c => c.plug); return o && o.sheet_revenue != null ? ` (the sheet’s Organic figure: ${fmtVal(o.sheet_revenue, 'currency-full')})` : ''; })()}.${state.month === DATA.meta.current_month ? ' For the month in progress, channels from the sheet run through its last update, so Organic also picks up the days the sheet hasn’t reached yet.' : ''}</li>` : ''}
       <li><b>Changes (switch: vs last year / vs last ${periodWord})</b> — Triple Whale channels compare the same dates last year and ${prevAvailable ? 'in the previous ' + periodWord : '(no previous period here)'}. Channels from the P&amp;L sheet (Organic, TikTok Affiliates, TikTok Organic, Collabs, Attentive…) have no YoY: the sheet’s 2025 columns only hold Gross and Net Sales, not channels. Their ${momLabel()} compares the previous closed ${periodWord} on this dashboard${isCurMonth ? `; for the month in progress the sheet has one month-to-date figure, so it compares per day — this month’s figure ÷ the days it covers against last month’s full figure ÷ its days (ROAS as is). The days covered come from the sheet’s own Gross Sales as a share of Shopify’s so far${pace ? ` (${Math.round(pace.share * 100)}% of ${pace.elapsed} days ≈ ${pace.curDays.toFixed(1)} days)` : ''}. Those chips have a dotted underline; hover one for details` : ''}. The Total’s changes and Avg order cover the Triple Whale channels. Spend changes are grey — more spend isn’t good or bad by itself. Hover a “—” to see why it’s blank.</li>
       ${attNote}
