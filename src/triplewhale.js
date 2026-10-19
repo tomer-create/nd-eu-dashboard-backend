@@ -143,7 +143,11 @@ const TRIPLEWHALE_SQL_URL = 'https://api.triplewhale.com/api/v2/orcabase/api/sql
 // TikTok Shop block AND Section 4's Triple Whale channels for COM/EU/IL.
 // Fix: at most TW_MAX_CONCURRENT requests in flight, and a 429 (or 5xx) is
 // retried after a growing wait instead of failing the section.
-const TW_MAX_CONCURRENT = 2;
+// Raised 2 → 4 on 2026-10-19 (the queue had become the slowest part of an
+// ND.COM sync: Section 4's channel pull waited ~16s behind the TikTok Shop
+// queries). 429s are still retried below. Override with
+// TRIPLEWHALE_MAX_CONCURRENT in Render if Triple Whale starts refusing.
+const TW_MAX_CONCURRENT = Math.max(1, Number(process.env.TRIPLEWHALE_MAX_CONCURRENT) || 4);
 const TW_RETRY_DELAYS_MS = [1500, 3000, 6000, 12000];
 let twActive = 0;
 const twWaiting = [];
