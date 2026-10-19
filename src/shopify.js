@@ -142,14 +142,97 @@ async function graphql(site, query, variables = {}, attempt = 0) {
       ? body.errors
       : [{ message: typeof body.errors === 'string' ? body.errors : JSON.stringify(body.errors) }];
     const throttled = errorsArray.some((e) => e && e.extensions && e.extensions.code === 'THROTTLED');
-    if (throttled && attempt < 5) {
-      await new Promise((r) => setTimeout(r, 1000 * (attempt + 1)));
+    if (throttled && attempt < 8) {
+      // Wait for the points this query needs to restore (Shopify reports
+      // both in extensions.cost) rather than a fixed guess — matters now
+      // that order pages are fetched several at a time (2026-10-19).
+      const cost = body.extensions && body.extensions.cost;
+      const ts = cost && cost.throttleStatus;
+      let waitMs = 1000 * (attempt + 1);
+      if (ts && ts.restoreRate > 0) {
+        const need = (cost.requestedQueryCost || 0) - (ts.currentlyAvailable || 0);
+        waitMs = Math.min(10000, Math.max(250, Math.ceil((need / ts.restoreRate) * 1000) + 150 * (attempt + 1)));
+      }
+      ordersStats.throttled++;
+      await new Promise((r) => setTimeout(r, waitMs));
       return graphql(site, query, variables, attempt + 1);
     }
     throw new Error(`Shopify GraphQL error for "${site}": ${JSON.stringify(body.errors)}`);
   }
 
   return body.data;
+}
+
+// ---------------------------------------------------------------------------
+// Faster order fetching (2026-10-19, Tomer: "how can we improve the loading
+// time for syncing data?"). Order lists come 100 per page; ND.COM's month to
+// date is ~70 pages, and they used to be requested strictly one after
+// another (~68s per ND.COM sync, measured live Oct 19). The date range is
+// now split into day chunks that are paged at the same time, with at most
+// ORDER_PAGE_CONCURRENCY page requests in flight per store (shared by every
+// order fetch — current period, YoY, MoM, Yotpo tier revenue). Each chunk
+// keeps Shopify's own created_at sort and the chunks are joined in date
+// order, so the result is the same list of orders as before, in the same
+// order. Throttling is handled in graphql() above (waits for the points it
+// needs, up to 8 tries).
+const ORDER_PAGE_CONCURRENCY = Math.max(1, Number(process.env.SHOPIFY_ORDER_CONCURRENCY) || 6);
+const MAX_ORDER_CHUNKS = 12;
+const ordersStats = { throttled: 0 };
+const orderSlots = new Map(); // site -> { active, waiting: [] }
+async function withOrderSlot(site, fn) {
+  let s = orderSlots.get(site);
+  if (!s) { s = { active: 0, waiting: [] }; orderSlots.set(site, s); }
+  if (s.active >= ORDER_PAGE_CONCURRENCY) await new Promise((r) => s.waiting.push(r));
+  else s.active++;
+  try {
+    return await fn();
+  } finally {
+    const next = s.waiting.shift();
+    if (next) next(); else s.active--;
+  }
+}
+// [startISO, endISO) as consecutive [a, b) day chunks (plain YYYY-MM-DD).
+function splitDateRange(startISO, endISO) {
+  const re = /^\d{4}-\d{2}-\d{2}$/;
+  if (!re.test(startISO) || !re.test(endISO)) return [[startISO, endISO]];
+  const day = 86400000;
+  const a = Date.parse(startISO + 'T00:00:00Z'), b = Date.parse(endISO + 'T00:00:00Z');
+  const days = Math.round((b - a) / day);
+  if (!(days > 1)) return [[startISO, endISO]];
+  const n = Math.min(MAX_ORDER_CHUNKS, days);
+  const size = Math.ceil(days / n);
+  const out = [];
+  for (let t = a; t < b; t += size * day) {
+    const u = Math.min(b, t + size * day);
+    out.push([new Date(t).toISOString().slice(0, 10), new Date(u).toISOString().slice(0, 10)]);
+  }
+  return out;
+}
+// Every order created in [startISO, endISO) (voided orders excluded), for
+// the given orders query.
+async function fetchOrdersChunked(site, query, startISO, endISO, label) {
+  const t0 = Date.now();
+  const thr0 = ordersStats.throttled;
+  let pages = 0;
+  const chunks = splitDateRange(startISO, endISO);
+  const lists = await Promise.all(chunks.map(async ([a, b]) => {
+    const searchQuery = `created_at:>=${a} created_at:<${b} -financial_status:voided`;
+    const orders = [];
+    let cursor = null;
+    let hasNextPage = true;
+    while (hasNextPage) {
+      const data = await withOrderSlot(site, () => graphql(site, query, { cursor, searchQuery }));
+      pages++;
+      const { edges, pageInfo } = data.orders;
+      for (const edge of edges) orders.push(edge.node);
+      hasNextPage = pageInfo.hasNextPage;
+      cursor = pageInfo.endCursor;
+    }
+    return orders;
+  }));
+  const all = [].concat(...lists);
+  console.log(`shopify orders ${label} site=${site} ${startISO}..${endISO}: ${all.length} orders, ${pages} pages, ${chunks.length} chunks, ${Date.now() - t0}ms (throttle retries during: ${ordersStats.throttled - thr0})`);
+  return all;
 }
 
 const ORDERS_QUERY = `
@@ -237,20 +320,7 @@ const ORDERS_QUERY = `
 // period and the YoY/MoM comparison periods (see fetchOrdersLight below)
 // since both use the same aggregate() gross_sales calculation.
 async function fetchOrders(site, startISO, endISO) {
-  const searchQuery = `created_at:>=${startISO} created_at:<${endISO} -financial_status:voided`;
-  const orders = [];
-  let cursor = null;
-  let hasNextPage = true;
-
-  while (hasNextPage) {
-    const data = await graphql(site, ORDERS_QUERY, { cursor, searchQuery });
-    const { edges, pageInfo } = data.orders;
-    for (const edge of edges) orders.push(edge.node);
-    hasNextPage = pageInfo.hasNextPage;
-    cursor = pageInfo.endCursor;
-  }
-
-  return orders;
+  return fetchOrdersChunked(site, ORDERS_QUERY, startISO, endISO, 'full');
 }
 
 // Minimal per-order query for Section 8's Net Sales-by-tier column (added
@@ -297,20 +367,7 @@ const ORDERS_QUERY_TIER_REVENUE = `
 // fetchOrders so callers of the existing function are never at risk of
 // picking up this query's shape by accident.
 async function fetchOrdersForTierRevenue(site, startISO, endISO) {
-  const searchQuery = `created_at:>=${startISO} created_at:<${endISO} -financial_status:voided`;
-  const orders = [];
-  let cursor = null;
-  let hasNextPage = true;
-
-  while (hasNextPage) {
-    const data = await graphql(site, ORDERS_QUERY_TIER_REVENUE, { cursor, searchQuery });
-    const { edges, pageInfo } = data.orders;
-    for (const edge of edges) orders.push(edge.node);
-    hasNextPage = pageInfo.hasNextPage;
-    cursor = pageInfo.endCursor;
-  }
-
-  return orders;
+  return fetchOrdersChunked(site, ORDERS_QUERY_TIER_REVENUE, startISO, endISO, 'tier');
 }
 
 // Slimmed-down version of ORDERS_QUERY for the YoY/MoM comparison periods.
@@ -409,20 +466,7 @@ const ORDERS_QUERY_LIGHT = `
 // exclusion so YoY/MoM % changes aren't comparing a voided-inclusive current
 // period against a voided-inclusive (or differently-polluted) prior period.
 async function fetchOrdersLight(site, startISO, endISO) {
-  const searchQuery = `created_at:>=${startISO} created_at:<${endISO} -financial_status:voided`;
-  const orders = [];
-  let cursor = null;
-  let hasNextPage = true;
-
-  while (hasNextPage) {
-    const data = await graphql(site, ORDERS_QUERY_LIGHT, { cursor, searchQuery });
-    const { edges, pageInfo } = data.orders;
-    for (const edge of edges) orders.push(edge.node);
-    hasNextPage = pageInfo.hasNextPage;
-    cursor = pageInfo.endCursor;
-  }
-
-  return orders;
+  return fetchOrdersChunked(site, ORDERS_QUERY_LIGHT, startISO, endISO, 'light');
 }
 
 // Shopify's own "Sales reversals" figure (ShopifyQL), used as the
