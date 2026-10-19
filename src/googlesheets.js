@@ -587,7 +587,26 @@ function parseNum(v) {
 // too-short response) — always logged, never thrown. Shared by both
 // fetchPnlSheetChannels and fetchPnlSheetOtherCosts below so the
 // fetch/parse/error-handling logic exists exactly once.
-async function fetchSheetRows(site) {
+// One download per site shared by everything that reads the sheet
+// (2026-10-19, speeding up Sync): a sync used to download the same tab ~8
+// times — once per figure read from it (channels, other costs, total cost,
+// marketing spend ×2, Shop PPC, RTB House, goals). Now concurrent readers
+// share one in-flight download and reuse it for SHEET_ROWS_TTL_MS, so a
+// sheet edit shows up on the next Sync a minute later at most.
+const SHEET_ROWS_TTL_MS = 60 * 1000;
+const sheetRowsCache = new Map(); // site -> { at, promise }
+function fetchSheetRows(site) {
+  const hit = sheetRowsCache.get(site);
+  if (hit && Date.now() - hit.at < SHEET_ROWS_TTL_MS) return hit.promise;
+  const promise = downloadSheetRows(site).then((rows) => {
+    if (!rows) sheetRowsCache.delete(site); // don't keep a failed download
+    return rows;
+  });
+  sheetRowsCache.set(site, { at: Date.now(), promise });
+  return promise;
+}
+
+async function downloadSheetRows(site) {
   const url = csvExportUrl(site);
   if (!url) return null;
 
