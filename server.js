@@ -547,6 +547,7 @@ async function buildDataResponse({ site, start, end, compare }) {
       gross_sales_change: pctChange(current.kpis.gross_sales, yoyAgg.kpis.gross_sales),
       net_sales_change: pctChange(current.kpis.net_sales, yoyAgg.kpis.net_sales),
       orders_change: pctChange(current.kpis.orders, yoyAgg.kpis.orders),
+      aov_change: pctChange(current.kpis.average_order_value, yoyAgg.kpis.average_order_value),
       cogs_change: pctChange(current.kpis.cogs, yoyCogsFinal),
       new_customers_change: pctChange(current.kpis.new_customers, yoyAcquisition.new_customers),
       returning_customers_change: pctChange(current.kpis.returning_customers, yoyAcquisition.returning_customers),
@@ -586,6 +587,7 @@ async function buildDataResponse({ site, start, end, compare }) {
       gross_sales_change: pctChange(current.kpis.gross_sales, momAgg.kpis.gross_sales),
       net_sales_change: pctChange(current.kpis.net_sales, momAgg.kpis.net_sales),
       orders_change: pctChange(current.kpis.orders, momAgg.kpis.orders),
+      aov_change: pctChange(current.kpis.average_order_value, momAgg.kpis.average_order_value),
       cogs_change: pctChange(current.kpis.cogs, momCogsFinal),
       new_customers_change: pctChange(current.kpis.new_customers, momAcquisition.new_customers),
       returning_customers_change: pctChange(current.kpis.returning_customers, momAcquisition.returning_customers),
@@ -825,6 +827,7 @@ function applySalesSummary(aggResult, summary) {
       gross_sales: summary.gross_sales,
       discounts_total: newDiscountsTotal,
       orders: summary.orders,
+      shopify_aov: summary.average_order_value,
     },
     discounts: rescaledDiscounts,
     discounts_total_gross: summary.gross_sales,
@@ -843,7 +846,11 @@ function applySalesSummary(aggResult, summary) {
 function applySalesReversals(aggResult, salesReversals) {
   const { kpis } = aggResult;
   const netSales = kpis.gross_sales - kpis.discounts_total - salesReversals;
-  const aov = kpis.orders ? netSales / kpis.orders : 0;
+  // AOV = Shopify's own average_order_value (2026-10-19, Tomer: "you should
+  // take Shopify data for AOV"): (gross sales − discounts) ÷ orders, returns
+  // not taken off. Same formula as a fallback if Shopify didn't return it.
+  const aov = kpis.shopify_aov != null ? kpis.shopify_aov
+    : (kpis.orders ? (kpis.gross_sales - kpis.discounts_total) / kpis.orders : 0);
   return {
     ...aggResult,
     kpis: {
@@ -851,6 +858,7 @@ function applySalesReversals(aggResult, salesReversals) {
       returns_total: salesReversals,
       net_sales: netSales,
       average_order_value: aov,
+      aov_basis: 'shopify',
     },
   };
 }
