@@ -105,7 +105,8 @@ async function fetchTotals(shopId, start, end) {
       FROM refunds_table
       WHERE ${range} AND platform = 'tiktok-shops'`.trim(), start, end),
     twSql(shopId, `
-      SELECT SUM(spend) AS spend, SUM(channel_reported_conversion_value) AS cv
+      SELECT SUM(spend) AS spend, SUM(channel_reported_conversion_value) AS cv,
+             SUM(channel_reported_conversions) AS conversions
       FROM pixel_joined_tvf()
       WHERE ${range} AND model = 'Last Click' AND channel = 'tiktok-ads'`.trim(), start, end),
   ]);
@@ -137,6 +138,10 @@ async function fetchTotals(shopId, start, end) {
     cogs: num(o.cogs),
     ads_spend: num((ads[0] || {}).spend),
     ads_revenue: adsRevenue,
+    // TikTok's own Shop conversions for its ads (same source as ads_revenue)
+    // — the TikTok Ads line's AOV in the dashboard's "Revenue & costs by
+    // source" view (2026-10-20).
+    ads_orders: num((ads[0] || {}).conversions),
     affiliate_organic_revenue: Math.max(0, gross - adsRevenue),
   };
 }
