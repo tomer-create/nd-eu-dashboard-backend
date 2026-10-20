@@ -236,6 +236,8 @@
   .tt-rc-bars span { display: block; height: 6px; border-radius: 3px; min-width: 0; }
   .tt-rc-bars .tt-rc-cost { background: var(--text-muted); opacity: .45; }
   .tt-rc-sub { font-size: 10.5px; color: var(--text-muted); margin-top: 2px; white-space: normal; }
+  .tt-rc-chg { display: flex; gap: 4px; justify-content: flex-end; align-items: center; flex-wrap: wrap; margin-top: 4px; }
+  .tt-rc-chg .lbl { font-size: 9.5px; font-weight: 650; color: var(--text-muted); letter-spacing: .02em; }
   table.tt-rc-table td { vertical-align: top; }
   table.tt-rc-table { margin-bottom: 4px; }
   .tt-title { max-width: 360px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
@@ -2343,7 +2345,7 @@ function renderKPIs(monthData) {
 // TikTok Shop orders also sync into Shopify, so they're already inside
 // ND.COM's Gross Sales — this section is a breakdown, never added to totals.
 const TT_SUM_KEYS = ['orders', 'gross_sales', 'sales', 'net_sales', 'refunds', 'discounts', 'product_discounts', 'taxes', 'shipping', 'units', 'new_customer_orders', 'cogs', 'ads_spend', 'ads_revenue', 'affiliate_organic_revenue'];
-const TT_CHANGE_KEYS = ['gross_sales', 'net_sales', 'orders', 'units', 'refunds', 'discounts', 'product_discounts', 'shipping', 'ads_spend', 'ads_revenue', 'affiliate_organic_revenue', 'new_customer_orders'];
+const TT_CHANGE_KEYS = ['gross_sales', 'net_sales', 'orders', 'units', 'refunds', 'discounts', 'product_discounts', 'shipping', 'ads_spend', 'ads_revenue', 'affiliate_organic_revenue', 'new_customer_orders', 'ads_orders'];
 // Net Sales definition (2026-10-08, Tomer chose the dashboard definition):
 // GMV − all discounts − refunds, no tax or shipping — same as Net Sales
 // elsewhere on this dashboard. Payloads from before the backend change (a
@@ -2756,34 +2758,100 @@ function renderTikTokShop(monthData) {
   //   Organic     revenue = Organic GMV, no cost, AOV = Organic GMV ÷ the
   //               orders left (all orders − Ads − Affiliate)
   //   Total       Gross Sales TikTok, all TikTok costs, Gross ÷ all orders
+  // Lines are worked out by srcLinesFor() for the current period and, for
+  // YoY / MoM (QoQ), the comparison periods (2026-10-20: "add to Revenue &
+  // costs by source YOY MOM"). The current period reuses the figures of
+  // "Revenue by source" above (month by month for quarters / YTD); the
+  // comparison periods use the same formulas on the whole period.
+  // Organic AOV (fixed 2026-10-20): TikTok's Ads conversions include many
+  // affiliate orders (Oct 1–20: 1,576 Ads conversions but only 1,526 orders
+  // without a creator commission), so "all orders − Ads − Affiliate" left ~0
+  // orders. Organic orders are now Organic GMV ÷ the average order of the
+  // orders WITHOUT a creator commission in TikTok's order data (on the same
+  // gross basis), shown as an estimate.
+  const nonAffAovOf = (a, g) => {
+    if (!a || !a.orders_seen || !a.gross_seen) return null;
+    const n = a.orders_seen - (a.orders || 0), v = a.gross_seen - (a.gmv || 0);
+    return n > 0 && v > 0 ? (v / n) * (g / a.gross_seen) : null;
+  };
+  const srcLinesFor = (x) => {
+    // x: { gmv, adsCV, adsSpend, adsOrders, orders, aff, affNet, organic, affOrdersNet, affCost, affCostSub }
+    const lines = [{ name: 'TikTok Ads', color: C1, rev: x.adsCV, cost: x.adsSpend, orders: x.adsOrders, costSub: 'ads spend', ordersWhy: 'TikTok Ads order count not loaded yet — click Sync' }];
+    if (x.aff) {
+      const aov = nonAffAovOf(x.aff, x.gmv);
+      lines.push({ name: 'Affiliate', color: C2, rev: x.affNet, cost: x.affCost, orders: x.affOrdersNet, costSub: x.affCostSub });
+      lines.push({ name: 'Organic', color: C3, rev: x.organic, cost: null, orders: aov && x.organic ? x.organic / aov : null, ordersEst: true, costSub: 'no direct cost', ordersWhy: 'TikTok’s order data isn’t loaded for this period' });
+    } else {
+      lines.push({ name: 'Affiliate + Organic', color: C2, rev: x.gmv - x.adsCV, cost: x.affCost, orders: null, costSub: x.affCostSub, ordersWhy: 'Needs TikTok’s order data (affiliate split) for this period' });
+    }
+    return lines;
+  };
+  // Whole-period figures for a comparison period (prior values from the %
+  // changes Triple Whale returns, TikTok's order data for that range).
+  const priorOfCh = (v, ch) => (v === null || v === undefined || ch === null || ch === undefined || (1 + ch) === 0) ? null : v / (1 + ch);
+  const priorCtx = (kind) => {
+    const c = tt[kind];
+    if (!c) return null;
+    const gP = priorOfCh(tt.gross_sales, c.gross_sales);
+    if (!gP) return null;
+    const adsCVP = priorOfCh(tt.ads_revenue || 0, c.ads_revenue) ?? (tt.ads_revenue ? null : 0);
+    const adsSpP = priorOfCh(tt.ads_spend || 0, c.ads_spend) ?? (tt.ads_spend ? null : 0);
+    const adsOP = typeof tt.ads_orders === 'number' ? priorOfCh(tt.ads_orders, c.ads_orders) : null;
+    const scP = kind === 'yoy' ? scY : scM;
+    const aRaw = scP && scP.status === 'ok' && scP.data && scP.data.affiliate && !scP.data.affiliate.error ? scP.data.affiliate : null;
+    const a = aRaw && aRaw.gross_seen && aRaw.gross_seen / gP >= 0.9 ? aRaw : null;
+    const shipP = kind === 'yoy' ? shipY : shipM;
+    const commP = kind === 'mom' && sheetPrev ? sheetPrev.commission : null, giftP = kind === 'mom' && sheetPrev ? sheetPrev.gifting : null;
+    const affCostP = (commission !== null && commP === null) || (samples !== null && giftP === null) || (sampleShip !== null && shipP === null) ? null : (commP || 0) + (giftP || 0) + (shipP || 0);
+    let affNetP = null, orgP = null, affOP = null;
+    if (a && adsCVP !== null) {
+      const sc2 = gP / a.gross_seen, aG = a.gmv * sc2;
+      const o = ovlCalc(gP, adsCVP, aG, (a.affiliate_with_ads_gmv || 0) * sc2);
+      affNetP = Math.max(0, aG - o.v); orgP = Math.max(0, gP - affNetP - adsCVP);
+      affOP = (a.orders || 0) - Math.min(a.orders || 0, (a.affiliate_with_ads_orders || 0) * (o.measured ? o.v / o.measured : 1));
+    }
+    return { gmv: gP, adsCV: adsCVP, adsSpend: adsSpP, adsOrders: adsOP, orders: priorOfCh(tt.orders, c.orders), aff: a, affNet: affNetP, organic: orgP, affOrdersNet: affOP, affCost: affCostP };
+  };
   const adsOrders = typeof tt.ads_orders === 'number' ? tt.ads_orders : null;
   const affParts = [commission, samples, sampleShip];
   const affCost = affParts.some(v => v !== null && v !== undefined) ? affParts.reduce((a, v) => a + (v || 0), 0) : null;
   const affCostMissing = [commission === null ? 'commission' : null, samples === null ? 'samples' : null, sampleShip === null ? (scPending ? 'sample shipping (loading…)' : 'sample shipping') : null].filter(Boolean);
-  const affCostSub = [commission !== null ? 'commission ' + fmtVal(commission, 'currency-full') : null, samples !== null ? 'samples ' + fmtVal(samples, 'currency-full') : null, sampleShip !== null ? 'sample shipping ' + fmtVal(sampleShip, 'currency-full') : null].filter(Boolean).join(' + ') + (affCostMissing.length ? ' · excl. ' + affCostMissing.join(', ') : '');
+  const affCostSub = [commission !== null ? 'commission ' + fmtVal(commission, 'currency-full') : null, samples !== null ? 'samples ' + fmtVal(samples, 'currency-full') : null, sampleShip !== null ? 'sample shipping ' + fmtVal(sampleShip, 'currency-full') : null].filter(Boolean).join(' + ') + (affCostMissing.length ? ' · excl. ' + affCostMissing.join(', ') : '') + (aff ? '' : scPending ? ' · split loading…' : '');
   const ovlOrders = aff ? Math.min(aff.orders || 0, (aff.affiliate_with_ads_orders || 0) * (ovl.measured ? overlap / ovl.measured : 1)) : 0;
-  const affOrdersNet = aff ? (aff.orders || 0) - ovlOrders : null;
-  const orgOrders = aff && adsOrders !== null ? (tt.orders || 0) - adsOrders - affOrdersNet : null;
-  const comboOrders = adsOrders !== null ? (tt.orders || 0) - adsOrders : null;
-  const srcLines = [
-    { name: 'TikTok Ads', color: C1, rev: adsCV, cost: tt.ads_spend || 0, orders: adsOrders, costSub: 'ads spend', ordersWhy: 'TikTok Ads order count not loaded yet — click Sync' },
-  ].concat(aff ? [
-    { name: 'Affiliate', color: C2, rev: affNet, cost: affCost, orders: affOrdersNet, costSub: affCostSub },
-    { name: 'Organic', color: C3, rev: organicGmv, cost: null, orders: orgOrders && orgOrders > 0 ? orgOrders : null, costSub: 'no direct cost', ordersWhy: adsOrders === null ? 'TikTok Ads order count not loaded yet — click Sync' : 'Not enough orders left after TikTok Ads and Affiliate' },
-  ] : [
-    { name: 'Affiliate + Organic', color: C2, rev: tt.affiliate_organic_revenue || 0, cost: affCost, orders: comboOrders && comboOrders > 0 ? comboOrders : null, costSub: affCostSub + (scPending ? ' · split loading…' : ''), ordersWhy: 'TikTok Ads order count not loaded yet — click Sync' },
-  ]);
+  const curCtx = { gmv, adsCV, adsSpend: tt.ads_spend || 0, adsOrders, orders: tt.orders, aff, affNet, organic: organicGmv, affOrdersNet: aff ? (aff.orders || 0) - ovlOrders : null, affCost, affCostSub };
+  const srcLines = srcLinesFor(curCtx);
+  const priors = { yoy: priorCtx('yoy'), mom: priorCtx('mom') };
+  const priorLines = { yoy: priors.yoy ? srcLinesFor(priors.yoy) : null, mom: priors.mom ? srcLinesFor(priors.mom) : null };
+  const lineMetrics = (l) => ({ rev: l.rev, cost: l.cost, roas: l.cost ? l.rev / l.cost : null, aov: l.orders ? l.rev / l.orders : null });
+  const chgOf = (curV, prevV) => (curV === null || curV === undefined || prevV === null || prevV === undefined || !prevV) ? null : (curV - prevV) / Math.abs(prevV);
   const comboTotalCost = srcLines.reduce((a, l) => a + (l.cost || 0), 0);
+  const totalLine = { name: 'Total', rev: gmv, cost: comboTotalCost, orders: tt.orders };
+  const totalPriorLine = (kind) => {
+    const pl = priorLines[kind], pc = priors[kind];
+    if (!pl || !pc) return null;
+    const costKnown = srcLines.every((l, i) => (l.cost === null || l.cost === undefined) || (pl[i] && pl[i].cost !== null && pl[i].cost !== undefined));
+    return { rev: pc.gmv, cost: costKnown ? pl.reduce((a, l) => a + (l.cost || 0), 0) : null, orders: pc.orders };
+  };
+  const chgFor = (line, kind) => {
+    let p = null;
+    if (line.name === 'Total') p = totalPriorLine(kind);
+    else if (priorLines[kind]) p = priorLines[kind].find(x => x.name === line.name) || null;
+    if (!p) return {};
+    const a = lineMetrics(line), b = lineMetrics(p);
+    return { rev: chgOf(a.rev, b.rev), cost: chgOf(a.cost, b.cost), roas: chgOf(a.roas, b.roas), aov: chgOf(a.aov, b.aov) };
+  };
+  const rcChip = (v, neutral) => { if (v === null || v === undefined) return '<span class="kpi-yoy flat">—</span>'; const c = ttChange(v, true); return `<span class="kpi-yoy ${neutral ? 'neutral' : c.dir}">${c.str}</span>`; };
+  const rcChg = (line, key) => { const y = chgFor(line, 'yoy')[key], m = chgFor(line, 'mom')[key]; return `<div class="tt-rc-chg"><span class="lbl">YoY</span>${rcChip(y, key === 'cost')}<span class="lbl">${mLabel}</span>${rcChip(m, key === 'cost')}</div>`; };
   const scaleMax = Math.max(1, ...srcLines.map(l => Math.max(l.rev || 0, l.cost || 0)));
   const barW = v => Math.max(0, Math.min(100, (v || 0) / scaleMax * 100)).toFixed(1);
   const dash = (why) => `<span class="c4-dim"${why ? ` title="${why}"` : ''}>—</span>`;
   const comboRow = (l) => `<tr>
       <td><span class="tt-src-name"><i style="background:${l.color}"></i>${l.name}</span>
         <span class="tt-rc-bars" aria-hidden="true"><span class="tt-rc-rev" style="width:${barW(l.rev)}%;background:${l.color}"></span><span class="tt-rc-cost" style="width:${barW(l.cost)}%"></span></span></td>
-      <td>${fmtVal(l.rev, 'currency-full')}<div class="tt-rc-sub">${gmv ? fmtVal((l.rev || 0) / gmv, 'percent') + ' of gross' : ''}</div></td>
-      <td>${l.cost === null || l.cost === undefined ? dash(l.name === 'Organic' ? 'Organic sales have no direct TikTok cost' : 'No cost figures for this period') : fmtVal(l.cost, 'currency-full')}<div class="tt-rc-sub">${l.costSub || ''}</div></td>
-      <td>${l.cost ? fmtVal(l.rev / l.cost, 'ratio') : dash(l.name === 'Organic' ? 'No cost, so no ROAS' : 'No cost for this period')}</td>
-      <td>${l.orders ? fmtVal(l.rev / l.orders, 'currency') + `<div class="tt-rc-sub">${fmtVal(Math.round(l.orders), 'number')} orders</div>` : dash(l.ordersWhy)}</td>
+      <td>${fmtVal(l.rev, 'currency-full')}<div class="tt-rc-sub">${gmv ? fmtVal((l.rev || 0) / gmv, 'percent') + ' of gross' : ''}</div>${rcChg(l, 'rev')}</td>
+      <td>${l.cost === null || l.cost === undefined ? dash(l.name === 'Organic' ? 'Organic sales have no direct TikTok cost' : 'No cost figures for this period') : fmtVal(l.cost, 'currency-full')}<div class="tt-rc-sub">${l.costSub || ''}</div>${l.cost === null || l.cost === undefined ? '' : rcChg(l, 'cost')}</td>
+      <td>${l.cost ? fmtVal(l.rev / l.cost, 'ratio') + rcChg(l, 'roas') : dash(l.name === 'Organic' ? 'No cost, so no ROAS' : 'No cost for this period')}</td>
+      <td>${l.orders ? fmtVal(l.rev / l.orders, 'currency') + `<div class="tt-rc-sub">${l.ordersEst ? '≈ ' : ''}${fmtVal(Math.round(l.orders), 'number')} orders${l.ordersEst ? ' (est.)' : ''}</div>` + rcChg(l, 'aov') : dash(l.ordersWhy)}</td>
     </tr>`;
   const comboTable = `
     <div class="tt-legend tt-rc-legend"><span><i class="tt-rc-key-rev"></i>Revenue</span><span><i class="tt-rc-key-cost"></i>Cost</span></div>
@@ -2791,10 +2859,10 @@ function renderTikTokShop(monthData) {
       <thead><tr><th style="text-align:left">Source</th><th>Revenue</th><th>Cost</th><th>ROAS</th><th>AOV</th></tr></thead>
       <tbody>
         ${srcLines.map(comboRow).join('')}
-        <tr class="total-row"><td>Total <span style="color:var(--text-muted)">(Gross Sales TikTok)</span></td><td>${fmtVal(gmv, 'currency-full')}</td><td>${fmtVal(comboTotalCost, 'currency-full')}</td><td>${comboTotalCost ? fmtVal(gmv / comboTotalCost, 'ratio') : '—'}</td><td>${tt.orders ? fmtVal(gmv / tt.orders, 'currency') + `<div class="tt-rc-sub">${fmtVal(tt.orders, 'number')} orders</div>` : '—'}</td></tr>
+        <tr class="total-row"><td>Total <span style="color:var(--text-muted)">(Gross Sales TikTok)</span></td><td>${fmtVal(gmv, 'currency-full')}${rcChg(totalLine, 'rev')}</td><td>${fmtVal(comboTotalCost, 'currency-full')}${rcChg(totalLine, 'cost')}</td><td>${comboTotalCost ? fmtVal(gmv / comboTotalCost, 'ratio') + rcChg(totalLine, 'roas') : '—'}</td><td>${tt.orders ? fmtVal(gmv / tt.orders, 'currency') + `<div class="tt-rc-sub">${fmtVal(tt.orders, 'number')} orders</div>` + rcChg(totalLine, 'aov') : '—'}</td></tr>
       </tbody>
     </table>
-    <div class="tt-note">Revenue as in “Revenue by source” below (the lines add up to Gross Sales TikTok, before discounts); costs as in “TikTok costs” below, grouped by source — Affiliate = commission + samples (TikTok Gifting) + sample shipping. ROAS = revenue ÷ cost. AOV = revenue ÷ orders: TikTok Ads uses TikTok’s own conversions for its ads; Affiliate uses the affiliate orders in TikTok’s order data, less the ones TikTok Ads also counts; Organic uses the orders left. The total ROAS here is on Gross Sales TikTok, so it differs a little from the TikTok ROAS tile (on TikTok Shop GMV).</div>`;
+    <div class="tt-note">Revenue as in “Revenue by source” below (the lines add up to Gross Sales TikTok, before discounts); costs as in “TikTok costs” below, grouped by source — Affiliate = commission + samples (TikTok Gifting) + sample shipping. ROAS = revenue ÷ cost. AOV = revenue ÷ orders, on the same before-discounts basis — so it’s higher than the AOV tile above (TikTok Net Sales ÷ orders, after discounts and refunds). TikTok Ads uses TikTok’s own conversions for its ads; Affiliate the affiliate orders in TikTok’s order data, less the ones TikTok Ads also counts; Organic is estimated — Organic GMV ÷ the average order without a creator commission (TikTok counts many affiliate orders as Ads conversions too, so the orders can’t simply be subtracted). YoY / ${mLabel}: same calculation for the comparison period; costs from the P&amp;L sheet have no YoY (only the 2026 tab is connected) and no ${mLabel} for the month in progress. The total ROAS here is on Gross Sales TikTok, so it differs a little from the TikTok ROAS tile (on TikTok Shop GMV).</div>`;
 
   // Top products
   // YoY / MoM per product (2026-10-08): prior-period sales of the same product
