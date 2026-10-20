@@ -2979,12 +2979,12 @@ function channelsChangeData() {
           // Revenue changes for the rows that take Triple Whale revenue
           // (revenue_keys): current / last year / previous period, summed
           // over those sites. A comparison is dropped (null) when a site has
-          // none, or its email can't be split for that period.
+          // none, or it's before Aug 2026 (the sheet's basis there).
           attentive.rev = attentive.rev || {};
           attentive.sites = (attentive.sites || 0) + 1;
           (at.revenue_keys || []).forEach(k => {
             const rv = attentive.rev[k] || (attentive.rev[k] = { cur: 0, yoy: 0, prev: 0, sites: 0 });
-            const cmp = (x) => x && !(k.startsWith('email') && x.email_combined) && x[k] ? x[k].revenue * fx : null;
+            const cmp = (x) => x && !x.email_combined && x[k] ? x[k].revenue * fx : null; // nothing before Aug 2026 (see attentiveRevenueKeys)
             rv.cur += ((at[k] || {}).revenue || 0) * fx; rv.sites++;
             const y = cmp(at.yoy), pv = cmp(at.prev);
             rv.yoy = rv.yoy === null || y === null ? null : rv.yoy + y;
@@ -3253,7 +3253,7 @@ function renderChannels(monthData) {
   const whyBlank = (ch, which) => {
     if (ch.group) return 'Not enough of this group has this comparison (needs channels making up at least 80% of the group)';
     if (chgFailed && !ch.attentive && !ch.pnl) return 'Triple Whale comparison data didn’t load — try Sync';
-    if (ch.attRevMixed) return 'This Attentive revenue is partly from Triple Whale and partly from the P&amp;L sheet (ND.IL, and email before August 2026, stay on the sheet), so there’s no like-for-like comparison';
+    if (ch.attRevMixed) return 'This Attentive revenue is partly from Triple Whale and partly from the P&amp;L sheet (ND.IL, and anything before August 2026, stay on the sheet), so there’s no like-for-like comparison';
     if (which === 'yoy' && ch.attRevFull) return 'Attentive started in January 2026 — no Triple Whale Attentive figures for last year';
     if (which === 'yoy') return ch.tw ? 'No figures for this channel in the same period last year'
       : ch.total ? 'No last-year figures for these channels'
@@ -3509,7 +3509,7 @@ function renderChannels(monthData) {
     <div class="c4-period">${cmpText}</div>
   </div>`;
 
-  const attNote = `<li><b>Attentive rows</b> — Revenue and Avg order come from Triple Whale (Last Click): the orders whose last click was an Attentive link, split into SMS / Email journeys and campaigns by the link’s tags. Orders from other email/SMS tools that Triple Whale lists under Attentive are left out. Spend and goals stay on the P&amp;L sheet. Where Triple Whale can’t tell email journeys from campaigns (ND.IL always; ND.COM / ND.EU before August 2026) the email rows keep the P&amp;L sheet’s revenue, and ND.IL’s SMS rows stay on the sheet too (its SMS orders don’t come through Attentive in Triple Whale). * on Avg order = all Attentive email together (journeys and campaigns can’t be told apart).</li>`;
+  const attNote = `<li><b>Attentive rows</b> — Revenue and Avg order come from Triple Whale (Last Click): the orders whose last click was an Attentive link, split into SMS / Email journeys and campaigns by the link’s tags. Orders from other email/SMS tools that Triple Whale lists under Attentive are left out. Spend and goals stay on the P&amp;L sheet. This applies to ND.COM and ND.EU from August 2026 — before that Attentive’s links weren’t tagged in a way Triple Whale can split (and it saw far fewer Attentive SMS orders), so those months keep the P&amp;L sheet’s revenue. ND.IL keeps the sheet’s revenue (its email can’t be split into journeys / campaigns, and its SMS orders don’t come through Attentive in Triple Whale). * on Avg order = all Attentive email together (journeys and campaigns can’t be told apart).</li>`;
   const notes = `<details class="c4-notes"${c4NotesOpen ? ' open' : ''}>
     <summary>How these numbers work</summary>
     <ul>
