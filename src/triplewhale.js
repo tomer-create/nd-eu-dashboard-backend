@@ -391,4 +391,103 @@ async function fetchChannelPerformance(site, start, end) {
   });
 }
 
-module.exports = { fetchChannelPerformance, CHANNEL_MAP, TW_SHOP_ID, twSqlRequest };
+// Attentive's 4 channels split from Triple Whale (2026-10-20, Tomer: "separate
+// the data to 4 channels: Attentive journeys (emails), journeys (SMS),
+// campaigns (emails), campaigns (SMS)" — used for Section 4's Avg order on the
+// Attentive rows; revenue / spend there stay on the P&L sheet). Triple Whale's
+// own channel field can't split SMS from Email, but every order keeps the UTM
+// tags of the Attentive link it came from (pixel_orders_table, Last Click —
+// the same model as the other channels), and Attentive tags them:
+//   utm_medium sms_campaign / email_campaign  -> campaigns
+//   utm_medium sms_journey / email_journey    -> journeys
+//   utm_medium sms / email                    -> journeys, EXCEPT when the
+//     link carries a campaign name that isn't a journey message — ND.COM SMS
+//     campaigns before Aug 2026 and ND.EU campaigns (email and SMS) are tagged
+//     plain sms / email but with the campaign name (e.g. "GTL MIDI GLOOM").
+// Checked live 2026-10-20 for Jan–Oct 2026 on all 3 stores:
+//   - ND.COM: from Aug 2026 campaigns use the *_campaign mediums; before that
+//     plain "email" links carry no name at all, so journeys and campaigns
+//     can't be told apart for email before Aug 2026.
+//   - ND.EU: no *_journey / blank-name campaigns; named campaigns on plain
+//     email from Aug 2026 (none tagged before).
+//   - ND.IL: every Attentive order is "attentive / email" with no name (so no
+//     split ever) and none from Attentive SMS.
+// Where email can't be split (IL always; COM / EU for periods starting before
+// Aug 2026) both email rows get the combined Attentive email figure and
+// email_combined is true. Orders from other senders that Triple Whale files
+// under its "attentive" channel (OrderlyEmails, Yotpo, Klaviyo, Omnisend) are
+// left out — only utm_source "attentive" counts.
+const ATTENTIVE_JOURNEY_NAME = /abandon|welcome|coupon-nudge|back in stock message|added to cart|browse|checkout|winback|win-back|post purchase|order |shipment|shipping|^message \d|^sms #\d|journey|triple_pixel/i;
+const ATTENTIVE_EMAIL_SPLIT_FROM = { com: '2026-08-01', eu: '2026-08-01' };
+function attentiveBucket(medium, name) {
+  const m = String(medium || '').trim().toLowerCase();
+  const n = String(name || '').trim();
+  const ch = m.startsWith('sms') ? 'sms' : m.startsWith('email') ? 'email' : null;
+  if (!ch) return null;
+  if (m.endsWith('_campaign')) return ch + '_campaign';
+  if (m.endsWith('_journey')) return ch + '_journey';
+  return n && !ATTENTIVE_JOURNEY_NAME.test(n) ? ch + '_campaign' : ch + '_journey';
+}
+async function fetchAttentiveSplit(site, start, end) {
+  if (!process.env.TRIPLEWHALE_API_KEY) return null;
+  const shopId = TW_SHOP_ID[site];
+  if (!shopId) return null;
+  const query = `
+    SELECT
+      lower(utm_medium) AS medium,
+      campaign_name,
+      count() AS orders,
+      SUM(order_revenue) AS revenue
+    FROM pixel_orders_table
+    WHERE event_date >= '${start}' AND event_date < '${end}'
+      AND model = 'Last Click'
+      AND lower(utm_source) = 'attentive'
+    GROUP BY medium, campaign_name
+  `.trim();
+  let json;
+  try {
+    const res = await twSqlRequest(shopId, query, start, end);
+    if (!res.ok) {
+      const body = await res.text().catch(() => '');
+      console.error(`Triple Whale Attentive split failed for site=${site} (${res.status}): ${body.slice(0, 500)}`);
+      return null;
+    }
+    json = await res.json();
+  } catch (err) {
+    console.error(`Triple Whale Attentive split errored for site=${site}:`, err.message);
+    return null;
+  }
+  const rows = Array.isArray(json) ? json : json.rows || json.data || [];
+  if (!Array.isArray(rows)) return null;
+  const out = {};
+  ['sms_journey', 'email_journey', 'sms_campaign', 'email_campaign'].forEach((k) => { out[k] = { revenue: 0, orders: 0 }; });
+  rows.forEach((r) => {
+    const b = attentiveBucket(r.medium, r.campaign_name);
+    if (!b) return;
+    out[b].revenue += Number(r.revenue || 0);
+    out[b].orders += Number(r.orders || 0);
+  });
+  const splitFrom = ATTENTIVE_EMAIL_SPLIT_FROM[site];
+  out.email_combined = !splitFrom || start < splitFrom;
+  if (out.email_combined) {
+    const all = { revenue: out.email_journey.revenue + out.email_campaign.revenue, orders: out.email_journey.orders + out.email_campaign.orders };
+    out.email_journey = { ...all };
+    out.email_campaign = { ...all };
+  }
+  return out;
+}
+
+// Which Attentive rows take their REVENUE from Triple Whale (2026-10-20,
+// Tomer: "pull the Revenue for Attentive sources across all ND.COM, ND.EU,
+// ND.IL"; he chose "Sheet when unsplit" and, for ND.IL SMS, "Keep the sheet").
+// SMS rows on ND.COM / ND.EU always; email rows only when Triple Whale can
+// split journeys from campaigns for the period (not email_combined). ND.IL:
+// none — its email can't be split and its SMS orders aren't Attentive's in
+// Triple Whale — so ND.IL's Attentive revenue stays on the P&L sheet.
+function attentiveRevenueKeys(site, split) {
+  if (!split || site === 'il') return [];
+  return ['sms_journey', 'sms_campaign'].concat(split.email_combined ? [] : ['email_journey', 'email_campaign']);
+}
+const ATTENTIVE_LABEL_KEYS = { 'Attentive - SMS Journey': 'sms_journey', 'Attentive - Email Journey': 'email_journey', 'Attentive - SMS Campaign': 'sms_campaign', 'Attentive - Email Campaign (Newsletter)': 'email_campaign' };
+
+module.exports = { fetchChannelPerformance, fetchAttentiveSplit, attentiveBucket, attentiveRevenueKeys, ATTENTIVE_LABEL_KEYS, CHANNEL_MAP, TW_SHOP_ID, twSqlRequest };
