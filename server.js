@@ -4,7 +4,7 @@ const express = require('express');
 const cors = require('cors');
 const { fetchOrders, fetchOrdersLight, fetchOrdersForTierRevenue, fetchSalesReversals, fetchCostOfGoodsSold, fetchTopReturnsByProduct, fetchCountryBreakdown, fetchUsStateBreakdown, fetchSalesSummary, fetchCustomerAcquisition, fetchProductRetailPrices, fetchCollabsCodeSales, getAuthorizeUrl, exchangeCodeForToken } = require('./src/shopify');
 const { aggregate } = require('./src/aggregate');
-const { fetchChannelPerformance } = require('./src/triplewhale');
+const { fetchChannelPerformance, fetchAttentiveSplit, attentiveRevenueKeys, ATTENTIVE_LABEL_KEYS } = require('./src/triplewhale');
 const { fetchTikTokShop, fetchGmvEstimate } = require('./src/tiktokshop');
 const { getSellerCenter } = require('./src/windsor-tiktok');
 const { fetchPnlSheetChannels, fetchPnlSheetOtherCosts, fetchPnlSheetTotalCost, fetchPnlSheetMarketingSpend, fetchPnlSheetShopPpc, fetchPnlSheetRtbHouseSpend, fetchPnlSheetGoals } = require('./src/googlesheets');
@@ -865,6 +865,49 @@ function applySalesReversals(aggResult, salesReversals) {
   };
 }
 
+// Attentive revenue from Triple Whale (2026-10-20 — see attentiveRevenueKeys
+// in src/triplewhale.js). Applied to every /api/data and /api/sync response
+// AFTER the closed-month cache, so months cached before this change pick it
+// up too and the cache itself keeps the P&L sheet's figures. Only the rows
+// Triple Whale can split get its revenue (revenue_source 'triple_whale',
+// revenue_sheet keeps the sheet's figure); spend and goals stay on the sheet.
+// The split is one small SQL query per site and period, cached in memory.
+const attentiveSplitCache = new Map();
+function getAttentiveSplitCached(site, start, end) {
+  const key = [site, start, end].join('|');
+  const hit = attentiveSplitCache.get(key);
+  if (hit && hit.expires > Date.now()) return hit.promise;
+  const promise = fetchAttentiveSplit(site, start, end).catch((err) => {
+    console.error(`attentive split (site=${site} ${start}..${end}) failed:`, err.message);
+    return null;
+  });
+  const ended = new Date(`${end}T00:00:00Z`).getTime() <= Date.now();
+  attentiveSplitCache.set(key, { promise, expires: Date.now() + (ended ? 6 * 3600 : 10 * 60) * 1000 });
+  promise.then((v) => { if (!v) attentiveSplitCache.delete(key); });
+  if (attentiveSplitCache.size > 500) attentiveSplitCache.delete(attentiveSplitCache.keys().next().value);
+  return promise;
+}
+async function applyAttentiveRevenue(payload, site, start, end) {
+  try {
+    if (!payload || !Array.isArray(payload.channels) || !['com', 'eu', 'il'].includes(site)) return payload;
+    if (!US_STATES_DATE.test(start || '') || !US_STATES_DATE.test(end || '')) return payload;
+    if (site === 'il') return payload; // ND.IL keeps the sheet (see attentiveRevenueKeys)
+    const split = await getAttentiveSplitCached(site, start, end);
+    const keys = attentiveRevenueKeys(site, split);
+    if (!keys.length) return payload;
+    const channels = payload.channels.map((c) => {
+      const k = ATTENTIVE_LABEL_KEYS[c.label];
+      if (!k || !keys.includes(k) || c.no_data) return c;
+      const sheet = c.revenue_source === 'triple_whale' ? c.revenue_sheet : c.revenue_actual;
+      return { ...c, revenue_actual: split[k].revenue, revenue_sheet: sheet, revenue_source: 'triple_whale', attentive_orders: split[k].orders };
+    });
+    return { ...payload, channels };
+  } catch (err) {
+    console.error(`applyAttentiveRevenue (site=${site}) failed:`, err.message);
+    return payload;
+  }
+}
+
 // GET /api/data?site=com&start=2026-08-01&end=2026-08-21&compare=yoy,mom
 // Optional &refresh=1 forces a fresh Shopify pull for a closed month instead
 // of the cached copy (see src/month-cache.js — added 2026-10-04 so a month
@@ -882,7 +925,7 @@ app.get('/api/data', async (req, res) => {
     );
     res.set('X-Month-Cache', cache);
     if (fetchedAt) res.set('X-Month-Cache-Fetched-At', new Date(fetchedAt).toISOString());
-    res.json(payload);
+    res.json(await applyAttentiveRevenue(payload, req.query.site, req.query.start, req.query.end));
   } catch (err) {
     console.error(err);
     res.status(err.status || 502).json({ error: err.message });
@@ -895,7 +938,7 @@ app.post('/api/sync', async (req, res) => {
   const { site, start, end, compare = [] } = req.body || {};
   try {
     const result = await buildDataResponse({ site, start, end, compare });
-    res.json(result);
+    res.json(await applyAttentiveRevenue(result, site, start, end));
   } catch (err) {
     console.error(err);
     res.status(err.status || 502).json({ error: err.message });
@@ -1030,7 +1073,20 @@ app.get('/api/channels-change', async (req, res) => {
       prev_start ? collabsFor(prev_start, prev_end) : Promise.resolve(null),
     ]);
     const collabs = { cur: collabsCur, yoy: collabsYoy, prev: collabsPrev };
-    const payload = { site, start, end, has_yoy: !!yoy, has_prev: !!prev, channels, collabs };
+    // Attentive's 4 channels (journeys / campaigns × SMS / Email) from Triple
+    // Whale's order UTM tags, for the Attentive rows' Avg order (2026-10-20 —
+    // see fetchAttentiveSplit). Current period only; null if it fails.
+    // Revenue YoY / MoM for the rows that take Triple Whale revenue: the same
+    // split for the comparison periods; revenue_keys = which rows those are.
+    const [attentive, attentiveYoy, attentivePrev] = await Promise.all([
+      getAttentiveSplitCached(site, start, end),
+      yoy_start ? getAttentiveSplitCached(site, yoy_start, yoy_end) : Promise.resolve(null),
+      prev_start ? getAttentiveSplitCached(site, prev_start, prev_end) : Promise.resolve(null),
+    ]);
+    // Copies — the split objects are shared through the in-memory cache.
+    const attSplit = (v) => v && { sms_journey: v.sms_journey, email_journey: v.email_journey, sms_campaign: v.sms_campaign, email_campaign: v.email_campaign, email_combined: v.email_combined };
+    const attentiveOut = attentive && { ...attSplit(attentive), revenue_keys: attentiveRevenueKeys(site, attentive), yoy: attSplit(attentiveYoy), prev: attSplit(attentivePrev) };
+    const payload = { site, start, end, has_yoy: !!yoy, has_prev: !!prev, channels, collabs, attentive: attentiveOut };
     const ended = new Date(`${end}T00:00:00Z`).getTime() + 86400000 <= Date.now();
     channelsChangeCache.set(key, { payload, expires: Date.now() + (ended ? 6 * 3600 : 15 * 60) * 1000 });
     if (channelsChangeCache.size > 500) channelsChangeCache.delete(channelsChangeCache.keys().next().value);
