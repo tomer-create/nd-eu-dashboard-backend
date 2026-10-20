@@ -161,7 +161,8 @@ async function fetchTopProducts(shopId, start, end) {
 
 // 'shipping' added 2026-10-14: the dashboard's TikTok Shop GMV change uses
 // gross + shipping − product discounts (TikTok's GMV formula).
-const CHANGE_KEYS = ['gross_sales', 'net_sales', 'orders', 'units', 'refunds', 'discounts', 'product_discounts', 'shipping', 'ads_spend', 'ads_revenue', 'affiliate_organic_revenue', 'new_customer_orders'];
+// 'ads_orders' added 2026-10-20 (Revenue & costs by source: TikTok Ads AOV YoY / MoM).
+const CHANGE_KEYS = ['gross_sales', 'net_sales', 'orders', 'units', 'refunds', 'discounts', 'product_discounts', 'shipping', 'ads_spend', 'ads_revenue', 'affiliate_organic_revenue', 'new_customer_orders', 'ads_orders'];
 function changes(cur, prev) {
   if (!prev) return null;
   const out = {};
