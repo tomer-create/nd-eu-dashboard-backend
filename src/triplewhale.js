@@ -480,13 +480,17 @@ async function fetchAttentiveSplit(site, start, end) {
 // Which Attentive rows take their REVENUE from Triple Whale (2026-10-20,
 // Tomer: "pull the Revenue for Attentive sources across all ND.COM, ND.EU,
 // ND.IL"; he chose "Sheet when unsplit" and, for ND.IL SMS, "Keep the sheet").
-// SMS rows on ND.COM / ND.EU always; email rows only when Triple Whale can
-// split journeys from campaigns for the period (not email_combined). ND.IL:
-// none — its email can't be split and its SMS orders aren't Attentive's in
-// Triple Whale — so ND.IL's Attentive revenue stays on the P&L sheet.
+// ND.COM / ND.EU, periods starting from Aug 2026 (not email_combined): all 4
+// rows. Before Aug 2026: none — email can't be split, and (checked live on
+// the deployed version 2026-10-20) Triple Whale barely sees Attentive SMS
+// orders before Attentive's link tagging changed in Aug 2026: ND.COM July
+// 2026 = 117 SMS orders / $11K in Triple Whale vs $146K SMS on the sheet,
+// while Sep 2026 = 618 / $57.7K vs $114K. ND.IL: none — its email can't be
+// split and its SMS orders aren't Attentive's in Triple Whale. Those rows
+// keep the P&L sheet's revenue.
 function attentiveRevenueKeys(site, split) {
-  if (!split || site === 'il') return [];
-  return ['sms_journey', 'sms_campaign'].concat(split.email_combined ? [] : ['email_journey', 'email_campaign']);
+  if (!split || site === 'il' || split.email_combined) return [];
+  return ['sms_journey', 'sms_campaign', 'email_journey', 'email_campaign'];
 }
 const ATTENTIVE_LABEL_KEYS = { 'Attentive - SMS Journey': 'sms_journey', 'Attentive - Email Journey': 'email_journey', 'Attentive - SMS Campaign': 'sms_campaign', 'Attentive - Email Campaign (Newsletter)': 'email_campaign' };
 
