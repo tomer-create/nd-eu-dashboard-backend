@@ -897,9 +897,12 @@ async function applyAttentiveRevenue(payload, site, start, end) {
     if (!keys.length) return payload;
     const channels = payload.channels.map((c) => {
       const k = ATTENTIVE_LABEL_KEYS[c.label];
-      if (!k || !keys.includes(k) || c.no_data) return c;
-      const sheet = c.revenue_source === 'triple_whale' ? c.revenue_sheet : c.revenue_actual;
-      return { ...c, revenue_actual: split[k].revenue, revenue_sheet: sheet, revenue_source: 'triple_whale', attentive_orders: split[k].orders };
+      if (!k || !keys.includes(k)) return c;
+      // A row the sheet leaves empty (no_data, e.g. ND.EU SMS Campaign in
+      // Sep 2026) still gets Triple Whale's revenue when there is some.
+      if (c.no_data && !split[k].revenue) return c;
+      const sheet = c.revenue_source === 'triple_whale' ? c.revenue_sheet : (c.no_data ? null : c.revenue_actual);
+      return { ...c, no_data: false, spend_actual: c.spend_actual || 0, revenue_actual: split[k].revenue, revenue_sheet: sheet, revenue_source: 'triple_whale', attentive_orders: split[k].orders };
     });
     return { ...payload, channels };
   } catch (err) {
