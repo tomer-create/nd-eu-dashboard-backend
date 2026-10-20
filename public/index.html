@@ -226,6 +226,18 @@
   .tt-share span { display: block; height: 100%; }
   .tt-legend { display: flex; gap: 14px; flex-wrap: wrap; font-size: 11px; color: var(--text-secondary); }
   .tt-legend i { display: inline-block; width: 9px; height: 9px; border-radius: 2px; margin-right: 5px; vertical-align: -1px; }
+  /* Revenue & costs by source (2026-10-20) */
+  .tt-rc-legend { margin: 2px 0 8px; }
+  .tt-rc-legend .tt-rc-key-rev { background: var(--text-secondary); }
+  .tt-rc-legend .tt-rc-key-cost { background: var(--text-muted); opacity: .45; }
+  .tt-src-name { font-weight: 650; color: var(--text-primary); white-space: nowrap; }
+  .tt-src-name i { display: inline-block; width: 9px; height: 9px; border-radius: 2px; margin-right: 6px; vertical-align: -1px; }
+  .tt-rc-bars { display: flex; flex-direction: column; gap: 3px; margin-top: 6px; width: 180px; max-width: 100%; }
+  .tt-rc-bars span { display: block; height: 6px; border-radius: 3px; min-width: 0; }
+  .tt-rc-bars .tt-rc-cost { background: var(--text-muted); opacity: .45; }
+  .tt-rc-sub { font-size: 10.5px; color: var(--text-muted); margin-top: 2px; white-space: normal; }
+  table.tt-rc-table td { vertical-align: top; }
+  table.tt-rc-table { margin-bottom: 4px; }
   .tt-title { max-width: 360px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
   .tt-pending { border: 1px dashed var(--border); border-radius: 10px; padding: 12px 14px; font-size: 12px; color: var(--text-secondary); background: var(--page-plane); }
   .tt-note { margin-top: 10px; font-size: 11px; color: var(--text-muted); }
@@ -2372,6 +2384,9 @@ function combineTikTokShop(entries) {
   if (!present.length) return undefined;
   const out = { source: 'combined', months_with_data: present.length, months_total: entries.length };
   TT_SUM_KEYS.forEach(k => { out[k] = present.reduce((a, e) => a + (e.monthData.tiktok_shop[k] || 0) * (e.fx || 1), 0); });
+  // TikTok Ads orders (2026-10-20): only when every month has it (months
+  // synced before then don't).
+  out.ads_orders = present.every(e => typeof e.monthData.tiktok_shop.ads_orders === 'number') ? present.reduce((a, e) => a + e.monthData.tiktok_shop.ads_orders, 0) : null;
   // YoY: sum of each month's implied prior-year value (same method as the
   // Section 1 YTD combine). MoM has no single meaning across several months;
   // a quarter's QoQ is filled in by applyQoQ().
@@ -2726,6 +2741,61 @@ function renderTikTokShop(monthData) {
     </table>
     <div class="tt-note">TikTok ROAS (tile above) = TikTok Shop GMV ÷ Total TikTok costs; “% of GMV” is on the same GMV. Product cost (COGS ${fmtVal(tt.cogs,'currency-full')}) and platform fees aren't included. Sources: TikTok Ads spend — Triple Whale; Affiliate commission and TikTok Gifting — P&amp;L sheet (no YoY: only the 2026 tab is connected); Sample shipping — creators with at least one sample shipped × $11, from TikTok's sample orders, counted per month.</div>`;
 
+  // Revenue & costs by source (2026-10-20, Tomer: "add Revenue by source and
+  // TikTok costs on the same chart, when the cost of the affiliate should be
+  // the samples and the affiliate commission together, just for the view.
+  // also add for each line the ROAS and the AOV"; he chose to keep the two
+  // tables below and to include sample shipping in the Affiliate cost).
+  // Same revenue figures as "Revenue by source" and the same costs as
+  // "TikTok costs" — only regrouped per source:
+  //   TikTok Ads  revenue = conversion value, cost = ads spend,
+  //               AOV = conversion value ÷ TikTok's own conversions
+  //   Affiliate   revenue = Affiliate-driven GMV (net of the Ads overlap),
+  //               cost = commission + samples + sample shipping,
+  //               AOV = that revenue ÷ affiliate orders less the overlap orders
+  //   Organic     revenue = Organic GMV, no cost, AOV = Organic GMV ÷ the
+  //               orders left (all orders − Ads − Affiliate)
+  //   Total       Gross Sales TikTok, all TikTok costs, Gross ÷ all orders
+  const adsOrders = typeof tt.ads_orders === 'number' ? tt.ads_orders : null;
+  const affParts = [commission, samples, sampleShip];
+  const affCost = affParts.some(v => v !== null && v !== undefined) ? affParts.reduce((a, v) => a + (v || 0), 0) : null;
+  const affCostMissing = [commission === null ? 'commission' : null, samples === null ? 'samples' : null, sampleShip === null ? (scPending ? 'sample shipping (loading…)' : 'sample shipping') : null].filter(Boolean);
+  const affCostSub = [commission !== null ? 'commission ' + fmtVal(commission, 'currency-full') : null, samples !== null ? 'samples ' + fmtVal(samples, 'currency-full') : null, sampleShip !== null ? 'sample shipping ' + fmtVal(sampleShip, 'currency-full') : null].filter(Boolean).join(' + ') + (affCostMissing.length ? ' · excl. ' + affCostMissing.join(', ') : '');
+  const ovlOrders = aff ? Math.min(aff.orders || 0, (aff.affiliate_with_ads_orders || 0) * (ovl.measured ? overlap / ovl.measured : 1)) : 0;
+  const affOrdersNet = aff ? (aff.orders || 0) - ovlOrders : null;
+  const orgOrders = aff && adsOrders !== null ? (tt.orders || 0) - adsOrders - affOrdersNet : null;
+  const comboOrders = adsOrders !== null ? (tt.orders || 0) - adsOrders : null;
+  const srcLines = [
+    { name: 'TikTok Ads', color: C1, rev: adsCV, cost: tt.ads_spend || 0, orders: adsOrders, costSub: 'ads spend', ordersWhy: 'TikTok Ads order count not loaded yet — click Sync' },
+  ].concat(aff ? [
+    { name: 'Affiliate', color: C2, rev: affNet, cost: affCost, orders: affOrdersNet, costSub: affCostSub },
+    { name: 'Organic', color: C3, rev: organicGmv, cost: null, orders: orgOrders && orgOrders > 0 ? orgOrders : null, costSub: 'no direct cost', ordersWhy: adsOrders === null ? 'TikTok Ads order count not loaded yet — click Sync' : 'Not enough orders left after TikTok Ads and Affiliate' },
+  ] : [
+    { name: 'Affiliate + Organic', color: C2, rev: tt.affiliate_organic_revenue || 0, cost: affCost, orders: comboOrders && comboOrders > 0 ? comboOrders : null, costSub: affCostSub + (scPending ? ' · split loading…' : ''), ordersWhy: 'TikTok Ads order count not loaded yet — click Sync' },
+  ]);
+  const comboTotalCost = srcLines.reduce((a, l) => a + (l.cost || 0), 0);
+  const scaleMax = Math.max(1, ...srcLines.map(l => Math.max(l.rev || 0, l.cost || 0)));
+  const barW = v => Math.max(0, Math.min(100, (v || 0) / scaleMax * 100)).toFixed(1);
+  const dash = (why) => `<span class="c4-dim"${why ? ` title="${why}"` : ''}>—</span>`;
+  const comboRow = (l) => `<tr>
+      <td><span class="tt-src-name"><i style="background:${l.color}"></i>${l.name}</span>
+        <span class="tt-rc-bars" aria-hidden="true"><span class="tt-rc-rev" style="width:${barW(l.rev)}%;background:${l.color}"></span><span class="tt-rc-cost" style="width:${barW(l.cost)}%"></span></span></td>
+      <td>${fmtVal(l.rev, 'currency-full')}<div class="tt-rc-sub">${gmv ? fmtVal((l.rev || 0) / gmv, 'percent') + ' of gross' : ''}</div></td>
+      <td>${l.cost === null || l.cost === undefined ? dash(l.name === 'Organic' ? 'Organic sales have no direct TikTok cost' : 'No cost figures for this period') : fmtVal(l.cost, 'currency-full')}<div class="tt-rc-sub">${l.costSub || ''}</div></td>
+      <td>${l.cost ? fmtVal(l.rev / l.cost, 'ratio') : dash(l.name === 'Organic' ? 'No cost, so no ROAS' : 'No cost for this period')}</td>
+      <td>${l.orders ? fmtVal(l.rev / l.orders, 'currency') + `<div class="tt-rc-sub">${fmtVal(Math.round(l.orders), 'number')} orders</div>` : dash(l.ordersWhy)}</td>
+    </tr>`;
+  const comboTable = `
+    <div class="tt-legend tt-rc-legend"><span><i class="tt-rc-key-rev"></i>Revenue</span><span><i class="tt-rc-key-cost"></i>Cost</span></div>
+    <table class="dtable tt-rc-table">
+      <thead><tr><th style="text-align:left">Source</th><th>Revenue</th><th>Cost</th><th>ROAS</th><th>AOV</th></tr></thead>
+      <tbody>
+        ${srcLines.map(comboRow).join('')}
+        <tr class="total-row"><td>Total <span style="color:var(--text-muted)">(Gross Sales TikTok)</span></td><td>${fmtVal(gmv, 'currency-full')}</td><td>${fmtVal(comboTotalCost, 'currency-full')}</td><td>${comboTotalCost ? fmtVal(gmv / comboTotalCost, 'ratio') : '—'}</td><td>${tt.orders ? fmtVal(gmv / tt.orders, 'currency') + `<div class="tt-rc-sub">${fmtVal(tt.orders, 'number')} orders</div>` : '—'}</td></tr>
+      </tbody>
+    </table>
+    <div class="tt-note">Revenue as in “Revenue by source” below (the lines add up to Gross Sales TikTok, before discounts); costs as in “TikTok costs” below, grouped by source — Affiliate = commission + samples (TikTok Gifting) + sample shipping. ROAS = revenue ÷ cost. AOV = revenue ÷ orders: TikTok Ads uses TikTok’s own conversions for its ads; Affiliate uses the affiliate orders in TikTok’s order data, less the ones TikTok Ads also counts; Organic uses the orders left. The total ROAS here is on Gross Sales TikTok, so it differs a little from the TikTok ROAS tile (on TikTok Shop GMV).</div>`;
+
   // Top products
   // YoY / MoM per product (2026-10-08): prior-period sales of the same product
   // (Triple Whale). Single month: same month last year / previous month.
@@ -2750,6 +2820,8 @@ function renderTikTokShop(monthData) {
     ? ` Covers ${tt.months_with_data} of ${tt.months_total} months in this period (months not yet synced aren't included).` : '';
   el.innerHTML = `
     <div class="kpi-grid tt-kpi-grid">${tiles}</div>
+    <div class="tt-subhead">Revenue &amp; costs by source</div>
+    ${comboTable}
     <div class="tt-grid">
       <div><div class="tt-subhead">Revenue by source</div>${revenueTable}</div>
       <div><div class="tt-subhead">TikTok costs</div>${costTable}</div>
