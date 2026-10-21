@@ -60,7 +60,13 @@ const STABLE_AFTER_DAYS = 45;
 // re-pulled.
 // v8 (2026-10-14): core Shop Performance fields pulled on their own (see
 // PERF_CORE_FIELDS) — v7 copies have days missing.
-const PAYLOAD_VERSION = 8;
+// v9 (2026-10-20): affiliate.commission / affiliate.ads_commission (TikTok's
+// own affiliate commission on the period's orders, for the dashboard's
+// Affiliate commission YoY / MoM). v8 copies stay usable (everything else is
+// unchanged): they're served while a background pull upgrades them — see
+// COMPAT_MIN_VERSION in getSellerCenter.
+const PAYLOAD_VERSION = 9;
+const COMPAT_MIN_VERSION = 8;
 
 // Core Shop Performance fields — the ones the dashboard's numbers come from.
 // Pulled on their own (2026-10-14): asking Windsor for these together with
@@ -273,9 +279,10 @@ async function pullAffiliateGmv(start, end) {
   // i.e. ads run on the creator's content. TikTok counts these in its Ads
   // conversion value too, so the dashboard takes them out of TTS Ads to stop
   // them being subtracted twice in Organic GMV.
-  let gmv = 0, n = 0, adsOnly = 0, adsOnlyN = 0, total = 0, settledN = 0, both = 0, bothN = 0;
+  let gmv = 0, n = 0, adsOnly = 0, adsOnlyN = 0, total = 0, settledN = 0, both = 0, bothN = 0, commission = 0, adsCommission = 0;
   orders.forEach((o) => {
     total += o.gross;
+    commission += o.aff; adsCommission += o.affAds;
     if (o.settled) settledN++;
     if (o.aff > 0) { gmv += o.gross; n++; if (o.affAds > 0) { both += o.gross; bothN++; } } else if (o.affAds > 0) { adsOnly += o.gross; adsOnlyN++; }
   });
@@ -284,6 +291,9 @@ async function pullAffiliateGmv(start, end) {
     affiliate_ads_only_gmv: adsOnly, affiliate_ads_only_orders: adsOnlyN,
     affiliate_with_ads_gmv: both, affiliate_with_ads_orders: bothN,
     orders_seen: orders.size, orders_settled: settledN, gross_seen: total,
+    // Affiliate + partner commission / affiliate ads commission on these
+    // orders (by order date, settled or estimated) — added 2026-10-20.
+    commission, ads_commission: adsCommission,
   };
 }
 
@@ -521,13 +531,14 @@ function pullAndStore(start, end) {
     .then(async (payload) => {
       const prev = await readCache(start, end).catch(() => null);
       const old = prev && prev.payload;
-      if (old && old.version === PAYLOAD_VERSION && num(old.days_with_data) > num(payload.days_with_data) && !old.perf_error) {
+      const compatible = old && old.version >= COMPAT_MIN_VERSION && old.version <= PAYLOAD_VERSION;
+      if (compatible && num(old.days_with_data) > num(payload.days_with_data) && !old.perf_error) {
         console.error(`windsor-tiktok: refresh for ${start}..${end} has ${payload.days_with_data} days of shop performance vs ${old.days_with_data} saved — keeping the saved copy`);
         return old;
       }
       if (old && seenOrders(old) > 0 && seenOrders(payload) < seenOrders(old) * 0.95) {
         console.error(`windsor-tiktok: refresh for ${start}..${end} found ${seenOrders(payload)} orders vs ${seenOrders(old)} saved — keeping the saved copy`);
-        if (old.version === PAYLOAD_VERSION) return old;
+        if (compatible) return old;
       }
       await writeCache(start, end, payload);
       return payload;
@@ -584,6 +595,8 @@ function combinePayloads(start, end, parts) {
     ? { error: (affErr.affiliate && affErr.affiliate.error) || 'Affiliate data missing for part of this period' }
     : {
       ...sumKeys(parts.map((p) => p.affiliate), ['gmv', 'orders', 'affiliate_ads_only_gmv', 'affiliate_ads_only_orders', 'affiliate_with_ads_gmv', 'affiliate_with_ads_orders', 'orders_seen', 'orders_settled', 'gross_seen']),
+      // commission only when every month has it (v9+ months)
+      ...(parts.every((p) => p.affiliate && typeof p.affiliate.commission === 'number') ? sumKeys(parts.map((p) => p.affiliate), ['commission', 'ads_commission']) : {}),
       // Per-month figures so the dashboard can work out the Ads/Affiliate
       // overlap month by month — a quarter's Organic GMV then equals the sum
       // of its months' Organic GMV (audit 2026-10-07).
@@ -617,6 +630,12 @@ async function getSellerCenter(start, end, { refresh } = {}) {
   }
   if (!refresh) {
     const row = await readCache(start, end);
+    // An older but compatible copy (v8) is served as-is while a background
+    // pull replaces it with the current version.
+    if (row && row.payload && row.payload.version >= COMPAT_MIN_VERSION && row.payload.version < PAYLOAD_VERSION) {
+      pullAndStore(start, end).catch((err) => console.error('windsor-tiktok: background upgrade failed:', err.message));
+      return { payload: row.payload, cache: 'stale' };
+    }
     if (row && row.payload && row.payload.version === PAYLOAD_VERSION) {
       const ageHours = (Date.now() - new Date(row.fetched_at).getTime()) / 3600000;
       const stable = end <= todayISO() && (Date.now() - new Date(end + 'T00:00:00Z').getTime()) / 86400000 > STABLE_AFTER_DAYS;
