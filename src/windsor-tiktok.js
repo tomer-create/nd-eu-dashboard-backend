@@ -65,7 +65,9 @@ const STABLE_AFTER_DAYS = 45;
 // Affiliate commission YoY / MoM). v8 copies stay usable (everything else is
 // unchanged): they're served while a background pull upgrades them — see
 // COMPAT_MIN_VERSION in getSellerCenter.
-const PAYLOAD_VERSION = 9;
+// v10 (2026-10-21): sample creators include samples awaiting shipment (see
+// pullSampleShipping); v8/v9 copies are served while they're re-pulled.
+const PAYLOAD_VERSION = 10;
 const COMPAT_MIN_VERSION = 8;
 
 // Core Shop Performance fields — the ones the dashboard's numbers come from.
@@ -200,6 +202,13 @@ async function windsorQuery(fields, dateFrom, dateTo, filter) {
 // the period whose status shows they shipped; the creator is the sample
 // order's buyer (order_user_id). Validated Sep 2026: 249 sample orders, all
 // shipped, to 205 creators → 205 × $11 = $2,255.
+// 2026-10-21 (Tomer: "it's based on 156 creators and the real number is 199
+// creators from tiktok"): samples approved but still AWAITING_SHIPMENT are
+// now counted too — only cancelled sample orders are left out. The shipped-
+// only rule undercounted the month in progress: Oct 1–21 had 231 sample
+// orders, 44 still awaiting shipment, so 156 creators shipped vs 191 with a
+// sample (TikTok's Samples page showed 199 — requests not yet turned into
+// orders, or the latest hours, aren't in TikTok's order data via Windsor).
 const SAMPLE_SHIPPING_PER_CREATOR = 11;
 const ORDER_TZ = 'America/New_York';
 const SHIPPED_STATUSES = new Set(['AWAITING_COLLECTION', 'IN_TRANSIT', 'DELIVERED', 'COMPLETED']);
@@ -309,13 +318,14 @@ async function pullSampleShipping(start, end) {
   // three months added up.)
   const creators = new Map(); // creator -> samples (whole period)
   const creatorMonths = new Set(); // 'YYYY-MM|creator'
-  let shipped = 0;
+  let shipped = 0, awaiting = 0;
   rows.forEach((r) => {
     if (!truthy(r.order_is_sample_order)) return;
     const day = orderDay(r.order_create_datetime);
     if (!day || day < start || day >= end) return;
-    const isShipped = SHIPPED_STATUSES.has(String(r.order_status || '').toUpperCase()) || (!!r.order_rts_datetime && String(r.order_status).toUpperCase() !== 'CANCELLED');
-    if (!isShipped || !r.order_user_id) return;
+    const status = String(r.order_status || '').toUpperCase();
+    if (/CANCEL/.test(status) || !r.order_user_id) return;
+    if (!SHIPPED_STATUSES.has(status) && !r.order_rts_datetime) awaiting++;
     shipped++;
     creators.set(r.order_user_id, (creators.get(r.order_user_id) || 0) + 1);
     creatorMonths.add(day.slice(0, 7) + '|' + r.order_user_id);
@@ -323,7 +333,8 @@ async function pullSampleShipping(start, end) {
   return {
     creators: creatorMonths.size,
     creators_distinct: creators.size,
-    samples_shipped: shipped,
+    samples_shipped: shipped, // all non-cancelled sample orders (incl. awaiting shipment)
+    samples_awaiting_shipment: awaiting,
     per_creator: SAMPLE_SHIPPING_PER_CREATOR,
     cost: creatorMonths.size * SAMPLE_SHIPPING_PER_CREATOR,
   };
@@ -607,7 +618,7 @@ function combinePayloads(start, end, parts) {
   const smpErr = parts.find((p) => !p.samples || (p.samples.error && !/^No TikTok sample data/.test(p.samples.error)));
   const smpOk = parts.filter((p) => p.samples && !p.samples.error);
   out.samples = smpErr ? { error: (smpErr.samples && smpErr.samples.error) || 'Sample data missing for part of this period' }
-    : smpOk.length ? { ...sumKeys(smpOk, []), ...sumKeys(smpOk.map((p) => p.samples), ['creators', 'samples_shipped', 'cost']), per_creator: SAMPLE_SHIPPING_PER_CREATOR }
+    : smpOk.length ? { ...sumKeys(smpOk, []), ...sumKeys(smpOk.map((p) => p.samples), ['creators', 'samples_shipped', 'samples_awaiting_shipment', 'cost']), per_creator: SAMPLE_SHIPPING_PER_CREATOR }
     : { error: 'No TikTok sample data for this period' };
   return out;
 }
