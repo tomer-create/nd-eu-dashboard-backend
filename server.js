@@ -2,7 +2,7 @@ require('dotenv').config();
 const path = require('path');
 const express = require('express');
 const cors = require('cors');
-const { fetchOrders, fetchOrdersLight, fetchOrdersForTierRevenue, fetchSalesReversals, fetchCostOfGoodsSold, fetchTopReturnsByProduct, fetchCountryBreakdown, fetchUsStateBreakdown, fetchSalesSummary, fetchCustomerAcquisition, fetchProductRetailPrices, fetchCollabsCodeSales, getAuthorizeUrl, exchangeCodeForToken } = require('./src/shopify');
+const { fetchOrders, fetchOrdersLight, fetchOrdersForTierRevenue, fetchSalesReversals, fetchCostOfGoodsSold, fetchTopReturnsByProduct, fetchCountryBreakdown, fetchUsStateBreakdown, fetchSalesSummary, fetchCustomerAcquisition, fetchProductRetailPrices, fetchCollabsCodeSales, fetchTopProductsAnalytics, getAuthorizeUrl, exchangeCodeForToken } = require('./src/shopify');
 const { aggregate } = require('./src/aggregate');
 const { fetchChannelPerformance, fetchAttentiveSplit, attentiveRevenueKeys, ATTENTIVE_LABEL_KEYS } = require('./src/triplewhale');
 const { fetchTikTokShop, fetchGmvEstimate } = require('./src/tiktokshop');
@@ -1096,6 +1096,53 @@ app.get('/api/channels-change', async (req, res) => {
     res.json(payload);
   } catch (err) {
     console.error(`channels-change (site=${site}) failed:`, err.message);
+    res.status(502).json({ error: err.message });
+  }
+});
+
+// GET /api/top-products?site=com&start=&end=[&yoy_start=&yoy_end=][&prev_start=&prev_end=]
+// Top 15 products by gross sales from Shopify's analytics for a whole period
+// (added 2026-10-21 for Year to Date / quarters — see fetchTopProductsAnalytics
+// in src/shopify.js), with each product's gross sales in the comparison
+// periods (a longer list there, so a product outside last year's top 15 still
+// matches) and the store's gross sales for % of total. Cached like
+// /api/us-states.
+const topProductsCache = new Map();
+app.get('/api/top-products', async (req, res) => {
+  const { site, start, end, yoy_start, yoy_end, prev_start, prev_end } = req.query;
+  if (!['com', 'eu', 'il'].includes(site)) return res.status(400).json({ error: `Unknown or missing site "${site}"` });
+  const ok = (a, b) => US_STATES_DATE.test(a || '') && US_STATES_DATE.test(b || '');
+  if (!ok(start, end) || ((yoy_start || yoy_end) && !ok(yoy_start, yoy_end)) || ((prev_start || prev_end) && !ok(prev_start, prev_end))) {
+    return res.status(400).json({ error: 'Invalid date range' });
+  }
+  const key = [site, start, end, yoy_start, yoy_end, prev_start, prev_end].join('|');
+  const hit = topProductsCache.get(key);
+  if (hit && hit.expires > Date.now()) return res.json(hit.payload);
+  try {
+    const priorList = (s, e) => (s ? fetchTopProductsAnalytics(site, s, e, 500).catch((err) => {
+      console.error(`top-products prior (site=${site} ${s}..${e}) failed:`, err.message);
+      return null;
+    }) : Promise.resolve(null));
+    const [cur, summary, yoy, prev] = await Promise.all([
+      fetchTopProductsAnalytics(site, start, end, 15),
+      fetchSalesSummary(site, start, end).catch(() => null),
+      priorList(yoy_start, yoy_end),
+      priorList(prev_start, prev_end),
+    ]);
+    const byTitle = (list) => (list ? new Map(list.map((p) => [p.title, p.gross_sales])) : null);
+    const yMap = byTitle(yoy), pMap = byTitle(prev);
+    const products = cur.map((p) => ({
+      ...p,
+      yoy_gross: yMap ? (yMap.get(p.title) ?? 0) : null,
+      prev_gross: pMap ? (pMap.get(p.title) ?? 0) : null,
+    }));
+    const payload = { site, start, end, source: 'shopify_analytics', total_gross: summary ? summary.gross_sales : null, products, has_yoy: !!yMap, has_prev: !!pMap };
+    const ended = new Date(`${end}T00:00:00Z`).getTime() + 86400000 <= Date.now();
+    topProductsCache.set(key, { payload, expires: Date.now() + (ended ? 6 * 3600 : 15 * 60) * 1000 });
+    if (topProductsCache.size > 300) topProductsCache.delete(topProductsCache.keys().next().value);
+    res.json(payload);
+  } catch (err) {
+    console.error(`top-products (site=${site}) failed:`, err.message);
     res.status(502).json({ error: err.message });
   }
 });
