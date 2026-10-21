@@ -2435,11 +2435,17 @@ function ttChange(v, higherIsBetter) {
   const dir = (v === null || v === undefined) ? 'flat' : ((v >= 0) === higherIsBetter ? 'up' : 'down');
   return { str, dir };
 }
-function renderTikTokShop(monthData) {
+// opts.dry (2026-10-21): work out the figures only and return the Affiliate
+// line's Avg order — used by Section 4's TikTok Affiliates row
+// (ttAffiliateAovFor), so both sections show the same number. Nothing on the
+// page is touched in that mode.
+function renderTikTokShop(monthData, opts = {}) {
+  const dry = !!opts.dry;
   const el = document.getElementById('section-tiktok');
-  const tt = monthData.tiktok_shop;
+  const tt = monthData && monthData.tiktok_shop;
   const cur = state.month === 'YTD' || isQuarter(state.month);
   if (!tt) {
+    if (dry) return { why: 'TikTok Shop data for this period isn’t loaded yet — click Sync' };
     el.innerHTML = `<div class="tt-pending"><strong>No Triple Whale TikTok Shop data for this period yet.</strong> Click Sync above to pull it live.</div>`;
     const r0 = ttPeriodRange();
     if (r0) ttEnsureSC(r0); // so Affiliate GMV / samples are ready once Sync lands
@@ -2751,7 +2757,7 @@ function renderTikTokShop(monthData) {
         <tr class="total-row"><td>Total TikTok costs</td><td>${fmtVal(totalCost,'currency-full')}</td><td>${gmvShown ? fmtVal(totalCost/gmvShown,'percent') : '—'}</td><td>${cCell(totalYoy)}</td><td>${cCell(totalMom)}</td></tr>
       </tbody>
     </table>
-    <div class="tt-note">TikTok ROAS (tile above) = TikTok Shop GMV ÷ Total TikTok costs; “% of GMV” is on the same GMV. Product cost (COGS ${fmtVal(tt.cogs,'currency-full')}) and platform fees aren't included. Sources: TikTok Ads spend — Triple Whale; Affiliate commission and TikTok Gifting — P&amp;L sheet, with their YoY / ${mLabel} from TikTok's own data for the same days (commission: TikTok's affiliate commission on the period's orders; samples: the number of sample orders shipped to creators), since the sheet only has 2026 and no figure yet for a month in progress; Sample shipping — creators with at least one sample shipped × $11, from TikTok's sample orders, counted per month.</div>`;
+    <div class="tt-note">TikTok ROAS (tile above) = TikTok Shop GMV ÷ Total TikTok costs; “% of GMV” is on the same GMV. Product cost (COGS ${fmtVal(tt.cogs,'currency-full')}) and platform fees aren't included. Sources: TikTok Ads spend — Triple Whale; Affiliate commission and TikTok Gifting — P&amp;L sheet, with their YoY / ${mLabel} from TikTok's own data for the same days (commission: TikTok's affiliate commission on the period's orders; samples: the number of sample orders shipped to creators), since the sheet only has 2026 and no figure yet for a month in progress; Sample shipping — creators sent at least one sample × $11 (shipped or approved and awaiting shipment; cancelled samples left out), from TikTok's sample orders, counted per month. TikTok's Samples page can show a few more creators: requests not yet turned into orders aren't in TikTok's order data.</div>`;
 
   // Revenue & costs by source (2026-10-20, Tomer: "add Revenue by source and
   // TikTok costs on the same chart, when the cost of the affiliate should be
@@ -2840,6 +2846,12 @@ function renderTikTokShop(monthData) {
   // each line's revenue × Net Sales ÷ Gross Sales TikTok for that period,
   // ÷ its orders — so Total = Net Sales ÷ orders = the AOV tile.
   const lineMetrics = (l) => ({ rev: l.rev, cost: l.cost, roas: l.cost ? l.rev / l.cost : null, aov: l.orders && l.nr !== null && l.nr !== undefined ? l.rev * l.nr / l.orders : null });
+  if (dry) {
+    const al = srcLines.find(l => l.name === 'Affiliate');
+    const m = al ? lineMetrics(al) : null;
+    return m && m.aov !== null ? { aov: m.aov, rev: al.rev * al.nr, orders: al.orders }
+      : { why: scPending ? 'Loading TikTok’s order data…' : (lowCoverageMsg || 'TikTok’s affiliate order data isn’t available for this period') };
+  }
   const chgOf = (curV, prevV) => (curV === null || curV === undefined || prevV === null || prevV === undefined || !prevV) ? null : (curV - prevV) / Math.abs(prevV);
   const comboTotalCost = srcLines.reduce((a, l) => a + (l.cost || 0), 0);
   const totalLine = { name: 'Total', rev: gmv, cost: comboTotalCost, orders: tt.orders, nr: curCtx.netRatio };
@@ -2963,7 +2975,7 @@ function ttEnsureSC(range) {
     fetchSellerCenter(range.start, range.end)
       .then(d => { sellerCenterCache[key] = { status: 'ok', data: d }; })
       .catch(err => { sellerCenterCache[key] = { status: 'error', error: err.message }; })
-      .finally(() => { if (state.site === 'com') renderTikTokShop(getMonthData()); });
+      .finally(() => { if (state.site === 'com') renderTikTokShop(getMonthData()); if (state.site === 'com' || state.site === 'all') renderChannels(getMonthData()); });
   }
   return sellerCenterCache[key];
 }
@@ -3291,6 +3303,22 @@ function c4OrganicPlug(md, hidden) {
   channels.forEach(c => { if (!c.no_data) c.revenue_ratio = (c.revenue_actual || 0) / gross; });
   return Object.assign({}, md, { channels, c4_gross: gross });
 }
+// TikTok Affiliates Avg order for Section 4 (2026-10-21): the TikTok Shop
+// section's Affiliate line for ND.COM in the period on screen (All Sites:
+// ND.COM's, the only TikTok Shop; in USD already).
+function ttAffiliateAovFor() {
+  if (state.site !== 'com' && state.site !== 'all') return null;
+  try {
+    const md = state.site === 'com' ? getMonthData()
+      : state.month === 'YTD' ? getSiteYTDData('com')
+      : isQuarter(state.month) ? applyQoQ(state.month, ['com'], getQuarterData(state.month, ['com']))
+      : getSingleSiteMonthData('com', state.month);
+    return renderTikTokShop(md, { dry: true });
+  } catch (e) {
+    console.warn('TikTok Affiliates Avg order:', e);
+    return null;
+  }
+}
 function renderChannels(monthData) {
   const el = document.getElementById('section-4');
   // Hide this site's HIDDEN_CHANNELS_BY_SITE rows from its own table/Total —
@@ -3369,6 +3397,17 @@ function renderChannels(monthData) {
       out.aov = cc && cc.orders ? cc.sales / cc.orders : null;
       if (out.aov !== null) { out.aovRev = cc.sales; out.aovOrders = cc.orders; }
     }
+    // TikTok Affiliates (2026-10-21, Tomer: "there is no AVG Order for TikTok
+    // Affiliates"): the sheet has no order count, so Avg order = the TikTok
+    // Shop section's Affiliate line — TikTok's own affiliate orders, on Net
+    // Sales (ttAffiliateAovFor). ND.COM only (the only TikTok Shop).
+    if (c.label === 'TikTok Affiliates') {
+      const f = ttAffiliateAovFor();
+      out.ttAff = true;
+      out.aov = f && f.aov !== undefined ? f.aov : null;
+      out.ttAffWhy = f && f.why;
+      if (out.aov !== null) { out.aovRev = f.rev; out.aovOrders = f.orders; }
+    }
     const attKey = ATTENTIVE_ROW_KEYS[c.label];
     if (attKey) {
       out.attentive = true;
@@ -3443,6 +3482,7 @@ function renderChannels(monthData) {
         : c.revenue_source === 'mixed' ? 'Triple Whale + P&amp;L sheet · spend from sheet' : 'P&amp;L sheet · Avg order: Triple Whale';
     }
     if (ch.collabs) return 'P&amp;L sheet · Avg order: Collabs codes';
+    if (ch.ttAff && ch.aov !== null) return 'P&amp;L sheet · Avg order: TikTok order data';
     if (c.plug) return 'Gross sales − all other channels';
     // Before / without the comparison data, fall back to the channels Triple
     // Whale normally supplies (see channels_note).
@@ -3459,6 +3499,7 @@ function renderChannels(monthData) {
     ? 'Includes ND.IL (and any period before Aug 2026), where Attentive’s email links don’t say journey or campaign — that part is all Attentive email'
     : 'Attentive’s email links here don’t say journey or campaign' + (state.site === 'il' ? '' : ' before Aug 2026') + ', so this is all Attentive email (journeys + campaigns together)';
   const aovBlankWhy = (ch, collabs) => collabs ? 'No Collabs-code orders available for this period'
+    : ch.ttAff ? (ch.ttAffWhy || 'No TikTok affiliate order data for this period')
     : ch.attentive ? (ch.attMissing ? 'Triple Whale Attentive data didn’t load — try Sync' : 'No orders from this Attentive channel in Triple Whale for this period')
     : 'No order count for this channel';
   const aovCell = (ch, collabs) => ch.loading ? '<span class="c4-dim">…</span>'
