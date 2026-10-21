@@ -2640,7 +2640,6 @@ function renderTikTokShop(monthData) {
   // 2026-10-08 per Tomer: the "less overlap" and "TTS Ads GMV (net of
   // overlap)" rows are hidden, and TikTok Ads always shows the full Triple
   // Whale conversion value (same as Section 4).
-  const adsRow = `<tr><td>TikTok Ads <span style="color:var(--text-muted)">(ROAS ${adsRoas !== null ? fmtVal(adsRoas,'ratio') : '—'})</span></td><td>${fmtVal(adsCV,'currency-full')}</td><td>${fmtVal(adsShare,'percent')}</td><td>${ch('ads_revenue', true)}</td><td>${chM('ads_revenue', true)}</td></tr>`;
   const pctW = v => Math.max(0, v * 100).toFixed(2);
   const C1 = 'var(--series-1)', C2 = 'var(--series-2, #c97a3d)', C3 = 'var(--series-3, #5b9a6b)';
   const shareBar = aff
@@ -2652,23 +2651,6 @@ function renderTikTokShop(monthData) {
         <span style="width:${pctW(adsShare)}%;background:${C1}"></span><span style="width:${pctW(comboShare)}%;background:${C2}"></span>
       </div>
       <div class="tt-legend"><span><i style="background:${C1}"></i>TikTok Ads ${fmtVal(adsShare,'percent')}</span><span><i style="background:${C2}"></i>Affiliate + Organic ${fmtVal(comboShare,'percent')}</span></div>`;
-  const splitRows = aff
-    ? `<tr><td>Affiliate-driven GMV <span style="color:var(--text-muted)">(${fmtVal(aff.orders,'number')} orders)</span></td><td title="Affiliate orders that TikTok Ads also counts (${fmtVal(overlap,'currency-full')}) are left out here so they aren't counted twice">${fmtVal(affNet,'currency-full')}</td><td>${fmtVal(affShare,'percent')}</td><td>—</td><td>—</td></tr>
-        <tr><td>Organic GMV <span style="color:var(--text-muted)">(GMV − Affiliate − TikTok Ads)</span></td><td>${fmtVal(organicGmv,'currency-full')}</td><td>${fmtVal(orgShare,'percent')}</td><td>—</td><td>—</td></tr>`
-    : `<tr><td>Affiliate + Organic GMV <span style="color:var(--text-muted)">(combined)</span></td><td>${fmtVal(tt.affiliate_organic_revenue,'currency-full')}</td><td>${fmtVal(comboShare,'percent')}</td><td>${ch('affiliate_organic_revenue', true)}</td><td>${chM('affiliate_organic_revenue', true)}</td></tr>
-        <tr class="no-data-row"><td>&nbsp;&nbsp;↳ Affiliate / Organic split</td><td colspan="4">${scPending ? '<span class="tt-loading" aria-hidden="true"></span>Loading Affiliate-driven GMV from TikTok Shop…' : (lowCoverageMsg || ('Affiliate-driven GMV unavailable' + (scFailMsg ? ': ' + String(scFailMsg).replace(/</g, '&lt;') : '')))}</td></tr>`;
-  const revenueTable = `
-    ${shareBar}
-    <table class="dtable" style="margin-top:10px">
-      <thead><tr><th style="text-align:left">Revenue source</th><th>Revenue</th><th>% of gross</th><th>YoY</th><th>${mLabel}</th></tr></thead>
-      <tbody>
-        ${adsRow}
-        ${splitRows}
-        <tr class="total-row"><td>Gross Sales TikTok <span style="color:var(--text-muted)">(before discounts)</span></td><td>${fmtVal(gmv,'currency-full')}</td><td>100%</td><td>${ch('gross_sales', true)}</td><td>${chM('gross_sales', true)}</td></tr>
-      </tbody>
-    </table>
-    ${aff ? `<div class="tt-note">TikTok Ads = Triple Whale's TikTok Ads conversion value, the same figure as in Marketing &amp; Sales Channel Performance. Affiliate-driven GMV = the share of TikTok's order data (orders placed in this period) that paid a creator commission, applied to Gross Sales TikTok, less ${fmtVal(overlap,'currency-full')} of affiliate orders TikTok Ads already counts${overlapEstimated ? ' (partly estimated)' : ''} — ads run on creators' content — so they aren't counted twice. Organic GMV = Gross Sales TikTok − (Affiliate-driven GMV + TikTok Ads). The three rows add up to Gross Sales TikTok.</div>` : ''}`;
-
   // Costs — 2026-10-08 per Tomer: Source column removed, YoY and MoM (QoQ
   // for quarters) added.
   //   TikTok Ads spend        → Triple Whale YoY / MoM (same as the tiles)
@@ -2784,6 +2766,7 @@ function renderTikTokShop(monthData) {
     } else {
       lines.push({ name: 'Affiliate + Organic', color: C2, rev: x.gmv - x.adsCV, cost: x.affCost, orders: null, costSub: x.affCostSub, ordersWhy: 'Needs TikTok’s order data (affiliate split) for this period' });
     }
+    lines.forEach(l => { l.nr = x.netRatio; });
     return lines;
   };
   // Whole-period figures for a comparison period (prior values from the %
@@ -2810,7 +2793,8 @@ function renderTikTokShop(monthData) {
       affNetP = Math.max(0, aG - o.v); orgP = Math.max(0, gP - affNetP - adsCVP);
       affOP = (a.orders || 0) - Math.min(a.orders || 0, (a.affiliate_with_ads_orders || 0) * (o.measured ? o.v / o.measured : 1));
     }
-    return { gmv: gP, adsCV: adsCVP, adsSpend: adsSpP, adsOrders: adsOP, orders: priorOfCh(tt.orders, c.orders), aff: a, affNet: affNetP, organic: orgP, affOrdersNet: affOP, affCost: affCostP };
+    const netP = priorOfCh(tt.net_sales, c.net_sales);
+    return { gmv: gP, netRatio: netP !== null ? netP / gP : null, adsCV: adsCVP, adsSpend: adsSpP, adsOrders: adsOP, orders: priorOfCh(tt.orders, c.orders), aff: a, affNet: affNetP, organic: orgP, affOrdersNet: affOP, affCost: affCostP };
   };
   const adsOrders = typeof tt.ads_orders === 'number' ? tt.ads_orders : null;
   const affParts = [commission, samples, sampleShip];
@@ -2818,19 +2802,22 @@ function renderTikTokShop(monthData) {
   const affCostMissing = [commission === null ? 'commission' : null, samples === null ? 'samples' : null, sampleShip === null ? (scPending ? 'sample shipping (loading…)' : 'sample shipping') : null].filter(Boolean);
   const affCostSub = [commission !== null ? 'commission ' + fmtVal(commission, 'currency-full') : null, samples !== null ? 'samples ' + fmtVal(samples, 'currency-full') : null, sampleShip !== null ? 'sample shipping ' + fmtVal(sampleShip, 'currency-full') : null].filter(Boolean).join(' + ') + (affCostMissing.length ? ' · excl. ' + affCostMissing.join(', ') : '') + (aff ? '' : scPending ? ' · split loading…' : '');
   const ovlOrders = aff ? Math.min(aff.orders || 0, (aff.affiliate_with_ads_orders || 0) * (ovl.measured ? overlap / ovl.measured : 1)) : 0;
-  const curCtx = { gmv, adsCV, adsSpend: tt.ads_spend || 0, adsOrders, orders: tt.orders, aff, affNet, organic: organicGmv, affOrdersNet: aff ? (aff.orders || 0) - ovlOrders : null, affCost, affCostSub };
+  const curCtx = { gmv, netRatio: gmv ? (tt.net_sales || 0) / gmv : null, adsCV, adsSpend: tt.ads_spend || 0, adsOrders, orders: tt.orders, aff, affNet, organic: organicGmv, affOrdersNet: aff ? (aff.orders || 0) - ovlOrders : null, affCost, affCostSub };
   const srcLines = srcLinesFor(curCtx);
   const priors = { yoy: priorCtx('yoy'), mom: priorCtx('mom') };
   const priorLines = { yoy: priors.yoy ? srcLinesFor(priors.yoy) : null, mom: priors.mom ? srcLinesFor(priors.mom) : null };
-  const lineMetrics = (l) => ({ rev: l.rev, cost: l.cost, roas: l.cost ? l.rev / l.cost : null, aov: l.orders ? l.rev / l.orders : null });
+  // AOV on Net Sales (2026-10-20, Tomer: the Total must equal the AOV tile):
+  // each line's revenue × Net Sales ÷ Gross Sales TikTok for that period,
+  // ÷ its orders — so Total = Net Sales ÷ orders = the AOV tile.
+  const lineMetrics = (l) => ({ rev: l.rev, cost: l.cost, roas: l.cost ? l.rev / l.cost : null, aov: l.orders && l.nr !== null && l.nr !== undefined ? l.rev * l.nr / l.orders : null });
   const chgOf = (curV, prevV) => (curV === null || curV === undefined || prevV === null || prevV === undefined || !prevV) ? null : (curV - prevV) / Math.abs(prevV);
   const comboTotalCost = srcLines.reduce((a, l) => a + (l.cost || 0), 0);
-  const totalLine = { name: 'Total', rev: gmv, cost: comboTotalCost, orders: tt.orders };
+  const totalLine = { name: 'Total', rev: gmv, cost: comboTotalCost, orders: tt.orders, nr: curCtx.netRatio };
   const totalPriorLine = (kind) => {
     const pl = priorLines[kind], pc = priors[kind];
     if (!pl || !pc) return null;
     const costKnown = srcLines.every((l, i) => (l.cost === null || l.cost === undefined) || (pl[i] && pl[i].cost !== null && pl[i].cost !== undefined));
-    return { rev: pc.gmv, cost: costKnown ? pl.reduce((a, l) => a + (l.cost || 0), 0) : null, orders: pc.orders };
+    return { rev: pc.gmv, cost: costKnown ? pl.reduce((a, l) => a + (l.cost || 0), 0) : null, orders: pc.orders, nr: pc.netRatio };
   };
   const chgFor = (line, kind) => {
     let p = null;
@@ -2851,18 +2838,22 @@ function renderTikTokShop(monthData) {
       <td>${fmtVal(l.rev, 'currency-full')}<div class="tt-rc-sub">${gmv ? fmtVal((l.rev || 0) / gmv, 'percent') + ' of gross' : ''}</div>${rcChg(l, 'rev')}</td>
       <td>${l.cost === null || l.cost === undefined ? dash(l.name === 'Organic' ? 'Organic sales have no direct TikTok cost' : 'No cost figures for this period') : fmtVal(l.cost, 'currency-full')}<div class="tt-rc-sub">${l.costSub || ''}</div>${l.cost === null || l.cost === undefined ? '' : rcChg(l, 'cost')}</td>
       <td>${l.cost ? fmtVal(l.rev / l.cost, 'ratio') + rcChg(l, 'roas') : dash(l.name === 'Organic' ? 'No cost, so no ROAS' : 'No cost for this period')}</td>
-      <td>${l.orders ? fmtVal(l.rev / l.orders, 'currency') + `<div class="tt-rc-sub">${l.ordersEst ? '≈ ' : ''}${fmtVal(Math.round(l.orders), 'number')} orders${l.ordersEst ? ' (est.)' : ''}</div>` + rcChg(l, 'aov') : dash(l.ordersWhy)}</td>
+      <td>${lineMetrics(l).aov !== null ? fmtVal(lineMetrics(l).aov, 'currency') + `<div class="tt-rc-sub">${l.ordersEst ? '≈ ' : ''}${fmtVal(Math.round(l.orders), 'number')} orders${l.ordersEst ? ' (est.)' : ''}</div>` + rcChg(l, 'aov') : dash(l.ordersWhy)}</td>
     </tr>`;
+  // 2026-10-20 per Tomer: the "Revenue by source" table is removed — only its
+  // % split bar stays, above this table. Its "split loading / unavailable"
+  // message moves under the bar.
+  const splitStatus = aff ? '' : `<div class="tt-note" style="margin-top:4px">${scPending ? '<span class="tt-loading" aria-hidden="true"></span>Loading Affiliate-driven GMV from TikTok Shop…' : (lowCoverageMsg || ('Affiliate / Organic split unavailable' + (scFailMsg ? ': ' + String(scFailMsg).replace(/</g, '&lt;') : '')))}</div>`;
   const comboTable = `
     <div class="tt-legend tt-rc-legend"><span><i class="tt-rc-key-rev"></i>Revenue</span><span><i class="tt-rc-key-cost"></i>Cost</span></div>
     <table class="dtable tt-rc-table">
       <thead><tr><th style="text-align:left">Source</th><th>Revenue</th><th>Cost</th><th>ROAS</th><th>AOV</th></tr></thead>
       <tbody>
         ${srcLines.map(comboRow).join('')}
-        <tr class="total-row"><td>Total <span style="color:var(--text-muted)">(Gross Sales TikTok)</span></td><td>${fmtVal(gmv, 'currency-full')}${rcChg(totalLine, 'rev')}</td><td>${fmtVal(comboTotalCost, 'currency-full')}${rcChg(totalLine, 'cost')}</td><td>${comboTotalCost ? fmtVal(gmv / comboTotalCost, 'ratio') + rcChg(totalLine, 'roas') : '—'}</td><td>${tt.orders ? fmtVal(gmv / tt.orders, 'currency') + `<div class="tt-rc-sub">${fmtVal(tt.orders, 'number')} orders</div>` + rcChg(totalLine, 'aov') : '—'}</td></tr>
+        <tr class="total-row"><td>Total <span style="color:var(--text-muted)">(Gross Sales TikTok)</span></td><td>${fmtVal(gmv, 'currency-full')}${rcChg(totalLine, 'rev')}</td><td>${fmtVal(comboTotalCost, 'currency-full')}${rcChg(totalLine, 'cost')}</td><td>${comboTotalCost ? fmtVal(gmv / comboTotalCost, 'ratio') + rcChg(totalLine, 'roas') : '—'}</td><td>${tt.orders ? fmtVal((tt.net_sales || 0) / tt.orders, 'currency') + `<div class="tt-rc-sub">${fmtVal(tt.orders, 'number')} orders</div>` + rcChg(totalLine, 'aov') : '—'}</td></tr>
       </tbody>
     </table>
-    <div class="tt-note">Revenue as in “Revenue by source” below (the lines add up to Gross Sales TikTok, before discounts); costs as in “TikTok costs” below, grouped by source — Affiliate = commission + samples (TikTok Gifting) + sample shipping. ROAS = revenue ÷ cost. AOV = revenue ÷ orders, on the same before-discounts basis — so it’s higher than the AOV tile above (TikTok Net Sales ÷ orders, after discounts and refunds). TikTok Ads uses TikTok’s own conversions for its ads; Affiliate the affiliate orders in TikTok’s order data, less the ones TikTok Ads also counts; Organic is estimated — Organic GMV ÷ the average order without a creator commission (TikTok counts many affiliate orders as Ads conversions too, so the orders can’t simply be subtracted). YoY / ${mLabel}: same calculation for the comparison period; costs from the P&amp;L sheet have no YoY (only the 2026 tab is connected) and no ${mLabel} for the month in progress. The total ROAS here is on Gross Sales TikTok, so it differs a little from the TikTok ROAS tile (on TikTok Shop GMV).</div>`;
+    <div class="tt-note">Revenue: TikTok Ads = Triple Whale's TikTok Ads conversion value (the same figure as in Marketing &amp; Sales Channel Performance); Affiliate = the share of TikTok's order data that paid a creator commission, applied to Gross Sales TikTok, less ${fmtVal(overlap,'currency-full')} of affiliate orders TikTok Ads already counts${overlapEstimated ? ' (partly estimated)' : ''}; Organic = Gross Sales TikTok − (Affiliate + TikTok Ads). The lines add up to Gross Sales TikTok (before discounts). Costs as in “TikTok costs” below, grouped by source — Affiliate = commission + samples (TikTok Gifting) + sample shipping. ROAS = revenue ÷ cost. AOV is on Net Sales, like the AOV tile: each line's share of TikTok Net Sales (its revenue × Net Sales ÷ Gross Sales TikTok) ÷ its orders, so the Total equals the tile. Orders: TikTok Ads = TikTok's own conversions for its ads; Affiliate = affiliate orders in TikTok's order data, less the ones TikTok Ads also counts; Organic is estimated — Organic GMV ÷ the average order without a creator commission (TikTok counts many affiliate orders as Ads conversions too, so they can't simply be subtracted). YoY / ${mLabel}: same calculation for the comparison period; costs from the P&amp;L sheet have no YoY (only the 2026 tab is connected) and no ${mLabel} for the month in progress. The total ROAS here is on Gross Sales TikTok, so it differs a little from the TikTok ROAS tile (on TikTok Shop GMV).</div>`;
 
   // Top products
   // YoY / MoM per product (2026-10-08): prior-period sales of the same product
@@ -2889,11 +2880,10 @@ function renderTikTokShop(monthData) {
   el.innerHTML = `
     <div class="kpi-grid tt-kpi-grid">${tiles}</div>
     <div class="tt-subhead">Revenue &amp; costs by source</div>
+    ${shareBar}${splitStatus}
     ${comboTable}
-    <div class="tt-grid">
-      <div><div class="tt-subhead">Revenue by source</div>${revenueTable}</div>
-      <div><div class="tt-subhead">TikTok costs</div>${costTable}</div>
-    </div>
+    <div class="tt-subhead">TikTok costs</div>
+    ${costTable}
     <div class="tt-subhead">Top TikTok Shop products</div>
     ${prodTable}
     <div class="tt-note">Source: Triple Whale's TikTok Shop integration (TikTok's own order records; refunds by refund date; TikTok Ads = TikTok's own Shop conversion value for its ads). Gross Sales TikTok − TikTok Ads equals the P&amp;L sheet's "TikTok Affiliates" + "TikTok Organic" rows; Affiliate-driven GMV and Organic GMV split it. TikTok Shop orders also sync into Shopify, so they're already included in ND.COM's Gross Sales in Section 1 — this section is a breakdown and isn't added to any total.${partial}</div>`;
