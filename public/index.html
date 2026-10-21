@@ -1031,7 +1031,12 @@ function mergeLiveIntoMonthData(monthData, live, site) {
         // should never make Section 4 show LESS than it did before.
         if (lc.no_data) continue;
         const existing = updatedChannels[idx];
-        updatedChannels[idx] = Object.assign({}, existing, {
+        // A built-in no_data placeholder never got its sheet goals (see
+        // applyPnlGoals) — take them from pending_channel_goals.
+        const pg = existing.no_data && monthData && monthData.pending_channel_goals && monthData.pending_channel_goals[lc.label];
+        const pgGoals = {};
+        if (pg) ['spend_goal', 'revenue_goal', 'roas_goal'].forEach(k => { if (k in pg) pgGoals[k] = pg[k]; });
+        updatedChannels[idx] = Object.assign({}, existing, pgGoals, {
           no_data: false,
           spend_actual: spend,
           revenue_actual: revenue,
@@ -1045,13 +1050,17 @@ function mergeLiveIntoMonthData(monthData, live, site) {
         // Brand new row this dashboard has never shown before (Snapchat,
         // ChatGPT Ads) — no P&L goal exists for these yet, so goal fields
         // stay null (renders as "—", same as any other missing goal).
+        // Goals from the P&L sheet when it has them (2026-10-21 — see
+        // pending_channel_goals in applyPnlGoals); otherwise none ("—").
+        const pg = (monthData && monthData.pending_channel_goals && monthData.pending_channel_goals[lc.label]) || {};
         updatedChannels.push({
           label: lc.label,
           no_data: false,
           spend_actual: spend,
-          spend_goal: null,
+          spend_goal: 'spend_goal' in pg ? pg.spend_goal : null,
           revenue_actual: revenue,
-          revenue_goal: null,
+          revenue_goal: 'revenue_goal' in pg ? pg.revenue_goal : null,
+          roas_goal: 'roas_goal' in pg ? pg.roas_goal : null,
           roas,
           revenue_ratio,
           has_spend: true,
@@ -4314,8 +4323,67 @@ function yoyCell(v) {
   const cls = v >= 0 ? 'up' : 'down';
   return `<span class="kpi-yoy ${cls}" style="padding:1px 6px">${s}</span>`;
 }
+// Year to Date / quarters: top products straight from Shopify's analytics
+// for the whole period (2026-10-21, Tomer: "on year to date preview the top
+// selling products doesn't match Shopify data"). The old combine merged each
+// month's own top 15 — and Jan–Jul had no product list at all — so a YTD
+// figure was really Aug–Oct's top 15s (Hy-Glam Foundation $289K vs Shopify's
+// $1.01M). /api/top-products per site; All Sites adds the sites up in USD.
+const topProductsPeriodCache = {};
+function topProductsPeriodData() {
+  const r = usStatesRanges();
+  const sites = state.site === 'all' ? Object.keys(DATA.sites) : [state.site];
+  const ck = [state.site, r.cur.start, r.cur.end, r.prev ? r.prev.start : ''].join('|');
+  const entry = topProductsPeriodCache[ck];
+  if (entry && entry !== 'loading') return entry;
+  if (!entry) {
+    topProductsPeriodCache[ck] = 'loading';
+    const view = state.site + '|' + state.month;
+    Promise.all(sites.map(site => {
+      const q = new URLSearchParams({ site, start: r.cur.start, end: r.cur.end, yoy_start: r.yoy.start, yoy_end: r.yoy.end });
+      if (r.prev) { q.set('prev_start', r.prev.start); q.set('prev_end', r.prev.end); }
+      return fetch(`${BACKEND_URL}/api/top-products?${q}`).then(res => res.json().then(body => { if (!res.ok) throw new Error(body.error || ('Backend returned ' + res.status)); return { site, body }; }));
+    })).then(results => {
+      const map = new Map();
+      let total = 0, totalKnown = true, hasYoy = true, hasPrev = true;
+      results.forEach(({ site, body }) => {
+        const fx = state.site === 'all' && FX_TO_USD[site] != null ? FX_TO_USD[site] : 1;
+        if (body.total_gross === null || body.total_gross === undefined) totalKnown = false; else total += body.total_gross * fx;
+        hasYoy = hasYoy && body.has_yoy; hasPrev = hasPrev && body.has_prev;
+        (body.products || []).forEach(p => {
+          const a = map.get(p.title) || { title: p.title, gross_sales: 0, net_sales: 0, units_sold: 0, yoy_gross: 0, prev_gross: 0 };
+          a.gross_sales += p.gross_sales * fx; a.net_sales += p.net_sales * fx; a.units_sold += p.units_sold;
+          a.yoy_gross += (p.yoy_gross || 0) * fx; a.prev_gross += (p.prev_gross || 0) * fx;
+          map.set(p.title, a);
+        });
+      });
+      const chg = (c, p) => p ? (c - p) / p : null;
+      const list = Array.from(map.values()).sort((a, b) => b.gross_sales - a.gross_sales).slice(0, 15).map(p => ({
+        title: p.title, gross_sales: p.gross_sales, net_sales_est: p.net_sales, units_sold: p.units_sold,
+        pct_of_total: totalKnown && total ? p.gross_sales / total : null,
+        yoy: hasYoy ? chg(p.gross_sales, p.yoy_gross) : null,
+        mom: hasPrev ? chg(p.gross_sales, p.prev_gross) : null,
+      }));
+      topProductsPeriodCache[ck] = { list };
+    }).catch(err => {
+      console.error('top-products fetch failed:', err);
+      topProductsPeriodCache[ck] = { error: String(err.message || err) };
+    }).finally(() => { if (state.site + '|' + state.month === view) renderTopProducts(getMonthData()); });
+  }
+  return 'loading';
+}
 function renderTopProducts(monthData) {
   const el = document.getElementById('section-2');
+  let periodErr = null;
+  if (isMultiMonth(state.month)) {
+    const tp = topProductsPeriodData();
+    if (tp === 'loading') {
+      el.innerHTML = `<div class="tt-pending"><span class="tt-loading" aria-hidden="true"></span>Loading top products from Shopify for this period…</div>`;
+      return;
+    }
+    if (tp && tp.list) monthData = Object.assign({}, monthData, { top_products: tp.list, top_products_source: 'shopify_period' });
+    else periodErr = tp && tp.error;
+  }
   if (!monthData.top_products) {
     el.innerHTML = `<div class="placeholder">
       <div class="ph-title">No live Shopify data for this month</div>
@@ -4328,8 +4396,10 @@ function renderTopProducts(monthData) {
     ? 'Pulled live via the Sync button (real-time Shopify order data for the selected date range). Net Sales is estimated using the store\'s overall net/gross ratio, not a per-product figure. YoY compares the same date range one year earlier; MoM compares the same date range one month earlier, matched by exact product title — a brand-new product, or one renamed since the comparison period, shows —.'
     : monthData.top_products_source === 'shopify_analytics'
     ? 'Pulled live from Shopify analytics (ShopifyQL, exact calendar-month-to-date range). Net Sales is estimated using the store\'s overall net/gross ratio for the month, not a per-product figure. YoY compares the same date range one year earlier; MoM compares the same date range one month earlier. A blank YoY/MoM/Units Sold means that comparison period (or per-product unit count) wasn\'t available from this pull — often because the product is a new launch.'
+    : monthData.top_products_source === 'shopify_period'
+    ? `Shopify analytics for the whole period (gross sales, net sales and units ordered per product — Shopify's own figures)${state.site === 'all' ? ', the three sites added up in USD' : ''}. % of Total = the product's gross sales ÷ the store's gross sales for the period. YoY compares the same dates last year${isQuarter(state.month) ? '; QoQ the previous quarter (closed quarters only)' : ''}.`
     : monthData.top_products_source === 'combined'
-    ? (monthData.top_products_combined_note || 'Combined from the underlying periods/sites client-side.')
+    ? (periodErr ? 'Shopify’s full-period product list didn’t load (' + String(periodErr).replace(/</g, '&lt;') + ') — showing each month’s own top 15 added up, which leaves out months where a product wasn’t in that month’s top 15. ' : '') + (monthData.top_products_combined_note || 'Combined from the underlying periods/sites client-side.')
     : `Pulled live from Shopify (best-sellers by revenue, last ${monthData.top_products_window_days} days ≈ month-to-date). Net Sales is estimated using the store's overall net/gross ratio for the month, not a per-product figure. YoY / MoM aren't available from this tool — it only returns a rolling window from today, not arbitrary past periods.`;
   const rows = monthData.top_products.map((p, i) => `<tr>
       <td>${i+1}. ${p.title}</td>
@@ -4386,7 +4456,7 @@ function renderTopProducts(monthData) {
       <td>${yoyCell(totalMom)}</td>
     </tr>` : '';
   el.innerHTML = `<table class="dtable">
-    <thead><tr><th style="text-align:left">Product</th><th>Gross Sales</th><th>Net Sales (est.)</th><th>Units Sold</th><th>% of Total Sales</th><th>YoY</th><th>${momLabel()}</th></tr></thead>
+    <thead><tr><th style="text-align:left">Product</th><th>Gross Sales</th><th>${monthData.top_products_source === 'shopify_period' ? 'Net Sales' : 'Net Sales (est.)'}</th><th>Units Sold</th><th>% of Total Sales</th><th>YoY</th><th>${momLabel()}</th></tr></thead>
     <tbody>${rows}${totalRow}</tbody>
   </table>
   <div style="margin-top:10px;font-size:11px;color:var(--text-muted)">${srcNote}</div>`;
@@ -5067,6 +5137,16 @@ function applyPnlGoals(site, payload) {
       if ('spend_goal' in x) c.spend_goal = x.spend_goal;
       if ('revenue_goal' in x) c.revenue_goal = x.revenue_goal;
       if ('roas_goal' in x) c.roas_goal = x.roas_goal;
+    });
+    // Goals for channels this month's built-in data has no row for yet
+    // (2026-10-21, Tomer: "i don't see the goals for snapchat" — Snapchat and
+    // ChatGPT Ads only appear once a Sync adds them from Triple Whale, e.g.
+    // ND.COM October, every ND.EU month). Kept here and given to the row when
+    // the live data adds it (mergeLiveIntoMonthData).
+    md.pending_channel_goals = {};
+    Object.entries(g.channels || {}).forEach(([label, x]) => {
+      if ((md.channels || []).some(c => c.label === label && !c.no_data)) return;
+      md.pending_channel_goals[label] = x;
     });
     if (g.other_costs && md.other_costs) {
       let touched = false;
