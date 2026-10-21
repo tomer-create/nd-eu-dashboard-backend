@@ -4350,11 +4350,16 @@ function topProductsPeriodData() {
         const fx = state.site === 'all' && FX_TO_USD[site] != null ? FX_TO_USD[site] : 1;
         if (body.total_gross === null || body.total_gross === undefined) totalKnown = false; else total += body.total_gross * fx;
         hasYoy = hasYoy && body.has_yoy; hasPrev = hasPrev && body.has_prev;
+        // ND.IL's titles carry a Hebrew name after " - " ("HY-GLAM FOUNDATION -
+        // מייקאפ היי-גלאם"); matched on the English name so All Sites adds the
+        // same product up across the three stores.
         (body.products || []).forEach(p => {
-          const a = map.get(p.title) || { title: p.title, gross_sales: 0, net_sales: 0, units_sold: 0, yoy_gross: 0, prev_gross: 0 };
+          const name = String(p.title).replace(/\s+-\s+[^\x00-\x7F].*$/, '').trim();
+          const key = name.toUpperCase();
+          const a = map.get(key) || { title: name, gross_sales: 0, net_sales: 0, units_sold: 0, yoy_gross: 0, prev_gross: 0 };
           a.gross_sales += p.gross_sales * fx; a.net_sales += p.net_sales * fx; a.units_sold += p.units_sold;
           a.yoy_gross += (p.yoy_gross || 0) * fx; a.prev_gross += (p.prev_gross || 0) * fx;
-          map.set(p.title, a);
+          map.set(key, a);
         });
       });
       const chg = (c, p) => p ? (c - p) / p : null;
