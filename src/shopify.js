@@ -715,6 +715,38 @@ async function fetchTopReturnsByProduct(site, startISO, endISOExclusive, limit =
 // Orders API via aggregate() (by_country is itself further overridden by
 // fetchCountryBreakdown below) — `FROM sales` has no per-order dimension to
 // replace those with.
+// Top products by gross sales straight from Shopify's analytics (ShopifyQL)
+// — added 2026-10-21 for Year to Date / quarters (Tomer: "on year to date
+// preview the top selling products doesn't match Shopify data"). Those views
+// used to merge each month's own top 15, and Jan–Jul had no product list at
+// all, so YTD was really Aug–Oct's top 15s. Gross sales, net sales and units
+// ordered per product title, Shopify's own figures for the whole range.
+async function fetchTopProductsAnalytics(site, startISO, endISOExclusive, limit = 15) {
+  const untilDate = new Date(endISOExclusive + 'T00:00:00Z');
+  untilDate.setUTCDate(untilDate.getUTCDate() - 1);
+  const untilISO = untilDate.toISOString().slice(0, 10);
+  const n = Math.max(1, Math.min(1000, Number(limit) || 15));
+  const q = `FROM sales SHOW gross_sales, net_sales, quantity_ordered GROUP BY product_title SINCE ${startISO} UNTIL ${untilISO} ORDER BY gross_sales DESC LIMIT ${n}`;
+  const data = await graphql(site, `
+    query TopProducts($q: String!) {
+      shopifyqlQuery(query: $q) {
+        parseErrors
+        tableData { columns { name } rows }
+      }
+    }`, { q });
+  const result = data.shopifyqlQuery;
+  if (result.parseErrors && result.parseErrors.length) {
+    throw new Error(`ShopifyQL parse error for "${site}" (query: ${q}): ${result.parseErrors.join('; ')}`);
+  }
+  const colNames = (result.tableData.columns || []).map((c) => c.name);
+  return (result.tableData.rows || []).map((row) => {
+    const values = Array.isArray(row) ? row : colNames.map((name) => row[name]);
+    const o = {};
+    colNames.forEach((name, i) => { o[name] = values[i]; });
+    return { title: o.product_title, gross_sales: Number(o.gross_sales) || 0, net_sales: Number(o.net_sales) || 0, units_sold: Number(o.quantity_ordered) || 0 };
+  }).filter((p) => p.title);
+}
+
 async function fetchSalesSummary(site, startISO, endISOExclusive) {
   // Same UNTIL-is-inclusive conversion as the other shopifyqlQuery helpers above.
   const untilDate = new Date(endISOExclusive + 'T00:00:00Z');
@@ -1152,6 +1184,7 @@ async function fetchCollabsCodeSales(site, startISO, endISOExclusive) {
 }
 
 module.exports = {
+  fetchTopProductsAnalytics,
   getSiteConfig,
   fetchUsStateBreakdown,
   fetchCollabsCodeSales,
