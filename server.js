@@ -1157,21 +1157,29 @@ app.get('/api/top-products', async (req, res) => {
 // [current, yoy, prev] } } — null where that comparison wasn't requested.
 // Cached like /api/us-states.
 const returnsChangeCache = new Map();
+// 2026-10-22: also returns `top` — the period's top 15 products by return
+// value from the same Shopify pull (gross sales, return value, units
+// returned, return ratio for the period and Jan 1 → period end), plus
+// `returns_total` — used by Top 15 Return Products for Year to Date and
+// quarters (Tomer: "כן תתקן את זה"), which used to merge only the months that
+// had their own list (Aug–Oct). Optional ytd_start / ytd_end: the
+// year-to-date range for the YTD ratio when the period isn't already YTD.
 app.get('/api/returns-change', async (req, res) => {
-  const { site, start, end, yoy_start, yoy_end, prev_start, prev_end } = req.query;
+  const { site, start, end, yoy_start, yoy_end, prev_start, prev_end, ytd_start, ytd_end } = req.query;
   if (!['com', 'eu', 'il'].includes(site)) return res.status(400).json({ error: `Unknown or missing site "${site}"` });
   const ok = (a, b) => US_STATES_DATE.test(a || '') && US_STATES_DATE.test(b || '');
-  if (!ok(start, end) || ((yoy_start || yoy_end) && !ok(yoy_start, yoy_end)) || ((prev_start || prev_end) && !ok(prev_start, prev_end))) {
+  if (!ok(start, end) || ((yoy_start || yoy_end) && !ok(yoy_start, yoy_end)) || ((prev_start || prev_end) && !ok(prev_start, prev_end)) || ((ytd_start || ytd_end) && !ok(ytd_start, ytd_end))) {
     return res.status(400).json({ error: 'Invalid date range' });
   }
-  const key = [site, start, end, yoy_start, yoy_end, prev_start, prev_end].join('|');
+  const key = [site, start, end, yoy_start, yoy_end, prev_start, prev_end, ytd_start, ytd_end].join('|');
   const hit = returnsChangeCache.get(key);
   if (hit && hit.expires > Date.now()) return res.json(hit.payload);
   try {
-    const [cur, yoy, prev] = await Promise.all([
+    const [cur, yoy, prev, ytd] = await Promise.all([
       fetchTopReturnsByProduct(site, start, end, 1000),
       yoy_start ? fetchTopReturnsByProduct(site, yoy_start, yoy_end, 1000) : Promise.resolve(null),
       prev_start ? fetchTopReturnsByProduct(site, prev_start, prev_end, 1000) : Promise.resolve(null),
+      ytd_start ? fetchTopReturnsByProduct(site, ytd_start, ytd_end, 1000).catch(() => null) : Promise.resolve(null),
     ]);
     const toMap = (list) => (list ? new Map(list.map((r) => [r.title, r.return_value])) : null);
     const yoyMap = toMap(yoy), prevMap = toMap(prev);
@@ -1180,7 +1188,15 @@ app.get('/api/returns-change', async (req, res) => {
       if (!r.return_value) return;
       products[r.title] = [r.return_value, yoyMap ? (yoyMap.get(r.title) || 0) : null, prevMap ? (prevMap.get(r.title) || 0) : null];
     });
-    const payload = { site, start, end, has_yoy: !!yoy, has_prev: !!prev, products };
+    const ytdList = ytd || cur;
+    const ytdMap = new Map(ytdList.map((r) => [r.title, r]));
+    const returnsTotal = cur.reduce((t, r) => t + (r.return_value || 0), 0);
+    const top = cur.filter((r) => r.return_value > 0).sort((a, b) => b.return_value - a.return_value).slice(0, 25).map((r) => { // 25: room for samples the dashboard leaves out
+      const y = ytdMap.get(r.title);
+      return { ...r, return_ratio_month: r.gross_sales ? r.return_value / r.gross_sales : null, return_ratio_ytd: y && y.gross_sales ? y.return_value / y.gross_sales : null,
+        ytd_gross_sales: y ? y.gross_sales : null, ytd_return_value: y ? y.return_value : null };
+    });
+    const payload = { site, start, end, has_yoy: !!yoy, has_prev: !!prev, products, top, returns_total: returnsTotal };
     const ended = new Date(`${end}T00:00:00Z`).getTime() + 86400000 <= Date.now();
     returnsChangeCache.set(key, { payload, expires: Date.now() + (ended ? 6 * 3600 : 15 * 60) * 1000 });
     if (returnsChangeCache.size > 500) returnsChangeCache.delete(returnsChangeCache.keys().next().value);
