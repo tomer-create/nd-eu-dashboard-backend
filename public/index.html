@@ -928,6 +928,9 @@ function mergeLiveIntoMonthData(monthData, live, site) {
       title: p.title,
       gross_sales: p.gross_sales,
       return_value: p.return_value,
+      // Units returned per product (2026-10-21) — null for a month cached
+      // before then (Sync refreshes it).
+      units_returned: typeof p.units_returned === 'number' ? p.units_returned : null,
       return_ratio_month: p.gross_sales ? p.return_value / p.gross_sales : null,
       // Backend-computed 2026-08-25 (see fetchTopReturnsByProduct's YTD call
       // in server.js) by matching this product's title against a separate
@@ -1822,16 +1825,18 @@ function combineMonthDatas(entries, opts) {
   const tr = mergeListSections(entries, {
     field: 'top_returns',
     keyFn: p => p.title,
-    zeroFields: () => ({ title: null, gross_sales: 0, return_value: 0, return_ratio_ytd: null, pct_of_total_returns: null }),
+    zeroFields: () => ({ title: null, gross_sales: 0, return_value: 0, units_returned: 0, _unitsMissing: false, return_ratio_ytd: null, pct_of_total_returns: null }),
     accumulate: (acc, item, fx) => {
       acc.title = item.title;
       acc.gross_sales += (item.gross_sales || 0) * fx;
       acc.return_value += (item.return_value || 0) * fx;
+      if (typeof item.units_returned === 'number') acc.units_returned += item.units_returned; else acc._unitsMissing = true;
     },
     recompute: item => { item.return_ratio_ytd = item.gross_sales ? item.return_value / item.gross_sales : null; },
     sortFn: (a, b) => b.return_value - a.return_value,
   });
   if (tr.list) {
+    tr.list.forEach(p => { if (p._unitsMissing) p.units_returned = null; delete p._unitsMissing; });
     const returnsValueTotal = tr.list.reduce((s, p) => s + p.return_value, 0);
     tr.list.forEach(p => { p.pct_of_total_returns = returnsValueTotal ? p.return_value / returnsValueTotal : null; });
     tr.list = tr.list.slice(0, 15);
@@ -4577,19 +4582,46 @@ function returnsChangeData(monthData) {
     Promise.all(sites.map(site => {
       const q = new URLSearchParams({ site, start: r.cur.start, end: r.cur.end, yoy_start: r.yoy.start, yoy_end: r.yoy.end });
       if (r.prev) { q.set('prev_start', r.prev.start); q.set('prev_end', r.prev.end); }
+      // Quarter: Jan 1 → quarter end for the Return Ratio (YTD) column.
+      if (isQuarter(state.month)) { q.set('ytd_start', r.cur.start.slice(0, 4) + '-01-01'); q.set('ytd_end', r.cur.end); }
       return fetch(`${BACKEND_URL}/api/returns-change?${q}`)
         .then(res => res.json().then(body => { if (!res.ok) throw new Error(body.error || ('Backend returned ' + res.status)); return { site, body }; }));
     }))
       .then(results => {
         const map = {};
+        // All Sites: ND.IL titles carry a Hebrew name after " - "; matched on
+        // the English name (same as Top Products, 2026-10-21).
+        const keyOf = (t) => state.site === 'all' ? String(t).replace(/\s+-\s+[^\x00-\x7F].*$/, '').trim() : t;
+        // Top 15 Return Products for Year to Date / quarters (2026-10-22):
+        // the period's own Shopify list (`top`), added up across sites.
+        const topMap = new Map();
+        let returnsTotal = 0, topOk = true;
         results.forEach(({ site, body }) => {
           const fx = state.site === 'all' && FX_TO_USD[site] != null ? FX_TO_USD[site] : 1;
           Object.entries(body.products || {}).forEach(([title, [cur, yoy, prev]]) => {
-            const m = map[title] || (map[title] = [0, 0, 0]);
+            const k = keyOf(title);
+            const m = map[k] || (map[k] = [0, 0, 0]);
             m[0] += cur * fx; m[1] += (yoy || 0) * fx; m[2] += (prev || 0) * fx;
           });
+          if (!Array.isArray(body.top)) { topOk = false; return; }
+          returnsTotal += (body.returns_total || 0) * fx;
+          body.top.forEach(p => {
+            const k = keyOf(p.title);
+            const a = topMap.get(k) || { title: k, gross_sales: 0, return_value: 0, units_returned: 0, _units: true, ytd_g: 0, ytd_r: 0, _ytd: true };
+            a.gross_sales += (p.gross_sales || 0) * fx; a.return_value += (p.return_value || 0) * fx;
+            if (typeof p.units_returned === 'number') a.units_returned += p.units_returned; else a._units = false;
+            if (p.ytd_gross_sales != null) { a.ytd_g += p.ytd_gross_sales * fx; a.ytd_r += (p.ytd_return_value || 0) * fx; } else a._ytd = false;
+            topMap.set(k, a);
+          });
         });
-        returnsChangeCache[ck] = { map, hasPrev: !!r.prev };
+        const top = topOk ? Array.from(topMap.values()).sort((a, b) => b.return_value - a.return_value).map(a => ({
+          title: a.title, gross_sales: a.gross_sales, return_value: a.return_value,
+          units_returned: a._units ? a.units_returned : null,
+          return_ratio_month: a.gross_sales ? a.return_value / a.gross_sales : null,
+          return_ratio_ytd: a._ytd && a.ytd_g ? a.ytd_r / a.ytd_g : null,
+          pct_of_total_returns: returnsTotal ? a.return_value / returnsTotal : null,
+        })) : null;
+        returnsChangeCache[ck] = { map, hasPrev: !!r.prev, top };
       })
       .catch(err => { console.error('returns-change fetch failed:', err); returnsChangeCache[ck] = { error: true }; })
       .finally(() => { if (state.site + '|' + state.month === view) renderReturns(getMonthData()); });
@@ -4598,6 +4630,21 @@ function returnsChangeData(monthData) {
 }
 function renderReturns(monthData) {
   const badgeEl = document.getElementById('mtd-flag-3');
+  // Year to Date / quarters (2026-10-22): the list comes from Shopify for the
+  // whole period (returnsChangeData's `top`) instead of adding up the months
+  // that happen to have their own list.
+  if (isMultiMonth(state.month)) {
+    const rc = returnsChangeData(monthData);
+    if (rc === 'loading') {
+      if (badgeEl) badgeEl.innerHTML = '';
+      document.getElementById('section-3').innerHTML = `<div class="tt-pending"><span class="tt-loading" aria-hidden="true"></span>Loading return products from Shopify for this period…</div>`;
+      return;
+    }
+    if (rc && rc.top) monthData = Object.assign({}, monthData, {
+      top_returns: rc.top, top_returns_source: 'shopify_period',
+      top_returns_note: `Shopify analytics for the whole period (sales reversals, gross sales and units returned per product — Shopify's own figures)${state.site === 'all' ? ', the three sites added up in USD' : ''}. Ranked by return value. % of Total Returns = the product's returns ÷ all returns in the period. Return Ratio (YTD) = Jan 1 to the end of the period.`,
+    });
+  }
   if (!monthData.top_returns) {
     if (badgeEl) badgeEl.innerHTML = '';
     renderPlaceholder('section-3');
@@ -4632,7 +4679,7 @@ function renderReturns(monthData) {
   // here at render time (not at merge time) so it applies uniformly whether
   // the list came from a live sync or the embedded YTD snapshot -- both
   // funnel through this function.
-  const products = monthData.top_returns.filter(p => !isSampleProduct(p.title));
+  const products = monthData.top_returns.filter(p => !isSampleProduct(p.title)).slice(0, 15);
   const chg = returnsChangeData(monthData);
   const chgReady = chg && chg !== 'loading' && !chg.error;
   const pctChg = (cur, prior) => (prior ? (cur - prior) / prior : null);
@@ -4646,6 +4693,7 @@ function renderReturns(monthData) {
       <td>${i+1}. ${p.title}</td>
       <td>${fmtVal(p.gross_sales, 'currency-full')}</td>
       <td>${fmtVal(p.return_value, 'currency-full')}</td>
+      <td>${typeof p.units_returned === 'number' ? p.units_returned.toLocaleString('en-US') : '<span style="color:var(--text-muted)" title="Not in this period’s saved data yet — click Sync">—</span>'}</td>
       <td>${p.return_ratio_month != null ? fmtVal(p.return_ratio_month, 'percent') : '—'}</td>
       <td>${p.return_ratio_ytd != null ? fmtVal(p.return_ratio_ytd, 'percent') : '—'}</td>
       <td>${p.pct_of_total_returns != null ? fmtVal(p.pct_of_total_returns, 'percent') : '—'}</td>
@@ -4661,6 +4709,7 @@ function renderReturns(monthData) {
   // store-wide returns_total), not forced to equal 100%.
   const totalGross = products.reduce((s, p) => s + (p.gross_sales || 0), 0);
   const totalReturnValue = products.reduce((s, p) => s + (p.return_value || 0), 0);
+  const totalUnitsReturned = products.length && products.every(p => typeof p.units_returned === 'number') ? products.reduce((s, p) => s + p.units_returned, 0) : null;
   function weightedReturnRatio(field) {
     let num = 0, den = 0;
     products.forEach(p => {
@@ -4678,6 +4727,7 @@ function renderReturns(monthData) {
       <td>Total (products shown above)</td>
       <td>${fmtVal(totalGross, 'currency-full')}</td>
       <td>${fmtVal(totalReturnValue, 'currency-full')}</td>
+      <td>${totalUnitsReturned !== null ? totalUnitsReturned.toLocaleString('en-US') : '—'}</td>
       <td>${totalReturnRatioMonth !== null ? fmtVal(totalReturnRatioMonth, 'percent') : '—'}</td>
       <td>${totalReturnRatioYtd !== null ? fmtVal(totalReturnRatioYtd, 'percent') : '—'}</td>
       <td>${totalPctOfTotalReturns !== null ? fmtVal(totalPctOfTotalReturns, 'percent') : '—'}</td>
@@ -4690,10 +4740,10 @@ function renderReturns(monthData) {
       })()}
     </tr>` : '';
   document.getElementById('section-3').innerHTML = `<table class="dtable">
-    <thead><tr><th style="text-align:left">Product</th><th>Gross Sales (${scopeLabel})</th><th>Return $ Value (${scopeLabel})</th><th>Return Ratio (${monthLabel})</th><th>Return Ratio (${isLive ? 'YTD' : scopeLabel})</th><th>% of Total Returns (${scopeLabel})</th><th title="Change in Return $ Value vs the same dates last year">YoY</th><th title="Change in Return $ Value vs the previous period">${momLabel()}</th></tr></thead>
+    <thead><tr><th style="text-align:left">Product</th><th>Gross Sales (${scopeLabel})</th><th>Return $ Value (${scopeLabel})</th><th>Units Returned (${scopeLabel})</th><th>Return Ratio (${monthLabel})</th><th>Return Ratio (${isLive || monthData.top_returns_source === 'shopify_period' ? 'YTD' : scopeLabel})</th><th>% of Total Returns (${scopeLabel})</th><th title="Change in Return $ Value vs the same dates last year">YoY</th><th title="Change in Return $ Value vs the previous period">${momLabel()}</th></tr></thead>
     <tbody>${rows}${totalRow}</tbody>
   </table>
-  <div style="margin-top:10px;font-size:11px;color:var(--text-muted)">${monthData.top_returns_note || (isLive ? `Pulled live via the Sync button (real-time Shopify sales-reversals data, grouped by product, for the selected date range). Ranked by dollar return value for ${monthLabel} specifically — not year-to-date like the ND.COM embedded snapshot. Return Ratio (YTD) reflects Jan 1 through the end of ${monthLabel} for each product (same Shopify sales-reversals ÷ gross-sales calculation, just a longer window) — shows "—" only for a product with no matching year-to-date data, e.g. one first sold this period; % of Total Returns is this period's share of ${monthLabel}'s Shopify-reported Returns total (Section 1).` : `Pulled from Shopify analytics. Ranked by year-to-date (Jan 1 – today) dollar return value — Gross Sales, Return $ Value, Return Ratio (YTD), and % of Total Returns all reflect that same Jan 1–today window, so they're internally consistent with each other even though they don't match ${monthLabel}'s own totals. Return Ratio (${monthLabel}) additionally shows how each of these 15 products performed in just the currently-selected month, for a more recent read alongside the steadier YTD figure. Shopify\u2019s analytics query surface doesn\u2019t expose a units-returned dimension at the per-product level, so this table ranks by dollar return value rather than unit counts — the store-wide total of ${monthData.top_returns_units_total_ytd !== undefined ? monthData.top_returns_units_total_ytd.toLocaleString('en-US') : '—'} units returned year-to-date (${monthData.top_returns_units_total !== undefined ? monthData.top_returns_units_total.toLocaleString('en-US') : '—'} in ${monthLabel} alone) is shown in Section 1.`)} YoY / ${momLabel()} compare each product's Return $ Value for ${monthLabel} with the same dates last year / the previous ${isQuarter(state.month) ? 'quarter' : 'month'}${state.month === 'YTD' || (isQuarter(state.month) && isQuarterInProgress(state.month)) ? ' (not shown for ' + (state.month === 'YTD' ? 'Year to Date' : 'a quarter still in progress') + ')' : ''} — an increase in returns is shown in red. Samples are excluded from this list.</div>`;
+  <div style="margin-top:10px;font-size:11px;color:var(--text-muted)">${monthData.top_returns_note || (isLive ? `Pulled live via the Sync button (real-time Shopify sales-reversals data, grouped by product, for the selected date range). Ranked by dollar return value for ${monthLabel} specifically — not year-to-date like the ND.COM embedded snapshot. Return Ratio (YTD) reflects Jan 1 through the end of ${monthLabel} for each product (same Shopify sales-reversals ÷ gross-sales calculation, just a longer window) — shows "—" only for a product with no matching year-to-date data, e.g. one first sold this period; % of Total Returns is this period's share of ${monthLabel}'s Shopify-reported Returns total (Section 1).` : `Pulled from Shopify analytics. Ranked by year-to-date (Jan 1 – today) dollar return value — Gross Sales, Return $ Value, Return Ratio (YTD), and % of Total Returns all reflect that same Jan 1–today window, so they're internally consistent with each other even though they don't match ${monthLabel}'s own totals. Return Ratio (${monthLabel}) additionally shows how each of these 15 products performed in just the currently-selected month, for a more recent read alongside the steadier YTD figure. Ranked by dollar return value; Units Returned is Shopify's returned-units count per product. The store-wide total of ${monthData.top_returns_units_total_ytd !== undefined ? monthData.top_returns_units_total_ytd.toLocaleString('en-US') : '—'} units returned year-to-date (${monthData.top_returns_units_total !== undefined ? monthData.top_returns_units_total.toLocaleString('en-US') : '—'} in ${monthLabel} alone) is shown in Section 1.`)} YoY / ${momLabel()} compare each product's Return $ Value for ${monthLabel} with the same dates last year / the previous ${isQuarter(state.month) ? 'quarter' : 'month'}${state.month === 'YTD' || (isQuarter(state.month) && isQuarterInProgress(state.month)) ? ' (not shown for ' + (state.month === 'YTD' ? 'Year to Date' : 'a quarter still in progress') + ')' : ''} — an increase in returns is shown in red. Samples are excluded from this list.</div>`;
 }
 
 // Filters out Shopify's catch-all bucket for orders with no resolvable
