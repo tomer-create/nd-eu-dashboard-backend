@@ -633,7 +633,10 @@ async function fetchTopReturnsByProduct(site, startISO, endISOExclusive, limit =
   untilDate.setUTCDate(untilDate.getUTCDate() - 1);
   const untilISO = untilDate.toISOString().slice(0, 10);
 
-  const shopifyqlQueryString = `FROM sales SHOW gross_sales, sales_reversals GROUP BY product_title ORDER BY sales_reversals ASC SINCE ${startISO} UNTIL ${untilISO} LIMIT ${limit}`;
+  // quantity_returned added 2026-10-21 (Tomer: "add to Top 15 Return Products
+  // the number of units returned for each product") — Shopify's own returned
+  // units per product, negative like sales_reversals.
+  const shopifyqlQueryString = `FROM sales SHOW gross_sales, sales_reversals, quantity_returned GROUP BY product_title ORDER BY sales_reversals ASC SINCE ${startISO} UNTIL ${untilISO} LIMIT ${limit}`;
   const gqlQuery = `
     query TopReturnsByProduct($q: String!) {
       shopifyqlQuery(query: $q) {
@@ -674,6 +677,7 @@ async function fetchTopReturnsByProduct(site, startISO, endISOExclusive, limit =
       title: r.product_title,
       gross_sales: Number(r.gross_sales) || 0,
       return_value: Math.abs(Number(r.sales_reversals) || 0),
+      units_returned: r.quantity_returned == null || r.quantity_returned === '' ? null : Math.abs(Number(r.quantity_returned) || 0),
     }));
 }
 
