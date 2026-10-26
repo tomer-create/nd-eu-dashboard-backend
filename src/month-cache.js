@@ -99,6 +99,10 @@ async function writeCache(site, start, end, compareKey, payload) {
 // One live pull at a time per key — several people opening the dashboard on
 // the 1st of the month shouldn't each start their own ~100s Shopify pull.
 const inFlight = new Map();
+// Closed months stored before a payload change (see `outdated` below) are
+// re-pulled one at a time in the background.
+let upgradeChain = Promise.resolve();
+const upgradeQueued = new Set();
 function pullAndStore(key, args, build) {
   if (inFlight.has(key)) return inFlight.get(key);
   const { site, start, end, compareKey } = args;
@@ -136,8 +140,24 @@ async function getWithMonthCache({ site, start, end, compare, refresh }, build) 
     if (row) {
       const ageHours = (Date.now() - new Date(row.fetched_at).getTime()) / 3600000;
       const recentlyClosed = daysSince(end) <= REFRESH_WINDOW_DAYS;
+      // 2026-10-26: a month stored before the Discounts Breakdown got its
+      // "Yotpo Loyalty" row (discounts_version < 2) is served as-is once and
+      // re-pulled in the background, so it picks the row up by itself.
+      const outdated = !(row.payload && row.payload.discounts_version >= 2);
       if (recentlyClosed && ageHours > STALE_AFTER_HOURS) {
         pullAndStore(key, args, build).catch((err) => console.error('month-cache: background refresh failed:', err.message));
+        return { payload: row.payload, cache: 'stale', fetchedAt: row.fetched_at };
+      }
+      if (outdated) {
+        // One upgrade pull at a time across the whole server, so opening
+        // Year-to-Date doesn't start ~27 heavy Shopify pulls at once.
+        if (!inFlight.has(key) && !upgradeQueued.has(key)) {
+          upgradeQueued.add(key);
+          upgradeChain = upgradeChain
+            .then(() => pullAndStore(key, args, build))
+            .catch((err) => console.error('month-cache: upgrade refresh failed:', err.message))
+            .finally(() => upgradeQueued.delete(key));
+        }
         return { payload: row.payload, cache: 'stale', fetchedAt: row.fetched_at };
       }
       return { payload: row.payload, cache: 'hit', fetchedAt: row.fetched_at };
