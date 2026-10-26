@@ -227,6 +227,7 @@
   .tt-legend { display: flex; gap: 14px; flex-wrap: wrap; font-size: 11px; color: var(--text-secondary); }
   .tt-legend i { display: inline-block; width: 9px; height: 9px; border-radius: 2px; margin-right: 5px; vertical-align: -1px; }
   /* Revenue & costs by source (2026-10-20) */
+  .tt-gmv-incl { display: block; color: var(--text-secondary); margin-bottom: 2px; }
   .tt-rc-legend { margin: 2px 0 8px; }
   .tt-rc-legend .tt-rc-key-rev { background: var(--text-secondary); }
   .tt-rc-legend .tt-rc-key-cost { background: var(--text-muted); opacity: .45; }
@@ -2562,7 +2563,9 @@ function renderTikTokShop(monthData, opts = {}) {
   const gmvShown = gmvInfo.value;
   const gmvTip = 'TikTok Shop GMV = price × items sold + shipping fees − seller promotions − platform co-funding (TikTok Shop analytics). TikTok’s analytics run about two days behind, so the latest days are filled from TikTok’s order data (Triple Whale) on the same formula to keep it month to date. YoY / ' + mLabel + ': same formula on TikTok’s order data, same days.';
   const tileList = [
-    tileV('TikTok Shop GMV', gmvShown === null ? '—' : fmtVal(gmvShown, 'currency-full'), proxyChange('yoy'), proxyChange('mom'), true, gmvInfo.note, gmvTip),
+    // What GMV includes (2026-10-26, Tomer asked for it inside the tile).
+    tileV('TikTok Shop GMV', gmvShown === null ? '—' : fmtVal(gmvShown, 'currency-full'), proxyChange('yoy'), proxyChange('mom'), true,
+      '<span class="tt-gmv-incl">All TikTok Shop orders — TikTok Ads + Affiliate + Organic (TikTok Ads isn’t added on top).</span>' + gmvInfo.note, gmvTip),
     tile('Net Sales', tt.net_sales, 'currency-full', 'net_sales', true, 'Gross sales − discounts − refunds'),
     tile('Orders', tt.orders, 'number', 'orders', true, tt.orders && tt.units ? (tt.units / tt.orders).toFixed(1) + ' units per order' : ''),
     tileV('AOV', fmtVal(aov, 'currency'), aovYoy, aovMom, true, gmvShown !== null && gmvInfo.orders ? fmtVal(gmvShown / gmvInfo.orders, 'currency') + ' GMV per order' : '', 'Average order value: TikTok Shop Net Sales ÷ Orders (Key Metrics’ AOV is Shopify’s: (Gross Sales − Discounts) ÷ Orders)'),
@@ -2851,12 +2854,6 @@ function renderTikTokShop(monthData, opts = {}) {
   // each line's revenue × Net Sales ÷ Gross Sales TikTok for that period,
   // ÷ its orders — so Total = Net Sales ÷ orders = the AOV tile.
   const lineMetrics = (l) => ({ rev: l.rev, cost: l.cost, roas: l.cost ? l.rev / l.cost : null, aov: l.orders && l.nr !== null && l.nr !== undefined ? l.rev * l.nr / l.orders : null });
-  if (dry) {
-    const al = srcLines.find(l => l.name === 'Affiliate');
-    const m = al ? lineMetrics(al) : null;
-    return m && m.aov !== null ? { aov: m.aov, rev: al.rev * al.nr, orders: al.orders }
-      : { why: scPending ? 'Loading TikTok’s order data…' : (lowCoverageMsg || 'TikTok’s affiliate order data isn’t available for this period') };
-  }
   const chgOf = (curV, prevV) => (curV === null || curV === undefined || prevV === null || prevV === undefined || !prevV) ? null : (curV - prevV) / Math.abs(prevV);
   const comboTotalCost = srcLines.reduce((a, l) => a + (l.cost || 0), 0);
   const totalLine = { name: 'Total', rev: gmv, cost: comboTotalCost, orders: tt.orders, nr: curCtx.netRatio };
@@ -2874,6 +2871,20 @@ function renderTikTokShop(monthData, opts = {}) {
     const a = lineMetrics(line), b = lineMetrics(p);
     return { rev: chgOf(a.rev, b.rev), cost: chgOf(a.cost, b.cost), roas: chgOf(a.roas, b.roas), aov: chgOf(a.aov, b.aov) };
   };
+  // Figures-only mode (see opts.dry): the Affiliate line for Section 4's
+  // TikTok Affiliates row — Avg order (2026-10-21) and, since 2026-10-26,
+  // its revenue (gross, the same figure as this section's Affiliate line)
+  // with YoY / MoM. `partial`: a quarter / YTD where not every month has
+  // TikTok data yet — Section 4 then keeps the P&L sheet's revenue.
+  if (dry) {
+    const al = srcLines.find(l => l.name === 'Affiliate');
+    const m = al ? lineMetrics(al) : null;
+    const partial = !!(tt.months_with_data && tt.months_total && tt.months_with_data < tt.months_total);
+    if (!al) return { why: scPending ? 'Loading TikTok’s order data…' : (lowCoverageMsg || 'TikTok’s affiliate order data isn’t available for this period') };
+    const cy = chgFor(al, 'yoy'), cm = chgFor(al, 'mom');
+    return { aov: m && m.aov !== null ? m.aov : null, rev: m && m.aov !== null ? al.rev * al.nr : 0, orders: al.orders,
+      gross: al.rev, yoy: cy.rev ?? null, mom: cm.rev ?? null, partial };
+  }
   const rcChip = (v, neutral) => { if (v === null || v === undefined) return '<span class="kpi-yoy flat">—</span>'; const c = ttChange(v, true); return `<span class="kpi-yoy ${neutral ? 'neutral' : c.dir}">${c.str}</span>`; };
   const rcChg = (line, key) => { const y = chgFor(line, 'yoy')[key], m = chgFor(line, 'mom')[key]; return `<div class="tt-rc-chg"><span class="lbl">YoY</span>${rcChip(y, key === 'cost')}<span class="lbl">${mLabel}</span>${rcChip(m, key === 'cost')}</div>`; };
   const scaleMax = Math.max(1, ...srcLines.map(l => Math.max(l.rev || 0, l.cost || 0)));
@@ -3308,6 +3319,25 @@ function c4OrganicPlug(md, hidden) {
   channels.forEach(c => { if (!c.no_data) c.revenue_ratio = (c.revenue_actual || 0) / gross; });
   return Object.assign({}, md, { channels, c4_gross: gross });
 }
+// TikTok Affiliates revenue for Section 4 (2026-10-26, Tomer: "under
+// affiliates, TikTok Affiliates Revenue doesn't match the TikTok Affiliate
+// revenue in the TikTok Shop section" → yes, take it live): the TikTok Shop
+// section's Affiliate revenue replaces the P&L sheet's (which only covers
+// the days up to the sheet's "Date Updated"). Spend and goals stay on the
+// sheet. Kept as the sheet figure while TikTok's order data is loading, or
+// when a quarter / YTD isn't fully covered by TikTok data. Done before the
+// Organic plug, so Organic (= Gross − every other channel) follows.
+function c4TikTokAffiliatesLive(md) {
+  if (!md || !md.channels) return md;
+  const i = md.channels.findIndex(c => c.label === 'TikTok Affiliates' && !c.no_data);
+  if (i === -1) return md;
+  const f = ttAffiliateAovFor();
+  if (!f || typeof f.gross !== 'number' || f.partial) return md;
+  const c = md.channels[i];
+  const channels = md.channels.slice();
+  channels[i] = Object.assign({}, c, { revenue_actual: f.gross, revenue_sheet: c.revenue_actual, revenue_source: 'tiktok', tt_rev_yoy: f.yoy, tt_rev_mom: f.mom, roas: c.spend_actual ? f.gross / c.spend_actual : null });
+  return Object.assign({}, md, { channels });
+}
 // TikTok Affiliates Avg order for Section 4 (2026-10-21): the TikTok Shop
 // section's Affiliate line for ND.COM in the period on screen (All Sites:
 // ND.COM's, the only TikTok Shop; in USD already).
@@ -3336,6 +3366,7 @@ function renderChannels(monthData) {
   // section, leave only one line ... don't show the TikTok Organic"): Organic
   // = Gross Sales − every other channel shown, so it includes TikTok Organic.
   const hidden = (HIDDEN_CHANNELS_BY_SITE[state.site] || []).concat(C4_HIDDEN_ALWAYS);
+  monthData = c4TikTokAffiliatesLive(monthData);
   monthData = c4OrganicPlug(monthData, hidden);
   const visibleChannels = hidden.length ? monthData.channels.filter(c => !hidden.includes(c.label)) : monthData.channels;
   const chg = channelsChangeData();
@@ -3409,6 +3440,15 @@ function renderChannels(monthData) {
     if (c.label === 'TikTok Affiliates') {
       const f = ttAffiliateAovFor();
       out.ttAff = true;
+      // Revenue live from TikTok (c4TikTokAffiliatesLive): its YoY / MoM come
+      // from the TikTok Shop section too; ROAS (TikTok revenue ÷ sheet spend)
+      // has no like-for-like comparison.
+      if (c.revenue_source === 'tiktok') {
+        out.ttRevLive = true;
+        out.revenue = [c.tt_rev_yoy ?? null, c.tt_rev_mom ?? null];
+        out.roas = [null, null];
+        if (out.pace) { out.pace.revenue = false; out.pace.roas = false; }
+      }
       out.aov = f && f.aov !== undefined ? f.aov : null;
       out.ttAffWhy = f && f.why;
       if (out.aov !== null) { out.aovRev = f.rev; out.aovOrders = f.orders; }
@@ -3457,6 +3497,7 @@ function renderChannels(monthData) {
   const whyBlank = (ch, which) => {
     if (ch.group) return 'Not enough of this group has this comparison (needs channels making up at least 80% of the group)';
     if (chgFailed && !ch.attentive && !ch.pnl) return 'Triple Whale comparison data didn’t load — try Sync';
+    if (ch.ttRevLive) return 'Revenue is live from TikTok and spend comes from the P&amp;L sheet, so ROAS has no like-for-like comparison';
     if (ch.attRevMixed) return 'This Attentive revenue is partly from Triple Whale and partly from the P&amp;L sheet (ND.IL, and anything before August 2026, stay on the sheet), so there’s no like-for-like comparison';
     if (which === 'yoy' && ch.attRevFull) return 'Attentive started in January 2026 — no Triple Whale Attentive figures for last year';
     if (which === 'yoy') return ch.tw ? 'No figures for this channel in the same period last year'
@@ -3487,6 +3528,7 @@ function renderChannels(monthData) {
         : c.revenue_source === 'mixed' ? 'Triple Whale + P&amp;L sheet · spend from sheet' : 'P&amp;L sheet · Avg order: Triple Whale';
     }
     if (ch.collabs) return 'P&amp;L sheet · Avg order: Collabs codes';
+    if (ch.ttRevLive) return 'TikTok order data · spend from P&amp;L sheet';
     if (ch.ttAff && ch.aov !== null) return 'P&amp;L sheet · Avg order: TikTok order data';
     if (c.plug) return 'Gross sales − all other channels';
     // Before / without the comparison data, fall back to the channels Triple
