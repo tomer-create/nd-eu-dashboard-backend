@@ -269,6 +269,7 @@ const ORDERS_QUERY = `
           discountApplications(first: 10) {
             nodes {
               __typename
+              index
               ... on DiscountCodeApplication { code value { __typename ... on MoneyV2 { amount currencyCode } } }
             }
           }
@@ -279,6 +280,7 @@ const ORDERS_QUERY = `
                 title
                 quantity
                 originalTotalSet { shopMoney { amount } }
+                discountAllocations { allocatedAmountSet { shopMoney { amount } } discountApplication { index } }
               }
             }
           }
