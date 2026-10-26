@@ -242,4 +242,31 @@ async function fetchGmvEstimate(site, start, end) {
   return { start, end, gmv: num(r.gmv), orders: num(r.orders) };
 }
 
-module.exports = { fetchTikTokShop, fetchGmvEstimate, SITES_WITH_TIKTOK_SHOP };
+// TikTok Gifting cost (2026-10-26, Tomer: "take all the $0 orders from
+// Channel TikTok and take their product costs, add them together"). The $0
+// orders are the creator samples TikTok sends out; they sync into Shopify
+// with sales channel TikTok (source_name 'tiktok'). Cost = Shopify's product
+// cost on those orders (Triple Whale cost_of_goods, imported from Shopify).
+// $0 = product total after discounts is zero (all of them, as Tomer asked —
+// cancelled ones included). Checked against the P&L sheet: Sep 2026
+// $2,094.58 vs the sheet's $2,095.
+async function fetchGifting(site, start, end) {
+  if (!SITES_WITH_TIKTOK_SHOP.includes(site) || !process.env.TRIPLEWHALE_API_KEY) return null;
+  if (!isoOk(start) || !isoOk(end) || end <= start) return null;
+  const shopId = TW_SHOP_ID[site];
+  return cachedPast(`gift|${shopId}|${start}|${end}`, end, async () => {
+    const rows = await twSql(shopId, `
+      SELECT count() AS orders,
+             SUM(cost_of_goods) AS cost,
+             SUM(product_quantity_sold_in_order) AS units,
+             SUM(gross_product_sales) AS retail_value
+      FROM orders_table
+      WHERE event_date >= '${start}' AND event_date < '${end}'
+        AND platform = 'shopify' AND source_name = 'tiktok'
+        AND gross_product_sales - discount_amount_for_product <= 0.005`.trim(), start, end);
+    const r = rows[0] || {};
+    return { start, end, cost: num(r.cost), orders: num(r.orders), units: num(r.units), retail_value: num(r.retail_value) };
+  });
+}
+
+module.exports = { fetchTikTokShop, fetchGmvEstimate, fetchGifting, SITES_WITH_TIKTOK_SHOP };
