@@ -262,9 +262,16 @@ const ORDERS_QUERY = `
           id
           createdAt
           tags
+          presentmentCurrencyCode
           currentSubtotalPriceSet { shopMoney { amount } }
           subtotalPriceSet { shopMoney { amount } }
-          totalDiscountsSet { shopMoney { amount } }
+          totalDiscountsSet { shopMoney { amount currencyCode } presentmentMoney { amount } }
+          discountApplications(first: 10) {
+            nodes {
+              __typename
+              ... on DiscountCodeApplication { code value { __typename ... on MoneyV2 { amount currencyCode } } }
+            }
+          }
           shippingAddress { countryCode }
           lineItems(first: 100) {
             edges {
