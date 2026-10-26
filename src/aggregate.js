@@ -79,7 +79,30 @@ const DEFAULT_TAG_LABELS = {
   // own code.
   'DISCOUNT-YAMQU': "Natasha's Birthday", // ND.COM
   'DISCOUNT-XU5AJ': "Natasha's Birthday", // ND.EU
+  // Added 2026-10-26 per Tomer: Fall Sale 2026 (ND.COM DISCOUNT-LZ5AG, ND.EU
+  // DISCOUNT-1Y9YV), Free Makeup Bag (ND.COM + ND.EU, same tag) and ND.IL's
+  // Election Sale 15% (DISCOUNT-OBWY5).
+  'DISCOUNT-LZ5AG': 'Fall Sale 2026', // ND.COM
+  'DISCOUNT-1Y9YV': 'Fall Sale 2026', // ND.EU
+  'DISCOUNT-FREE_MAKEUP_BAG': 'Free Makeup Bag', // ND.COM + ND.EU
+  'DISCOUNT-OBWY5': 'Election Sale 15%', // ND.IL
 };
+
+// Discount groups (2026-10-26, Tomer): the Discounts Breakdown is shown as
+// groups that open into their programs. Each row carries its group; each
+// group also gets its own total over the UNION of its orders (an order with
+// two programs of the same group counts once), so group totals never
+// double-count. Yotpo's group is built from the Yotpo codes (below).
+const DISCOUNT_GROUPS = [
+  { key: 'yotpo', label: 'YOTPO' },
+  { key: 'sales', label: 'SALES', tags: ['DISCOUNT-LZ5AG', 'DISCOUNT-1Y9YV', 'DISCOUNT-YAMQU', 'DISCOUNT-XU5AJ',
+    'DISCOUNT-TQZF5', 'DISCOUNT-UG8ID', 'DISCOUNT-DS71A', 'DISCOUNT-1TL82', 'DISCOUNT-EJ75N', 'DISCOUNT-JBD6Q',
+    'DISCOUNT-I1KYC', 'DISCOUNT-Y40T0', 'DISCOUNT-MM7ME', 'DISCOUNT-OBWY5'] },
+  { key: 'gifts', label: 'GIFTS & SAMPLES', tags: ['DISCOUNT-FT9ZL', 'DISCOUNT-OA5WN', 'DISCOUNT-QAQAN', 'DISCOUNT-FREE_SAMPLE', 'DISCOUNT-FREE_MAKEUP_BAG'] },
+  { key: 'segments', label: 'SEGMENTS', tags: ['DISCOUNT-PRO-ARTIST', 'DISCOUNT-BA_DISCOUNT'] },
+];
+const TAG_GROUP = {};
+DISCOUNT_GROUPS.forEach((g) => (g.tags || []).forEach((t) => { TAG_GROUP[t] = g.key; }));
 
 // Tags that get merged into one combined "Free Shipping" row (OR logic, not
 // summed separately) — matches the ShopifyQL pattern used earlier this
@@ -90,36 +113,68 @@ function amt(moneySet) {
   return Number(moneySet?.shopMoney?.amount || 0);
 }
 
-// Yotpo Loyalty points redemptions (2026-10-26, Tomer: add a "Yotpo Loyalty"
-// line to the Discounts Breakdown with "the value of the points that used and
-// the % as discount it actually use"). When a customer spends points, Yotpo
-// Loyalty & Rewards creates a single-use, fixed-amount Shopify discount code:
-// 8 upper-case letters / digits (e.g. 5NYLEBNR, 247OGTD2), worth points ÷ 10
-// (16.4 = 164 points). Checked on ND.EU: every such code sampled was created
-// by the "Yotpo Loyalty & Rewards" app (Shopify discount events); Attentive's
-// codes (ND + mixed case), influencer codes and Yotpo's birthday codes
-// (BDAY…, percentage) don't match. The code's own amount is the points value
-// (not the order's other discounts), capped at the order's total discount.
-const YOTPO_POINTS_CODE = /^[A-Z0-9]{8}$/;
-function yotpoPointsValue(order) {
+// Yotpo codes (2026-10-26). Yotpo Loyalty & Rewards creates single-use
+// Shopify codes; checked against Shopify's discount events (created by the
+// "Yotpo Loyalty & Rewards" app, and Yotpo sets the code as the title):
+//   Loyalty Points — 8 upper-case letters / digits, fixed amount (spent
+//                    points: 16.4 = 164 points), e.g. 5NYLEBNR
+//   Bday           — BDAY + 8 upper-case letters / digits, e.g. BDAY6GK2QNIW
+//   Ref            — REF + 8 upper-case letters / digits, e.g. REF2K6N8OCN
+// Not Yotpo, and not matched: Attentive's codes (ND… mixed case, 6-character
+// mixed case, BDAYcJPFk5), affiliate codes (REFERMATE, P6X56X), and an
+// 8-character PERCENTAGE code like F50TL2NY ("15% welcome discount").
+// The amount is what that code actually took off the order (its line-item
+// discount allocations), so other discounts on the same order aren't counted.
+const YOTPO_KINDS = [
+  { key: 'loyalty', tag: 'Yotpo points codes', label: 'Loyalty Points', re: /^[A-Z0-9]{8}$/, fixedOnly: true },
+  { key: 'bday', tag: 'Yotpo BDAY codes', label: 'Bday', re: /^BDAY[A-Z0-9]{8}$/ },
+  { key: 'ref', tag: 'Yotpo REF codes', label: 'Ref', re: /^REF[A-Z0-9]{8}$/ },
+];
+function yotpoKindOf(app) {
+  const code = String(app.code || '');
+  for (const k of YOTPO_KINDS) {
+    if (!k.re.test(code)) continue;
+    if (k.fixedOnly && !(app.value && app.value.__typename === 'MoneyV2')) continue;
+    return k;
+  }
+  return null;
+}
+// Returns Map(kindKey -> amount) for one order.
+function yotpoCodes(order) {
+  const out = new Map();
   const apps = order.discountApplications && order.discountApplications.nodes;
-  if (!Array.isArray(apps) || !apps.length) return 0;
+  if (!Array.isArray(apps) || !apps.length) return out;
+  const byIndex = new Map(); // allocation totals per discount application index
+  let sawAlloc = false;
+  for (const e of (order.lineItems && order.lineItems.edges) || []) {
+    for (const al of e.node.discountAllocations || []) {
+      sawAlloc = true;
+      const idx = al.discountApplication && al.discountApplication.index;
+      byIndex.set(idx, (byIndex.get(idx) || 0) + amt(al.allocatedAmountSet));
+    }
+  }
   const tds = order.totalDiscountsSet || {};
   const shopCur = tds.shopMoney && tds.shopMoney.currencyCode;
   const shopDisc = Number(tds.shopMoney && tds.shopMoney.amount || 0);
   const presDisc = Number(tds.presentmentMoney && tds.presentmentMoney.amount || 0);
-  let v = 0;
-  for (const a of apps) {
-    if (!a || a.__typename !== 'DiscountCodeApplication' || !YOTPO_POINTS_CODE.test(String(a.code || ''))) continue;
-    const val = a.value;
-    if (!val || val.__typename !== 'MoneyV2') continue;
-    let x = Number(val.amount || 0);
-    // Normally in the shop's currency already; convert if it came in the
-    // customer's currency instead.
-    if (shopCur && val.currencyCode && val.currencyCode !== shopCur && val.currencyCode === order.presentmentCurrencyCode && presDisc > 0) x *= shopDisc / presDisc;
-    v += x;
-  }
-  return Math.max(0, Math.min(v, shopDisc));
+  apps.forEach((a, pos) => {
+    if (!a || a.__typename !== 'DiscountCodeApplication') return;
+    const k = yotpoKindOf(a);
+    if (!k) return;
+    const idx = a.index !== undefined ? a.index : pos;
+    let x;
+    if (sawAlloc && a.index !== undefined) {
+      x = byIndex.get(idx) || 0;
+    } else if (a.value && a.value.__typename === 'MoneyV2') {
+      // Older payload shape (no allocations): the code's own amount.
+      x = Number(a.value.amount || 0);
+      if (shopCur && a.value.currencyCode && a.value.currencyCode !== shopCur && a.value.currencyCode === order.presentmentCurrencyCode && presDisc > 0) x *= shopDisc / presDisc;
+    } else {
+      x = 0;
+    }
+    out.set(k.key, (out.get(k.key) || 0) + Math.max(0, Math.min(x, shopDisc)));
+  });
+  return out;
 }
 
 function aggregate(orders, { tagLabels = DEFAULT_TAG_LABELS } = {}) {
@@ -132,7 +187,8 @@ function aggregate(orders, { tagLabels = DEFAULT_TAG_LABELS } = {}) {
   const productMap = new Map(); // title -> { units, revenue }
   const countryMap = new Map(); // countryCode -> { grossSales, orders }
   const tagMap = new Map(); // tag -> { grossSales, discountValue, orders }
-  const yotpo = { value: 0, grossSales: 0, orderDiscounts: 0, orders: 0 };
+  const yotpoAcc = new Map(YOTPO_KINDS.map((k) => [k.key, { value: 0, grossSales: 0, orders: 0 }]));
+  const groupAcc = new Map(DISCOUNT_GROUPS.map((g) => [g.key, { value: 0, grossSales: 0, orders: 0 }]));
   let sawDiscountApps = false;
 
   for (const order of orders) {
@@ -166,12 +222,24 @@ function aggregate(orders, { tagLabels = DEFAULT_TAG_LABELS } = {}) {
     countryMap.set(country, c);
 
     if (order.discountApplications) sawDiscountApps = true;
-    const yv = yotpoPointsValue(order);
-    if (yv > 0) {
-      yotpo.value += yv;
-      yotpo.grossSales += orderGross;
-      yotpo.orderDiscounts += orderDiscount;
-      yotpo.orders += 1;
+    const yc = yotpoCodes(order);
+    let yTotal = 0;
+    yc.forEach((v, key) => {
+      const acc = yotpoAcc.get(key);
+      acc.value += v; acc.grossSales += orderGross; acc.orders += 1;
+      yTotal += v;
+    });
+    if (yc.size) {
+      const g = groupAcc.get('yotpo');
+      g.value += yTotal; g.grossSales += orderGross; g.orders += 1;
+    }
+    {
+      const orderTags = order.tags || [];
+      const inGroups = new Set(orderTags.map((t) => TAG_GROUP[t]).filter(Boolean));
+      inGroups.forEach((key) => {
+        const g = groupAcc.get(key);
+        g.value += orderDiscount; g.grossSales += orderGross; g.orders += 1;
+      });
     }
 
     const tags = order.tags || [];
@@ -216,6 +284,7 @@ function aggregate(orders, { tagLabels = DEFAULT_TAG_LABELS } = {}) {
     .map(([tag, v]) => ({
       tag,
       label: tagLabels[tag] || tag,
+      group: TAG_GROUP[tag] || null,
       gross_sales: v.grossSales,
       discount_value: v.discountValue,
       discount_pct: v.grossSales ? v.discountValue / v.grossSales : null,
@@ -236,21 +305,39 @@ function aggregate(orders, { tagLabels = DEFAULT_TAG_LABELS } = {}) {
     });
   }
 
-  // Yotpo Loyalty row. discount_value = the points' value only (not the
-  // orders' other discounts); discount_pct = that ÷ the gross sales of the
-  // orders the points were used on. Only when this order list carries
-  // discountApplications (the full current-period query), so comparison
-  // periods fetched with the lighter queries never show a false $0.
+  // Yotpo rows (Loyalty Points / Bday / Ref): discount_value = what those
+  // codes took off (not the orders' other discounts); discount_pct = that ÷
+  // the gross sales of the orders they were used on. Only when this order
+  // list carries discountApplications (the full current-period query), so
+  // comparison periods fetched with lighter queries never show a false $0.
+  let discountGroups;
   if (sawDiscountApps) {
-    discounts.push({
-      tag: 'Yotpo points codes',
-      label: 'Yotpo Loyalty',
-      gross_sales: yotpo.grossSales,
-      discount_value: yotpo.value,
-      discount_pct: yotpo.grossSales ? yotpo.value / yotpo.grossSales : null,
-      orders: yotpo.orders,
-      points: Math.round(yotpo.value * 10),
-      pct_of_total_discounts: discountsTotal ? yotpo.value / discountsTotal : null,
+    YOTPO_KINDS.forEach((k) => {
+      const y = yotpoAcc.get(k.key);
+      if (!y.orders && k.key !== 'loyalty') return;
+      discounts.push({
+        tag: k.tag,
+        label: k.label,
+        group: 'yotpo',
+        gross_sales: y.grossSales,
+        discount_value: y.value,
+        discount_pct: y.grossSales ? y.value / y.grossSales : null,
+        orders: y.orders,
+        ...(k.key === 'loyalty' ? { points: Math.round(y.value * 10) } : {}),
+        pct_of_total_discounts: discountsTotal ? y.value / discountsTotal : null,
+      });
+    });
+    discountGroups = DISCOUNT_GROUPS.map((g) => {
+      const v = groupAcc.get(g.key);
+      return {
+        key: g.key,
+        label: g.label,
+        gross_sales: v.grossSales,
+        discount_value: v.value,
+        discount_pct: v.grossSales ? v.value / v.grossSales : null,
+        orders: v.orders,
+        pct_of_total_discounts: discountsTotal ? v.value / discountsTotal : null,
+      };
     });
   }
 
@@ -271,10 +358,11 @@ function aggregate(orders, { tagLabels = DEFAULT_TAG_LABELS } = {}) {
     discounts_total_gross: discountsTotalGross,
     discounts_total_abs: discountsTotal,
     discounts_total_orders: ordersCount,
-    // 2: discounts include the "Yotpo Loyalty" row (2026-10-26). The month
-    // cache re-pulls a stored closed month that predates it.
-    discounts_version: sawDiscountApps ? 2 : 1,
+    discount_groups: discountGroups,
+    // 3: Yotpo Loyalty Points / Bday / Ref rows + discount_groups
+    // (2026-10-26). The month cache re-pulls a stored closed month below 3.
+    discounts_version: sawDiscountApps ? 3 : 1,
   };
 }
 
-module.exports = { aggregate, DEFAULT_TAG_LABELS, FREE_SHIPPING_TAGS };
+module.exports = { aggregate, DEFAULT_TAG_LABELS, FREE_SHIPPING_TAGS, DISCOUNT_GROUPS, YOTPO_KINDS };
