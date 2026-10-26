@@ -5,7 +5,7 @@ const cors = require('cors');
 const { fetchOrders, fetchOrdersLight, fetchOrdersForTierRevenue, fetchSalesReversals, fetchCostOfGoodsSold, fetchTopReturnsByProduct, fetchCountryBreakdown, fetchUsStateBreakdown, fetchSalesSummary, fetchCustomerAcquisition, fetchProductRetailPrices, fetchCollabsCodeSales, fetchTopProductsAnalytics, getAuthorizeUrl, exchangeCodeForToken } = require('./src/shopify');
 const { aggregate } = require('./src/aggregate');
 const { fetchChannelPerformance, fetchAttentiveSplit, attentiveRevenueKeys, ATTENTIVE_LABEL_KEYS } = require('./src/triplewhale');
-const { fetchTikTokShop, fetchGmvEstimate } = require('./src/tiktokshop');
+const { fetchTikTokShop, fetchGmvEstimate, fetchGifting } = require('./src/tiktokshop');
 const { getSellerCenter } = require('./src/windsor-tiktok');
 const { fetchPnlSheetChannels, fetchPnlSheetOtherCosts, fetchPnlSheetTotalCost, fetchPnlSheetMarketingSpend, fetchPnlSheetShopPpc, fetchPnlSheetRtbHouseSpend, fetchPnlSheetGoals } = require('./src/googlesheets');
 const { VALID_SITES: YOTPO_VALID_SITES, ensureYotpoSchema, recordYotpoEvent, getYotpoSummary, getYotpoCustomerTierMap, getPool: getYotpoPool } = require('./src/yotpo');
@@ -1283,6 +1283,22 @@ app.get('/api/tiktok-shop/seller-center', async (req, res) => {
   } catch (err) {
     console.error('seller-center failed:', err.message);
     res.status(err.status || 502).json({ error: err.message });
+  }
+});
+
+// GET /api/tiktok-shop/gifting?start=2026-10-01&end=2026-10-27 (ND.COM)
+// TikTok Gifting cost = product cost of the $0 TikTok-channel orders (creator
+// samples) — see fetchGifting in src/tiktokshop.js. Added 2026-10-26.
+app.get('/api/tiktok-shop/gifting', async (req, res) => {
+  try {
+    const start = String(req.query.start || ''), end = String(req.query.end || '');
+    if (!US_STATES_DATE.test(start) || !US_STATES_DATE.test(end) || end <= start) return res.status(400).json({ error: 'start and end (YYYY-MM-DD) are required' });
+    const out = await fetchGifting('com', start, end);
+    if (!out) return res.status(503).json({ error: 'Triple Whale isn\'t configured' });
+    res.json(out);
+  } catch (err) {
+    console.error('tiktok gifting failed:', err.message);
+    res.status(502).json({ error: err.message });
   }
 });
 
