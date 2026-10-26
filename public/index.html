@@ -2568,7 +2568,9 @@ function renderTikTokShop(monthData, opts = {}) {
       '<span class="tt-gmv-incl">All TikTok Shop orders — TikTok Ads + Affiliate + Organic (TikTok Ads isn’t added on top).</span>' + gmvInfo.note, gmvTip),
     tile('Net Sales', tt.net_sales, 'currency-full', 'net_sales', true, 'Gross sales − discounts − refunds'),
     tile('Orders', tt.orders, 'number', 'orders', true, tt.orders && tt.units ? (tt.units / tt.orders).toFixed(1) + ' units per order' : ''),
-    tileV('AOV', fmtVal(aov, 'currency'), aovYoy, aovMom, true, gmvShown !== null && gmvInfo.orders ? fmtVal(gmvShown / gmvInfo.orders, 'currency') + ' GMV per order' : '', 'Average order value: TikTok Shop Net Sales ÷ Orders (Key Metrics’ AOV is Shopify’s: (Gross Sales − Discounts) ÷ Orders)'),
+    // 2026-10-26 (Tomer: "keep the real AOV"): the "GMV per order" line under
+    // it is removed — only Net Sales ÷ Orders is shown.
+    tileV('AOV', fmtVal(aov, 'currency'), aovYoy, aovMom, true, 'Net Sales ÷ orders (after discounts and refunds)', 'Average order value: TikTok Shop Net Sales ÷ Orders (Key Metrics’ AOV is Shopify’s: (Gross Sales − Discounts) ÷ Orders)'),
     tile('Units Sold', tt.units, 'number', 'units', true, ''),
     tile('Refunds', tt.refunds, 'currency-full', 'refunds', false, gmvShown ? fmtVal(tt.refunds / gmvShown, 'percent') + ' of GMV' : ''),
     tileV('Discount Ratio', fmtVal(discRatio, 'percent'), discRatioYoy, discRatioMom, false, hasProdDisc ? fmtVal(prodDisc, 'currency-full') + ' product discounts ÷ gross sales before discounts (excl. ' + fmtVal((tt.discounts || 0) - prodDisc, 'currency-full') + ' shipping discounts)' : 'Product discounts not loaded yet — click Sync', 'Product discounts ÷ Gross Sales TikTok (shipping discounts not included)'),
