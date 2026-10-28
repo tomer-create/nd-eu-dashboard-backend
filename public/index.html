@@ -1923,14 +1923,17 @@ function combineMonthDatas(entries, opts) {
   const dd = mergeListSections(entries, {
     field: 'discounts',
     keyFn: d => d.tag || d.label,
-    zeroFields: () => ({ label: null, tag: null, discount_value: 0, gross_sales: 0, discount_pct: null, orders: 0, pct_of_total_discounts: null }),
+    zeroFields: () => ({ label: null, tag: null, discount_value: 0, gross_sales: 0, discounted_gross: 0, discount_pct: null, orders: 0, pct_of_total_discounts: null }),
     accumulate: (acc, item, fx) => {
       acc.label = item.label; acc.tag = item.tag; if (item.group) acc.group = item.group;
       acc.discount_value += (item.discount_value || 0) * fx;
       acc.gross_sales += (item.gross_sales || 0) * fx;
+      // Discount % base (2026-10-28): the gross of the items the program
+      // discounted; parts stored before then only have the orders' gross.
+      acc.discounted_gross += (typeof item.discounted_gross === 'number' ? item.discounted_gross : (item.gross_sales || 0)) * fx;
       acc.orders += item.orders || 0;
     },
-    recompute: item => { item.discount_pct = item.gross_sales ? item.discount_value / item.gross_sales : null; },
+    recompute: item => { item.discount_pct = item.discounted_gross ? item.discount_value / item.discounted_gross : (item.discount_value ? null : 0); },
     sortFn: (a, b) => b.discount_value - a.discount_value,
   });
   const discEntries = entries.filter(e => Array.isArray(e.monthData.discounts));
@@ -1943,8 +1946,9 @@ function combineMonthDatas(entries, opts) {
   if (discEntries.length && discEntries.every(e => Array.isArray(e.monthData.discount_groups))) {
     const gm = new Map();
     discEntries.forEach(e => e.monthData.discount_groups.forEach(g => {
-      const a = gm.get(g.key) || { key: g.key, label: g.label, gross_sales: 0, discount_value: 0, orders: 0 };
+      const a = gm.get(g.key) || { key: g.key, label: g.label, gross_sales: 0, discount_value: 0, orders: 0, discounted_gross: 0 };
       a.gross_sales += (g.gross_sales || 0) * e.fx; a.discount_value += (g.discount_value || 0) * e.fx; a.orders += g.orders || 0;
+      a.discounted_gross += (typeof g.discounted_gross === 'number' ? g.discounted_gross : (g.gross_sales || 0)) * e.fx;
       gm.set(g.key, a);
     }));
     discGroups = Array.from(gm.values());
@@ -1953,7 +1957,7 @@ function combineMonthDatas(entries, opts) {
   const discTotalAbs = entries.reduce((s, e) => s + ((e.monthData.discounts_total_abs || 0) * e.fx), 0);
   const discTotalOrders = entries.reduce((s, e) => s + (e.monthData.discounts_total_orders || 0), 0);
   if (dd.list) dd.list.forEach(d => { d.pct_of_total_discounts = discTotalAbs ? d.discount_value / discTotalAbs : null; });
-  if (discGroups) discGroups.forEach(g => { g.discount_pct = g.gross_sales ? g.discount_value / g.gross_sales : null; g.pct_of_total_discounts = discTotalAbs ? g.discount_value / discTotalAbs : null; });
+  if (discGroups) discGroups.forEach(g => { g.discount_pct = g.discounted_gross ? g.discount_value / g.discounted_gross : (g.discount_value ? null : 0); g.pct_of_total_discounts = discTotalAbs ? g.discount_value / discTotalAbs : null; });
 
   const ttCombined = combineTikTokShop(entries);
   const label = opts.label || '';
@@ -2676,7 +2680,12 @@ function renderTikTokShop(monthData, opts = {}) {
   // covers ≥ 90% of this period's Triple Whale GMV — otherwise a gap in
   // TikTok's finance history would silently land in Organic GMV.
   const affCoverage = affRaw && gmv ? affRaw.gross_seen / gmv : null;
-  const aff = affRaw && affCoverage !== null && affCoverage >= 0.9 ? affRaw : null;
+  const affW = affRaw && affCoverage !== null && affCoverage >= 0.9 ? affRaw : null;
+  // TikTok's own Creator-attributed GMV (2026-10-28, TikTok Shop API →
+  // /api/tiktok-shop/creator-gmv) replaces the order-data estimate whenever
+  // it's available for the period — that's the Affiliate Center figure.
+  const capiCur = scRange0 ? ttCreatorApiOk(ttEnsureCreatorApi(scRange0)) : null;
+  const aff = affW && capiCur ? { ...affW, creator_gmv: capiCur.gmv, creator_orders: capiCur.orders, creator_src: 'api' } : affW;
   const lowCoverageMsg = affRaw && !aff ? `TikTok's order data for this period only covers ${fmtVal(affCoverage || 0, 'percent')} of its GMV, so the split isn't shown` : null;
   const smp = sc && sc.status === 'ok' && sc.data && sc.data.samples && !sc.data.samples.error ? sc.data.samples : null;
   const scPending = !sc || sc.status === 'loading';
@@ -2872,7 +2881,7 @@ function renderTikTokShop(monthData, opts = {}) {
     { label: 'TikTok Ads spend', v: tt.ads_spend, yoy: tt.yoy ? tt.yoy.ads_spend : null, mom: tt.mom ? tt.mom.ads_spend : null, py: null, pm: null },
     { label: 'Affiliate commission', v: commission, yoy: commChg.yoy, mom: commChg.mom, pm: commChg.mom === null && sheetPrev ? sheetPrev.commission : null },
     { label: 'Samples (TikTok Gifting)', v: samples, yoy: giftChg.yoy, mom: giftChg.mom, pm: !giftCur && giftChg.mom === null && sheetPrev ? sheetPrev.gifting : null,
-      sub: giftCur ? `product cost of ${fmtVal(giftCur.orders, 'number')} $0 TikTok orders` : giftFromSheet ? 'P&L sheet — $0-order figure unavailable' : '' },
+      sub: giftCur ? (giftCur.cost_pct ? `20% of the ${fmtVal(giftCur.retail_value || 0, 'currency-full')} price of the ${fmtVal(giftCur.units || 0, 'number')} products in ${fmtVal(giftCur.orders, 'number')} $0 TikTok orders${giftCur.units_no_price ? ` · ${fmtVal(giftCur.units_no_price, 'number')} without a price` : ''}` : `product cost of ${fmtVal(giftCur.orders, 'number')} $0 TikTok orders`) : giftFromSheet ? 'P&L sheet — $0-order figure unavailable' : '' },
     { label: 'Sample shipping cost', v: sampleShip, py: shipY, pm: shipM, sub: giftCur ? `${fmtVal(giftCur.orders,'number')} creators = ${fmtVal(giftCur.orders,'number')} $0 TikTok orders × $${SHIP_PER}` : '' },
     { label: 'TikTok Shop transaction fee', v: txCur ? txCur.v : null, py: txY ? txY.v : null, pm: txM ? txM.v : null, sub: txCur ? txCur.sub : '' },
   ];
@@ -2929,7 +2938,7 @@ function renderTikTokShop(monthData, opts = {}) {
         <tr class="total-row"><td>Total TikTok costs</td><td>${fmtVal(totalCost,'currency-full')}</td><td>${gmvShown ? fmtVal(totalCost/gmvShown,'percent') : '—'}</td><td>${cCell(totalYoy)}</td><td>${cCell(totalMom)}</td></tr>
       </tbody>
     </table>
-    <div class="tt-note">TikTok ROAS (tile above) = TikTok Shop GMV ÷ Total TikTok costs; “% of GMV” is on the same GMV. Product cost (COGS ${fmtVal(tt.cogs,'currency-full')}) isn't included. Sources: TikTok Ads spend — Triple Whale; Affiliate commission — P&amp;L sheet, with its YoY / ${mLabel} from TikTok's own data for the same days (TikTok's affiliate commission on the period's orders), since the sheet only has 2026 and no figure yet for a month in progress; Samples (TikTok Gifting) — the Shopify product cost of all $0 orders from the TikTok sales channel (the creator samples), YoY / ${mLabel} on the same formula; TikTok Shop transaction fee — TikTok's referral fee (its commission on each sale), plus any transaction fee / platform commission and the refund administration fee, from TikTok's settlement statements, by statement date; Sample shipping — one shipment per $0 order from the TikTok sales channel (the same orders as Samples / TikTok Gifting) × $11.</div>`;
+    <div class="tt-note">TikTok ROAS (tile above) = TikTok Shop GMV ÷ Total TikTok costs; “% of GMV” is on the same GMV. Product cost (COGS ${fmtVal(tt.cogs,'currency-full')}) isn't included. Sources: TikTok Ads spend — Triple Whale; Affiliate commission — P&amp;L sheet, with its YoY / ${mLabel} from TikTok's own data for the same days (TikTok's affiliate commission on the period's orders), since the sheet only has 2026 and no figure yet for a month in progress; Samples (TikTok Gifting) — product cost of everything inside the $0 orders from the TikTok sales channel (the creator samples): each product's price × quantity × 20% (the dashboard's product-cost rule), added up; YoY / ${mLabel} on the same formula; TikTok Shop transaction fee — TikTok's referral fee (its commission on each sale), plus any transaction fee / platform commission and the refund administration fee, from TikTok's settlement statements, by statement date; Sample shipping — one shipment per $0 order from the TikTok sales channel (the same orders as Samples / TikTok Gifting) × $11.</div>`;
 
   // Revenue & costs by source (2026-10-20, Tomer: "add Revenue by source and
   // TikTok costs on the same chart, when the cost of the affiliate should be
@@ -3006,7 +3015,11 @@ function renderTikTokShop(monthData, opts = {}) {
     const adsOP = typeof tt.ads_orders === 'number' ? priorOfCh(tt.ads_orders, c.ads_orders) : null;
     const scP = kind === 'yoy' ? scY : scM;
     const aRaw = scP && scP.status === 'ok' && scP.data && scP.data.affiliate && !scP.data.affiliate.error ? scP.data.affiliate : null;
-    const a = aRaw && aRaw.gross_seen && aRaw.gross_seen / gG >= 0.9 ? aRaw : null;
+    const aW = aRaw && aRaw.gross_seen && aRaw.gross_seen / gG >= 0.9 ? aRaw : null;
+    // Same source as the current period: TikTok's API figure when the current
+    // one is from the API (no change shown until the prior one has loaded).
+    const capiP = capiCur && pr[kind] ? ttCreatorApiOk(ttEnsureCreatorApi(pr[kind])) : null;
+    const a = !aW ? null : capiCur ? (capiP ? { ...aW, creator_gmv: capiP.gmv, creator_orders: capiP.orders } : { ...aW, creator_gmv: undefined }) : aW;
     const shipP = kind === 'yoy' ? shipY : shipM;
     const viaCh = (v, ch) => v !== null && v !== undefined && ch !== null && ch !== undefined && (1 + ch) !== 0 ? v / (1 + ch) : null;
     const commP = viaCh(commission, commChg[kind]) ?? (kind === 'mom' && sheetPrev ? sheetPrev.commission : null);
@@ -3080,7 +3093,7 @@ function renderTikTokShop(monthData, opts = {}) {
     if (!al) return { why: scPending ? 'Loading TikTok’s order data…' : (lowCoverageMsg || 'TikTok’s affiliate order data isn’t available for this period') };
     const cy = chgFor(al, 'yoy'), cm = chgFor(al, 'mom');
     return { aov: m && m.aov !== null ? m.aov : null, rev: m && m.aov !== null ? al.rev * al.nr : 0, orders: al.orders,
-      gross: al.rev, yoy: cy.rev ?? null, mom: cm.rev ?? null, partial };
+      gross: al.rev, yoy: cy.rev ?? null, mom: cm.rev ?? null, partial, api: !!(aff && aff.creator_src === 'api') };
   }
   const rcChip = (v, neutral) => { if (v === null || v === undefined) return '<span class="kpi-yoy flat">—</span>'; const c = ttChange(v, true); return `<span class="kpi-yoy ${neutral ? 'neutral' : c.dir}">${c.str}</span>`; };
   const rcChg = (line, key) => { const y = chgFor(line, 'yoy')[key], m = chgFor(line, 'mom')[key]; return `<div class="tt-rc-chg"><span class="lbl">YoY</span>${rcChip(y, key === 'cost')}<span class="lbl">${mLabel}</span>${rcChip(m, key === 'cost')}</div>`; };
@@ -3113,7 +3126,7 @@ function renderTikTokShop(monthData, opts = {}) {
       </tbody>
     </table>
     <div class="tt-note">Revenue: TikTok Ads = Triple Whale's TikTok Ads conversion value (the same figure as in Marketing &amp; Sales Channel Performance); ${creatorMode
-      ? `Affiliate = TikTok's creator-attributed GMV, as in TikTok Affiliate Center: price − seller discount of every order that paid a creator commission, by order day in Pacific time. TikTok counts only the items a creator sold, so orders that mix a creator's item with other items make this figure run a few % above TikTok's. Counted by both = ${fmtVal(overlap,'currency-full')} of those orders that TikTok Ads also claims (ads on a creator's content${overlapEstimated ? '; partly estimated so Organic isn’t below $0' : ''}), taken off once; Organic = TikTok Shop GMV − TikTok Ads − Affiliate + Counted by both.`
+      ? `Affiliate = ${aff.creator_src === 'api' ? `TikTok Affiliate Center's Creator-attributed GMV, straight from TikTok (TikTok Shop API: the creator-attributed items of every affiliate order, by order day in Pacific time).` : `TikTok's creator-attributed GMV estimated from TikTok's order data (TikTok's own figure isn't connected yet): price − seller discount of every order that paid a creator commission, by order day in Pacific time. TikTok counts only the items a creator sold, so this runs a few % above TikTok's.`} Counted by both = ${fmtVal(overlap,'currency-full')} of those orders that TikTok Ads also claims (ads on a creator's content${overlapEstimated ? '; partly estimated so Organic isn’t below $0' : ''}), taken off once; Organic = TikTok Shop GMV − TikTok Ads − Affiliate + Counted by both.`
       : `Affiliate = the share of TikTok's order data that paid a creator commission, applied to TikTok Shop GMV, less ${fmtVal(overlap,'currency-full')} of affiliate orders TikTok Ads already counts${overlapEstimated ? ' (partly estimated)' : ''}; Organic = TikTok Shop GMV − (Affiliate + TikTok Ads).`} The lines add up to TikTok Shop GMV — the same figure as the GMV tile above. Costs as in “TikTok costs” below, grouped by source — Affiliate = commission + samples (TikTok Gifting) + sample shipping. ROAS = revenue ÷ cost. AOV is on Net Sales, like the AOV tile: each line's share of TikTok Net Sales ÷ its orders, so the Total equals the tile. Every line's share = its revenue × Net Sales ÷ TikTok Shop GMV. Orders: TikTok Ads = TikTok's own conversions for its ads; Affiliate = ${creatorMode ? 'the orders that paid a creator commission' : 'affiliate orders in TikTok\'s order data, less the ones TikTok Ads also counts'}; Organic is estimated — Organic GMV ÷ the average order without a creator commission (TikTok counts many affiliate orders as Ads conversions too, so they can't simply be subtracted). YoY / ${mLabel}: same calculation for the comparison period; the Affiliate cost's changes use TikTok's own commission and sample figures for the same days (see “TikTok costs”). The comparison periods use TikTok’s order data for GMV (gross + shipping − product discounts). The TikTok Shop transaction fee covers every order, so it isn't given to a source and isn't in this table (it is in “TikTok costs” and the TikTok ROAS tile).</div>`;
 
   // Top products
@@ -3200,6 +3213,36 @@ function ttEnsureSC(range) {
 }
 // TikTok Gifting (2026-10-26): product cost of the $0 TikTok-channel orders
 // for a date range, loaded in the background like the Seller Center data.
+// TikTok's Creator-attributed GMV from the TikTok Shop API (2026-10-28).
+// 503 = not set up / not connected → checked again after 10 minutes, and the
+// dashboard keeps the order-data estimate meanwhile. Other failures retry.
+const creatorApiCache = {};
+function ttCreatorApiOk(e) { return e && e.status === 'ok' && e.data && typeof e.data.gmv === 'number' ? e.data : null; }
+function ttEnsureCreatorApi(range) {
+  const key = range.start + '|' + range.end;
+  const prev = creatorApiCache[key];
+  const retryAfter = prev && prev.status === 'unavailable' ? 600000 : 60000;
+  if (!prev || ((prev.status === 'error' || prev.status === 'unavailable') && Date.now() - (prev.at || 0) > retryAfter)) {
+    creatorApiCache[key] = { status: 'loading' };
+    (async () => {
+      let lastErr = null;
+      for (let attempt = 0; attempt < 4; attempt++) {
+        if (attempt) await new Promise(r => setTimeout(r, 5000 * attempt));
+        try {
+          const res = await fetch(`${BACKEND_URL}/api/tiktok-shop/creator-gmv?start=${range.start}&end=${range.end}`);
+          let body; try { body = JSON.parse(await res.text()); } catch { body = null; }
+          if (res.status === 503 || res.status === 400 || res.status === 404) return { unavailable: true, error: body && body.error };
+          if (!body || !res.ok || typeof body.gmv !== 'number') { lastErr = new Error((body && body.error) || ('Backend returned ' + res.status)); continue; }
+          return body;
+        } catch (e) { lastErr = e; }
+      }
+      throw lastErr || new Error('Couldn’t load');
+    })()
+      .then(d => { creatorApiCache[key] = d && d.unavailable ? { status: 'unavailable', error: d.error, at: Date.now() } : { status: 'ok', data: d }; if (d && !d.unavailable) { if (state.site === 'com') renderTikTokShop(getMonthData()); if (state.site === 'com' || state.site === 'all') renderChannels(getMonthData()); } })
+      .catch(err => { creatorApiCache[key] = { status: 'error', error: err.message, at: Date.now() }; });
+  }
+  return creatorApiCache[key];
+}
 const giftingCache = {};
 function ttEnsureGifting(range) {
   const key = range.start + '|' + range.end;
@@ -3684,6 +3727,7 @@ function renderChannels(monthData) {
       // has no like-for-like comparison.
       if (c.revenue_source === 'tiktok') {
         out.ttRevLive = true;
+        out.ttApi = !!(f && f.api);
         out.revenue = [c.tt_rev_yoy ?? null, c.tt_rev_mom ?? null];
         out.roas = [null, null];
         if (out.pace) { out.pace.revenue = false; out.pace.roas = false; }
@@ -3767,7 +3811,7 @@ function renderChannels(monthData) {
         : c.revenue_source === 'mixed' ? 'Triple Whale + P&amp;L sheet · spend from sheet' : 'P&amp;L sheet · Avg order: Triple Whale';
     }
     if (ch.collabs) return 'P&amp;L sheet · Avg order: Collabs codes';
-    if (ch.ttRevLive) return 'TikTok order data · spend from P&amp;L sheet';
+    if (ch.ttRevLive) return (ch.ttApi ? 'TikTok Affiliate Center' : 'TikTok order data (est.)') + ' · spend from P&amp;L sheet';
     if (ch.ttAff && ch.aov !== null) return 'P&amp;L sheet · Avg order: TikTok order data';
     if (c.plug) return 'Gross sales − all other channels';
     // Before / without the comparison data, fall back to the channels Triple
@@ -5252,6 +5296,10 @@ function renderDiscounts(monthData) {
   const pctCell = v => (v !== undefined && v !== null) ? fmtVal(v, 'percent') : '—';
   const cur = v => (v !== undefined && v !== null) ? fmtVal(v, 'currency-full') : '—';
   const totalAbs = monthData.discounts_total_abs;
+  // % of Gross Sales (2026-10-28, Tomer — replaces % of Total Discounts): the
+  // program's discount ÷ the period's store-wide Gross Sales (Section 1).
+  const totalGrossAll = monthData.discounts_total_gross;
+  const ofGross = v => totalGrossAll ? (v || 0) / totalGrossAll : null;
   const rowsAll = monthData.discounts.filter(d => !discountRowHidden(d)).map(d => {
     // Data stored before the Bday / Ref split called the points row "Yotpo Loyalty".
     if (d.label === 'Yotpo Loyalty') return Object.assign({}, d, { label: 'Loyalty Points', group: 'yotpo' });
@@ -5269,7 +5317,7 @@ function renderDiscounts(monthData) {
       <td>${fmtVal(d.discount_value || 0, 'currency-full')}</td>
       <td>${pctCell(d.discount_pct)}</td>
       <td>${(d.orders || 0).toLocaleString('en-US')}</td>
-      <td>${pctCell(d.pct_of_total_discounts)}</td>
+      <td>${pctCell(ofGross(d.discount_value))}</td>
     </tr>`;
   };
   let body = '';
@@ -5287,7 +5335,8 @@ function renderDiscounts(monthData) {
     else {
       approx = items.length > 1;
       const gs = items.reduce((a, d) => a + (d.gross_sales || 0), 0), dv = items.reduce((a, d) => a + (d.discount_value || 0), 0);
-      tot = { gross_sales: gs, discount_value: dv, discount_pct: gs ? dv / gs : null, orders: items.reduce((a, d) => a + (d.orders || 0), 0), pct_of_total_discounts: totalAbs ? dv / totalAbs : null };
+      const dg = items.reduce((a, d) => a + (typeof d.discounted_gross === 'number' ? d.discounted_gross : (d.gross_sales || 0)), 0);
+      tot = { gross_sales: gs, discount_value: dv, discount_pct: dg ? dv / dg : null, orders: items.reduce((a, d) => a + (d.orders || 0), 0), pct_of_total_discounts: totalAbs ? dv / totalAbs : null };
     }
     const open = !!discGroupOpen[g.key];
     const note = (g.key === 'yotpo' && partialYotpo ? ' · ' + cov.with + ' of ' + cov.of + ' months/sites loaded' : '') + (approx ? ' · ≈ sum of programs' : '');
@@ -5297,7 +5346,7 @@ function renderDiscounts(monthData) {
       <td><strong>${fmtVal(tot.discount_value || 0, 'currency-full')}</strong></td>
       <td><strong>${pctCell(tot.discount_pct)}</strong></td>
       <td><strong>${(tot.orders || 0).toLocaleString('en-US')}</strong></td>
-      <td><strong>${pctCell(tot.pct_of_total_discounts)}</strong></td>
+      <td><strong>${pctCell(ofGross(tot.discount_value))}</strong></td>
     </tr>` + items.map(d => progRow(d, g.key)).join('');
   });
   const totalGross = monthData.discounts_total_gross;
@@ -5308,14 +5357,14 @@ function renderDiscounts(monthData) {
       <td>${fmtVal(totalAbs, 'currency-full')}</td>
       <td>${pctCell(totalDiscPct)}</td>
       <td>${monthData.discounts_total_orders !== undefined ? monthData.discounts_total_orders.toLocaleString('en-US') : '—'}</td>
-      <td>${fmtVal(1, 'percent')}</td>
+      <td>${pctCell(totalDiscPct)}</td>
     </tr>`;
   const el = document.getElementById('section-6');
   el.innerHTML = `<table class="dtable">
-    <thead><tr><th style="text-align:left">Program</th><th>Gross Sales</th><th>Discount $</th><th>Discount %</th><th>Orders</th><th>% of Total Discounts</th></tr></thead>
+    <thead><tr><th style="text-align:left">Program</th><th>Gross Sales</th><th>Discount $</th><th title="Discount $ ÷ the gross sales of the items the program discounted (Pro-Artist → 30%)">Discount %</th><th>Orders</th><th title="Discount $ ÷ the period's store-wide Gross Sales">% of Gross Sales</th></tr></thead>
     <tbody>${body}${totalRow}</tbody>
   </table>
-  <div style="margin-top:10px;font-size:11px;color:var(--text-muted)">${monthData.discounts_note || 'Pulled live from Shopify analytics by order tag.'} Click a group to open its programs. Group totals count each order once, even when it used two programs of the same group. Programs (by order tag): Gross Sales, Discount $ and Orders are the orders that carry the tag, with all their discounts. YOTPO (Yotpo’s single-use codes in Shopify — Loyalty Points: 8-character fixed-amount codes from spent points; Bday: BDAY… codes; Ref: REF… codes): Discount $ is only what those codes took off; Gross Sales and Orders are the orders they were used on. Free shipping, Collabs Affiliate and bundle / set programs aren't listed. The Total row is the store-wide total of all discounts (it still includes programs not listed).</div>`;
+  <div style="margin-top:10px;font-size:11px;color:var(--text-muted)">${monthData.discounts_note || 'Pulled live from Shopify analytics by order tag.'} Click a group to open its programs. Group totals count each order once, even when it used two programs of the same group. Programs (by order tag): Gross Sales and Orders are the orders that carry the tag. Discount $ is only that program's own Shopify discount on those orders — other discounts on the same order (a free sample, the makeup bag, Yotpo / Attentive / affiliate codes) count under their own programs, not this one. Discount % = Discount $ ÷ the gross sales of the items the program discounted (Pro-Artist → 30%; free gifts and samples → 100%). % of Gross Sales = Discount $ ÷ the period's store-wide Gross Sales.${(monthData.discounts || []).some(d => d.tag && d.tag.startsWith('DISCOUNT-') && d.discounted_gross === undefined) ? ' Some months here were stored before this method (2026-10-28) and still count the orders’ full discount until they refresh on their own.' : ''} YOTPO (Yotpo’s single-use codes in Shopify — Loyalty Points: 8-character fixed-amount codes from spent points; Bday: BDAY… codes; Ref: REF… codes): Discount $ is only what those codes took off; Gross Sales and Orders are the orders they were used on. Free shipping, Collabs Affiliate and bundle / set programs aren't listed. The Total row is the store-wide total of all discounts (it still includes programs not listed).</div>`;
   el.querySelectorAll('.disc-toggle').forEach(btn => btn.addEventListener('click', () => {
     const k = btn.dataset.group;
     discGroupOpen[k] = !discGroupOpen[k];
