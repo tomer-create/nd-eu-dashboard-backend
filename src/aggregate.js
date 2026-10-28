@@ -177,6 +177,108 @@ function yotpoCodes(order) {
   return out;
 }
 
+// ---- Program discounts by discount application (2026-10-28) --------------
+// Tomer: "Pro-Artist actually gets 40.4% discount but it should be 30%". A
+// program row used to take the WHOLE discount of every order carrying its
+// tag — so a Pro-Artist order that also had a Free Sample (100% off a
+// sample), the Free Makeup Bag, a Yotpo points code or an Attentive code had
+// all of those counted as Pro-Artist. Order tags also don't prove the
+// discount applied (an order tagged DISCOUNT-FREE_SAMPLE sometimes has only a
+// code). Now each program counts only the Shopify discount applications that
+// belong to it, read from the line items' (and shipping lines') discount
+// allocations:
+//   - a discount (automatic / manual title) BELONGS to a tag when nearly all
+//     the orders that used it carry that tag (≥ 90% of ≥ 3 orders in the
+//     period), or when it matches a known title (KNOWN_PROGRAM_TITLES);
+//     discount codes are never assigned this way (an affiliate code used on
+//     3 orders that all happened to get a free sample isn't Free Sample);
+//     generic titles like "-15%" are shared by several programs (Fall Sale
+//     tiers, Recommended Sets) and never belong to one tag;
+//   - a tag that owns discounts counts only those;
+//   - a tag that owns none (e.g. Fall Sale, whose discounts are titled
+//     "-15%" / "-20%" / "-25%") counts the order's discounts that no other
+//     program owns, leaving out discount codes (Attentive, affiliate, Yotpo —
+//     their own programs) and shipping discounts; free-shipping tags count only
+//     discounts on the shipping lines.
+// Discount % = the program's discount ÷ the gross sales of the items it
+// discounted (Pro-Artist → 30%). Gross Sales and Orders stay the orders that
+// carry the tag.
+const KNOWN_PROGRAM_TITLES = [
+  { tag: 'DISCOUNT-PRO-ARTIST', re: /^pro(\b|\s|$)|pro[\s-]*artist/i },
+  { tag: 'DISCOUNT-FREE_SAMPLE', re: /free\s*sample/i },
+  { tag: 'DISCOUNT-FREE_MAKEUP_BAG', re: /makeup\s*bag/i },
+];
+const SHIPPING_PROGRAM_TAGS = new Set(['DISCOUNT-8B2DX', 'DISCOUNT-ZWKHZ', 'Free shipping']);
+const GENERIC_TITLE_RE = /^\s*-?\s*\d+(\.\d+)?\s*%\s*(off)?\s*$/i;
+// A manual discount titled like a code (GLAMJUNKIESCOM, DIDJABEAUTY — an
+// affiliate code re-applied on an edited / draft order) counts as that code.
+const CODE_LIKE_RE = /^[A-Z0-9][A-Z0-9_-]{3,}$/;
+const isCodeApp = (a) => a.__typename === 'DiscountCodeApplication' || (a.__typename !== 'AutomaticDiscountApplication' && CODE_LIKE_RE.test(String(a.title || '').trim()));
+function appKey(a) {
+  if (!a) return null;
+  if (a.__typename === 'DiscountCodeApplication') return a.code ? 'code:' + String(a.code).toUpperCase() : null;
+  if (isCodeApp(a)) return 'code:' + String(a.title).trim().toUpperCase();
+  return a.title ? 'title:' + String(a.title).trim().toLowerCase() : null;
+}
+// Per order: the discount applications with what each took off and which
+// line items it touched. null when the payload has no titles / allocations
+// (orders stored before 2026-10-28) — the caller then keeps the old method.
+function orderApps(order) {
+  const nodes = order.discountApplications && order.discountApplications.nodes;
+  if (!Array.isArray(nodes)) return null;
+  const hasTitles = nodes.some((a) => a && ('title' in a || 'targetType' in a));
+  if (nodes.length && !hasTitles) return null;
+  const apps = new Map(); // index -> app
+  nodes.forEach((a, pos) => {
+    if (!a) return;
+    const idx = a.index !== undefined ? a.index : pos;
+    apps.set(idx, { idx, key: appKey(a), code: isCodeApp(a), yotpo: !!yotpoKindOf(a), amount: 0, lines: new Set(), shipping: a.targetType === 'SHIPPING_LINE' });
+  });
+  const lineGross = [];
+  ((order.lineItems && order.lineItems.edges) || []).forEach((e, li) => {
+    lineGross[li] = amt(e.node.originalTotalSet);
+    (e.node.discountAllocations || []).forEach((al) => {
+      const ap = apps.get(al.discountApplication && al.discountApplication.index);
+      const v = amt(al.allocatedAmountSet);
+      if (ap && v) { ap.amount += v; ap.lines.add(li); }
+    });
+  });
+  const ship = (order.shippingLines && order.shippingLines.nodes) || [];
+  ship.forEach((sl) => (sl.discountAllocations || []).forEach((al) => {
+    const ap = apps.get(al.discountApplication && al.discountApplication.index);
+    if (ap) ap.amount += amt(al.allocatedAmountSet);
+  }));
+  return { apps: [...apps.values()].filter((a) => a.key && a.amount > 0.0001), lineGross };
+}
+// Which tag owns each discount key, learned from this order list.
+function learnOwners(orders, tags, appsOf) {
+  const nK = new Map(), co = new Map(); // key -> n ; key -> Map(tag -> n)
+  for (const o of orders) {
+    const oa = appsOf.get(o);
+    if (!oa) continue;
+    const ot = (o.tags || []).filter((t) => tags.has(t));
+    new Set(oa.apps.map((a) => a.key)).forEach((k) => {
+      nK.set(k, (nK.get(k) || 0) + 1);
+      const m = co.get(k) || new Map();
+      ot.forEach((t) => m.set(t, (m.get(t) || 0) + 1));
+      co.set(k, m);
+    });
+  }
+  const owner = new Map();
+  nK.forEach((n, k) => {
+    if (k.startsWith('title:') && GENERIC_TITLE_RE.test(k.slice(6))) return;
+    const known = KNOWN_PROGRAM_TITLES.find((p) => k.startsWith('title:') && p.re.test(k.slice(6)) && tags.has(p.tag));
+    if (known) { owner.set(k, known.tag); return; }
+    // Codes are never learned: popular codes (affiliates, Attentive) can sit
+    // on orders that all happen to carry a common tag such as FREE_SAMPLE.
+    if (n < 3 || k.startsWith('code:')) return;
+    let best = null, bestP = 0;
+    (co.get(k) || new Map()).forEach((c, t) => { const pr = c / n; if (pr > bestP) { bestP = pr; best = t; } });
+    if (best && bestP >= 0.9) owner.set(k, best);
+  });
+  return owner;
+}
+
 function aggregate(orders, { tagLabels = DEFAULT_TAG_LABELS } = {}) {
   let grossSales = 0;
   let discountsTotal = 0;
@@ -188,8 +290,30 @@ function aggregate(orders, { tagLabels = DEFAULT_TAG_LABELS } = {}) {
   const countryMap = new Map(); // countryCode -> { grossSales, orders }
   const tagMap = new Map(); // tag -> { grossSales, discountValue, orders }
   const yotpoAcc = new Map(YOTPO_KINDS.map((k) => [k.key, { value: 0, grossSales: 0, orders: 0 }]));
-  const groupAcc = new Map(DISCOUNT_GROUPS.map((g) => [g.key, { value: 0, grossSales: 0, orders: 0 }]));
+  const groupAcc = new Map(DISCOUNT_GROUPS.map((g) => [g.key, { value: 0, grossSales: 0, orders: 0, discGross: 0 }]));
   let sawDiscountApps = false;
+  // Program discounts by discount application (see the note above).
+  const programTags = new Set([...Object.keys(tagLabels), ...FREE_SHIPPING_TAGS]);
+  let byApp = orders.length > 0;
+  const appsOf = new Map();
+  for (const o of orders) { const oa = orderApps(o); appsOf.set(o, oa); if (!oa) byApp = false; }
+  const owners = byApp ? learnOwners(orders, programTags, appsOf) : new Map();
+  const ownedBy = new Map(); // tag -> Set(keys)
+  owners.forEach((t, k) => { if (!ownedBy.has(t)) ownedBy.set(t, new Set()); ownedBy.get(t).add(k); });
+  // One program's share of one order: { value, discGross, appIdx:Set }.
+  const programPart = (o, tag) => {
+    const oa = appsOf.get(o);
+    const mine = ownedBy.get(tag);
+    const picked = oa.apps.filter((a) => (mine && mine.size) ? mine.has(a.key)
+      // Free-shipping tags: only discounts on the shipping lines.
+      : SHIPPING_PROGRAM_TAGS.has(tag) ? (a.shipping && !owners.has(a.key) && !a.yotpo)
+      : (!owners.has(a.key) && !a.code && !a.yotpo && !a.shipping));
+    const lines = new Set();
+    picked.forEach((a) => a.lines.forEach((l) => lines.add(l)));
+    let discGross = 0;
+    lines.forEach((l) => { discGross += oa.lineGross[l] || 0; });
+    return { value: picked.reduce((x, a) => x + a.amount, 0), discGross, apps: new Set(picked.map((a) => a.idx)), lines };
+  };
 
   for (const order of orders) {
     const orderGross = order.lineItems.edges.reduce(
@@ -238,16 +362,27 @@ function aggregate(orders, { tagLabels = DEFAULT_TAG_LABELS } = {}) {
       const inGroups = new Set(orderTags.map((t) => TAG_GROUP[t]).filter(Boolean));
       inGroups.forEach((key) => {
         const g = groupAcc.get(key);
-        g.value += orderDiscount; g.grossSales += orderGross; g.orders += 1;
+        g.grossSales += orderGross; g.orders += 1;
+        if (byApp) {
+          // Each discount counted once even when two programs of the group share it.
+          const apps = new Set(), lines = new Set();
+          orderTags.filter((t) => TAG_GROUP[t] === key).forEach((t) => { const p = programPart(order, t); p.apps.forEach((i) => apps.add(i)); p.lines.forEach((l) => lines.add(l)); });
+          appsOf.get(order).apps.forEach((a) => { if (apps.has(a.idx)) g.value += a.amount; });
+          let dg = 0; lines.forEach((l) => { dg += appsOf.get(order).lineGross[l] || 0; });
+          g.discGross += dg || 0;
+        } else {
+          g.value += orderDiscount;
+        }
       });
     }
 
     const tags = order.tags || [];
     for (const tag of Object.keys(tagLabels)) {
       if (tags.includes(tag)) {
-        const t = tagMap.get(tag) || { grossSales: 0, discountValue: 0, orders: 0 };
+        const t = tagMap.get(tag) || { grossSales: 0, discountValue: 0, orders: 0, discGross: 0 };
         t.grossSales += orderGross;
-        t.discountValue += orderDiscount;
+        if (byApp) { const p = programPart(order, tag); t.discountValue += p.value; t.discGross += p.value ? (p.discGross || orderGross) : 0; }
+        else t.discountValue += orderDiscount;
         t.orders += 1;
         tagMap.set(tag, t);
       }
@@ -258,9 +393,15 @@ function aggregate(orders, { tagLabels = DEFAULT_TAG_LABELS } = {}) {
         grossSales: 0,
         discountValue: 0,
         orders: 0,
+        discGross: 0,
       };
       t.grossSales += orderGross;
-      t.discountValue += orderDiscount;
+      if (byApp) {
+        const apps = new Set();
+        FREE_SHIPPING_TAGS.filter((x) => tags.includes(x)).forEach((x) => programPart(order, x).apps.forEach((i) => apps.add(i)));
+        const v = appsOf.get(order).apps.filter((a) => apps.has(a.idx)).reduce((x, a) => x + a.amount, 0);
+        t.discountValue += v; t.discGross += v ? orderGross : 0;
+      } else t.discountValue += orderDiscount;
       t.orders += 1;
       tagMap.set('__FREE_SHIPPING_COMBINED__', t);
     }
@@ -287,9 +428,12 @@ function aggregate(orders, { tagLabels = DEFAULT_TAG_LABELS } = {}) {
       group: TAG_GROUP[tag] || null,
       gross_sales: v.grossSales,
       discount_value: v.discountValue,
-      discount_pct: v.grossSales ? v.discountValue / v.grossSales : null,
+      discount_pct: byApp ? (v.discGross ? v.discountValue / v.discGross : (v.discountValue ? null : 0)) : (v.grossSales ? v.discountValue / v.grossSales : null),
+      discounted_gross: byApp ? v.discGross : undefined,
       orders: v.orders,
       pct_of_total_discounts: discountsTotal ? v.discountValue / discountsTotal : null,
+      pct_of_gross: grossSales ? v.discountValue / grossSales : null,
+      owned_discounts: byApp ? [...(ownedBy.get(tag) || [])].map((k) => k.replace(/^(title|code):/, '')).slice(0, 6) : undefined,
     }));
 
   const combined = tagMap.get('__FREE_SHIPPING_COMBINED__');
@@ -302,6 +446,7 @@ function aggregate(orders, { tagLabels = DEFAULT_TAG_LABELS } = {}) {
       discount_pct: combined.grossSales ? combined.discountValue / combined.grossSales : null,
       orders: combined.orders,
       pct_of_total_discounts: discountsTotal ? combined.discountValue / discountsTotal : null,
+      pct_of_gross: grossSales ? combined.discountValue / grossSales : null,
     });
   }
 
@@ -325,6 +470,7 @@ function aggregate(orders, { tagLabels = DEFAULT_TAG_LABELS } = {}) {
         orders: y.orders,
         ...(k.key === 'loyalty' ? { points: Math.round(y.value * 10) } : {}),
         pct_of_total_discounts: discountsTotal ? y.value / discountsTotal : null,
+        pct_of_gross: grossSales ? y.value / grossSales : null,
       });
     });
     discountGroups = DISCOUNT_GROUPS.map((g) => {
@@ -334,9 +480,13 @@ function aggregate(orders, { tagLabels = DEFAULT_TAG_LABELS } = {}) {
         label: g.label,
         gross_sales: v.grossSales,
         discount_value: v.value,
-        discount_pct: v.grossSales ? v.value / v.grossSales : null,
+        // Yotpo: codes spread over the whole order → ÷ the orders' gross. Other
+        // groups (by discount application): ÷ the items their programs discounted.
+        discount_pct: (byApp && g.key !== 'yotpo') ? (v.discGross ? v.value / v.discGross : (v.value ? null : 0)) : (v.grossSales ? v.value / v.grossSales : null),
+        discounted_gross: (byApp && g.key !== 'yotpo') ? v.discGross : undefined,
         orders: v.orders,
         pct_of_total_discounts: discountsTotal ? v.value / discountsTotal : null,
+        pct_of_gross: grossSales ? v.value / grossSales : null,
       };
     });
   }
@@ -361,7 +511,9 @@ function aggregate(orders, { tagLabels = DEFAULT_TAG_LABELS } = {}) {
     discount_groups: discountGroups,
     // 3: Yotpo Loyalty Points / Bday / Ref rows + discount_groups
     // (2026-10-26). The month cache re-pulls a stored closed month below 3.
-    discounts_version: sawDiscountApps ? 3 : 1,
+    // 4 (2026-10-28): program discounts by discount application (byApp).
+    discounts_version: sawDiscountApps ? (byApp ? 4 : 3) : 1,
+    discounts_by_app: byApp,
   };
 }
 
