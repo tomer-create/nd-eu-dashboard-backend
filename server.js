@@ -7,6 +7,7 @@ const { aggregate } = require('./src/aggregate');
 const { fetchChannelPerformance, fetchAttentiveSplit, attentiveRevenueKeys, ATTENTIVE_LABEL_KEYS } = require('./src/triplewhale');
 const { fetchTikTokShop, fetchGmvEstimate, fetchGifting } = require('./src/tiktokshop');
 const { getSellerCenter } = require('./src/windsor-tiktok');
+const tiktokApi = require('./src/tiktok-api');
 const { fetchPnlSheetChannels, fetchPnlSheetOtherCosts, fetchPnlSheetTotalCost, fetchPnlSheetMarketingSpend, fetchPnlSheetShopPpc, fetchPnlSheetRtbHouseSpend, fetchPnlSheetGoals } = require('./src/googlesheets');
 const { VALID_SITES: YOTPO_VALID_SITES, ensureYotpoSchema, recordYotpoEvent, getYotpoSummary, getYotpoCustomerTierMap, getPool: getYotpoPool } = require('./src/yotpo');
 const { registerYotpoWebhooksForSite, addYotpoTopicsForSite } = require('./src/yotpo-setup');
@@ -1319,6 +1320,52 @@ app.get('/api/tiktok-shop/seller-center', async (req, res) => {
 // GET /api/tiktok-shop/gifting?start=2026-10-01&end=2026-10-27 (ND.COM)
 // TikTok Gifting cost = product cost of the $0 TikTok-channel orders (creator
 // samples) — see fetchGifting in src/tiktokshop.js. Added 2026-10-26.
+// ---- TikTok Shop Open API (2026-10-28): Creator-attributed GMV ----------
+// See src/tiktok-api.js. Setup routes are behind ADMIN_SETUP_TOKEN; the
+// callback checks the one-time state it handed out. Tokens stay server-side.
+const adminOk = (req) => !!process.env.ADMIN_SETUP_TOKEN && req.query.token === process.env.ADMIN_SETUP_TOKEN;
+const escHtml = (v) => String(v === null || v === undefined ? '' : v).replace(/[&<>"]/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;' }[c]));
+app.get('/admin/tiktok/connect', (req, res) => {
+  if (!adminOk(req)) return res.status(403).send('Forbidden — add ?token=<ADMIN_SETUP_TOKEN>');
+  if (!tiktokApi.configured()) return res.status(503).send('Set TIKTOK_APP_KEY, TIKTOK_APP_SECRET and TIKTOK_SERVICE_ID in Render first.');
+  try { res.redirect(tiktokApi.authorizeUrl()); } catch (err) { res.status(500).send(escHtml(err.message)); }
+});
+app.get('/tiktok-shop/callback', async (req, res) => {
+  const { code, state } = req.query;
+  if (!code) return res.status(400).send('Missing code — start again at /admin/tiktok/connect.');
+  if (!tiktokApi.checkState(state)) return res.status(400).send('This authorization link has expired or wasn\'t started here — start again at /admin/tiktok/connect.');
+  try {
+    const a = await tiktokApi.exchangeCode(String(code));
+    res.send(`<!doctype html><html><body style="font-family:sans-serif;max-width:640px;margin:60px auto;line-height:1.5">
+      <h2>TikTok Shop connected</h2>
+      <p>Seller: <b>${escHtml(a && a.seller_name)}</b> · shop: <b>${escHtml(a && a.shop_name)}</b> (${escHtml(a && a.shop_region)})</p>
+      <p>Scopes: ${escHtml((a && a.granted_scopes || []).join(', '))}</p>
+      <p>The dashboard now takes TikTok Affiliates revenue from TikTok's Affiliate Center data. You can close this tab.</p>
+    </body></html>`);
+  } catch (err) {
+    console.error('tiktok callback failed:', err.message);
+    res.status(500).send(escHtml(err.message));
+  }
+});
+// GET /admin/tiktok/status?token=…[&start=2026-10-01&end=2026-10-26]
+app.get('/admin/tiktok/status', async (req, res) => {
+  if (!adminOk(req)) return res.status(403).json({ error: 'Forbidden' });
+  const out = { status: await tiktokApi.status() };
+  if (req.query.start && req.query.end) {
+    out.creator_gmv = await tiktokApi.getCreatorGmv(String(req.query.start), String(req.query.end)).catch((err) => ({ error: err.message }));
+  }
+  res.json(out);
+});
+// GET /api/tiktok-shop/creator-gmv?start=2026-10-01&end=2026-10-29 (Pacific days, end exclusive)
+app.get('/api/tiktok-shop/creator-gmv', async (req, res) => {
+  try {
+    res.json(await tiktokApi.getCreatorGmv(String(req.query.start || ''), String(req.query.end || '')));
+  } catch (err) {
+    if (!err.status || err.status >= 500) console.error('creator-gmv failed:', err.message);
+    res.status(err.status || 502).json({ error: err.message });
+  }
+});
+
 app.get('/api/tiktok-shop/gifting', async (req, res) => {
   try {
     const start = String(req.query.start || ''), end = String(req.query.end || '');
@@ -1681,4 +1728,36 @@ app.listen(PORT, () => {
   // Pre-compute Net Sales by Yotpo tier for this year's closed months (see
   // src/yotpo-tier-revenue.js). Delayed so it doesn't compete with startup.
   setTimeout(() => prewarmYotpoTierRevenue(YOTPO_VALID_SITES), 60000);
+  // Every closed month of this year on the current Discounts Breakdown method
+  // (2026-10-28, Tomer: "make all months use the new calculation"): stored
+  // months below discounts_version 4 are re-pulled one at a time, and months
+  // never stored are pulled once — so nothing waits for someone to open it.
+  setTimeout(() => upgradeClosedMonths().catch((err) => console.error('month upgrade sweep failed:', err.message)), 120000);
 });
+
+async function upgradeClosedMonths() {
+  const now = new Date();
+  const year = now.getUTCFullYear();
+  const months = [];
+  for (let m = 0; m < now.getUTCMonth(); m++) {
+    const start = new Date(Date.UTC(year, m, 1)).toISOString().slice(0, 10);
+    const end = new Date(Date.UTC(year, m + 1, 1)).toISOString().slice(0, 10);
+    months.push([start, end]);
+  }
+  let pulled = 0;
+  // Newest months first: those are the ones people look at.
+  for (const [start, end] of months.reverse()) {
+    for (const site of VALID_SITES) {
+      try {
+        const { cache } = await getWithMonthCache(
+          { site, start, end, compare: ['yoy', 'mom'], refresh: false },
+          () => buildDataResponse({ site, start, end, compare: ['yoy', 'mom'] })
+        );
+        if (cache === 'miss') pulled++;
+      } catch (err) {
+        console.error(`month upgrade sweep (site=${site} ${start}): ${err.message}`);
+      }
+    }
+  }
+  console.log(`month upgrade sweep: checked ${months.length * VALID_SITES.length} site-months, pulled ${pulled} new; outdated ones are being re-pulled in the background`);
+}
