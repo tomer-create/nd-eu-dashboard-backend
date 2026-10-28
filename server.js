@@ -1366,6 +1366,16 @@ app.get('/api/tiktok-shop/creator-gmv', async (req, res) => {
   }
 });
 
+// GET /api/tiktok-shop/creator-gmv/diag?start=2026-10-21&end=2026-10-28 — flat
+// SKU rows (numbers / enums only) for matching TikTok's Affiliate Center figure.
+app.get('/api/tiktok-shop/creator-gmv/diag', async (req, res) => {
+  try {
+    res.json(await tiktokApi.diagRows(String(req.query.start || ''), String(req.query.end || '')));
+  } catch (err) {
+    res.status(err.status || 502).json({ error: err.message });
+  }
+});
+
 app.get('/api/tiktok-shop/gifting', async (req, res) => {
   try {
     const start = String(req.query.start || ''), end = String(req.query.end || '');
