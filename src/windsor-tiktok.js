@@ -72,7 +72,9 @@ const STABLE_AFTER_DAYS = 45;
 // (the real days TikTok's analytics have a figure for) and Shop Performance
 // days kept in windsor_tiktok_perf_days so a later partial answer from
 // Windsor never loses a day (see mergeStoredDays).
-const PAYLOAD_VERSION = 11;
+// v12 (2026-10-28): GMV / orders pulled with no other fields (see
+// PERF_CORE_FIELDS) — v11 copies made that day have days missing.
+const PAYLOAD_VERSION = 12;
 const COMPAT_MIN_VERSION = 8;
 
 // Core Shop Performance fields — the ones the dashboard's numbers come from.
@@ -80,13 +82,21 @@ const COMPAT_MIN_VERSION = 8;
 // the traffic breakdowns below drops whole days — for Oct 1–14 it returned 8
 // of 13 days ($97.5K GMV) with the breakdowns vs all 13 days ($170.6K)
 // without them.
+// 2026-10-28 (live check after tt75): even these 12 fields made Windsor drop
+// days — Oct 1–28 came back with 18 daily rows, while date + GMV + orders
+// alone came back with all 26 TikTok had. So the dashboard's figures (GMV,
+// orders) are pulled on their own, and the other Shop Performance fields
+// (not shown on the dashboard) in a separate, best-effort query.
 const PERF_CORE_FIELDS = [
   'date',
   'shop_performance_gmv_amount',
+  'shop_performance_orders',
+];
+const PERF_DETAIL_FIELDS = [
+  'date',
   'shop_performance_gmv_breakdowns_live_amount',
   'shop_performance_gmv_breakdowns_video_amount',
   'shop_performance_gmv_breakdowns_product_card_amount',
-  'shop_performance_orders',
   'shop_performance_units_sold',
   'shop_performance_buyers',
   'shop_performance_product_impressions',
@@ -387,15 +397,22 @@ function sumRows(rows, field) { return rows.reduce((a, r) => a + num(r[field]), 
 // Any other error is returned as perfError — affiliate GMV and samples are
 // pulled separately and still load.
 const START_OF_OPS_RE = /start of operations/i;
-async function pullShopPerformance(start, dateTo) {
+async function pullShopPerformance(start, dateTo, coreTo) {
   const tryFrom = async (from) => {
-    const [perf, traffic, fees, statements] = await Promise.all([
-      windsorQuery(PERF_CORE_FIELDS, from, dateTo),
+    const [perf, detail, traffic, fees, statements] = await Promise.all([
+      // 2026-10-28: asked through `end` (one more day): Windsor's date filter
+      // turned out to apply to the row LABEL (Oct 1–28 returned labels Oct
+      // 1–28 = real Sep 30–Oct 27; label Oct 1 = 266 orders / $15.8K ≈ Triple
+      // Whale's Sep 30, 263 / $15.6K). Rows are kept by real day (label − 1)
+      // in mergeStoredDays, so the extra day is either the period's last real
+      // day or dropped — right whichever way Windsor filters.
+      windsorQuery(PERF_CORE_FIELDS, from, coreTo || dateTo),
+      windsorQuery(PERF_DETAIL_FIELDS, from, dateTo).catch((err) => { console.error('windsor-tiktok: shop performance details failed:', err.message); return []; }),
       windsorQuery(PERF_FIELDS, from, dateTo).catch((err) => { console.error('windsor-tiktok: traffic breakdowns failed:', err.message); return []; }),
       windsorQuery(['date', ...Object.keys(FEE_FIELDS)], from, dateTo),
       windsorQuery(STATEMENT_FIELDS, from, dateTo),
     ]);
-    return { perf, traffic, fees, statements, perfFrom: from, perfError: null };
+    return { perf, detail, traffic, fees, statements, perfFrom: from, perfError: null };
   };
   let from = start;
   for (let i = 0; i < 13; i++) {
@@ -500,7 +517,7 @@ async function pullSellerCenter(start, end) {
   const dateTo = addDays(end, -1);
   const soft = (p, what) => p.catch((err) => { console.error(`windsor-tiktok: ${what} failed:`, err.message); return { error: err.message }; });
   const [sc, affiliate, samples] = await Promise.all([
-    pullShopPerformance(start, dateTo),
+    pullShopPerformance(start, dateTo, end),
     soft(pullAffiliateGmv(start, end), 'affiliate GMV'),
     soft(pullSampleShipping(start, end), 'sample shipping'),
   ]);
@@ -523,11 +540,14 @@ async function pullSellerCenter(start, end) {
   const samplesOut = (!perf.length && perfError && samples && !samples.error && samples.samples_shipped === 0)
     ? { error: 'No TikTok sample data for this period' } : samples;
   const s = (f) => sumRows(perf, 'shop_performance_' + f);
+  // Details (not on the dashboard) from their own query — may miss days.
+  const detail = sc.detail || [];
+  const dsum = (f) => sumRows(detail, 'shop_performance_' + f);
   const days = perf.length;
   const byType = (base) => ({
-    live: s(base + '_live_amount'),
-    video: s(base + '_video_amount'),
-    product_card: s(base + '_product_card_amount'),
+    live: dsum(base + '_live_amount'),
+    video: dsum(base + '_video_amount'),
+    product_card: dsum(base + '_product_card_amount'),
   });
   const t = (f) => sumRows(traffic, 'shop_performance_' + f);
   const visitorDays = t('avg_product_page_visitors');
@@ -558,17 +578,18 @@ async function pullSellerCenter(start, end) {
     gmv: s('gmv_amount'),
     gmv_by_type: byType('gmv_breakdowns'),
     orders: s('orders'),
-    units: s('units_sold'),
+    units: dsum('units_sold'),
     sku_orders: t('sku_orders'),
-    buyers: s('buyers'),
+    buyers: dsum('buyers'),
     buyers_by_type: tByType('buyer_breakdowns'),
-    impressions: s('product_impressions'),
+    impressions: dsum('product_impressions'),
     impressions_by_type: tByType('product_impression_breakdowns'),
-    page_views: s('product_page_views'),
+    page_views: dsum('product_page_views'),
     page_views_by_type: tByType('product_page_view_breakdowns'),
     avg_daily_visitors: traffic.length ? visitorDays / traffic.length : null,
-    refunds: s('refunds_amount'),
-    cancellations_and_returns: s('cancellations_and_returns'),
+    refunds: dsum('refunds_amount'),
+    cancellations_and_returns: dsum('cancellations_and_returns'),
+    detail_days: detail.length,
     fees: {
       basis: 'statement_date',
       lines: feeLines,
