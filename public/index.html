@@ -27,6 +27,16 @@
      ever becomes available, swap the header one (the favicon can reasonably
      stay simplified/iconic even then). -->
 <link rel="icon" type="image/png" href="data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAACAAAAAgCAIAAAD8GO2jAAAEIElEQVR4nN1WPUwjRxR+Mx4vBzG7ARMrkiHIPgkhCij4OYogGZkIQkFDgQgFuYafBgq7RJZMg4yQ4i5BgoIUVIjGRqILRSRKG5CIBCLiJ+JP4GAOgvHuzEsxx7IcxuQkaPJV9pt573v/swQR4TVBX9X6/4KAWf8gohDiIzOlhBDzSAiBiIQQSqn8bdUCAHlkVZEgL1tkzrnNZssRgRCCUrq+vj4xMaEoiqqqU1NTiqJIByml09PTKysr9fX1wWAwEokkk8mioiLpr6IoLpertrbW7/drmiZN3TMgIiIahoGIsVhMJgcAotGolMujnp4eAPD7/YjY0tKS032PxzM3N2dak3hQA0VRGGPFxcU3NzeRSKS3t7esrExG7XA4GGOqqgKApmmMMbfbHQgEFEW5vr5OJpOxWGx3d7e/vz+TyQwMDNznyhrB8vIyALjd7srKSgAYHR1FxNvbW0R8//49AHR1dSFiZ2cnAFRXV6MFq6ur5eXliqJomra3t4eInHNEzNGmDodjaGiIMTY7O7uxsWG323MmRAhxeXlpGIau69lstrm5ORwO67qeTqcXFhbkBcg5BycnJ319fX6//+rqKhQKPe68+w6xQAjR3t7udDoJIYlEAgCkYg4CwzAKCgrGx8ftdns8Ho/H41L4FA3cDYGqqpqmIWI6nc5HwBi7uLhoamrq7u42DCMUCklhHgIJmSsAMPs7N4EEIobD4ZKSkkQiMT8/73K5TKceg3MuhNjZ2Tk9PQUAr9f7DIHNZiOEVFVVDQ8PA8Dk5OTh4aGpkzNoSmk0GjUMgxDS0dEBeVJkQggRCAQqKio2NzdlB3POrRfMiT0+Pg4Gg4uLi5zztrY2n88nhJBz8CCzslamGue8tLR0bGxscHBQLgB5JK+lUimfzyd33/7+/tHREQDU1NTMzMwQYllx1kFbWloCAEVRtre3pZBzns1mGxoa5GW5KlpbW2UarSn1eDwjIyNnZ2dyJZsD+JFKruJUKpVMJhljjY2NhYWFpvzg4GBra4sQ4nQ66+rq1tbWzs/PGWNmzR0Oh9fr1TQN7vbmfVZecF1zzh8/CQ8IzAfnk51uvjCfPDgEQCqTOzxm/YwIEO/MAUhTiPD0Hvl8AiuOL/ShuYOsjoqd/PLjN19r7CmyZxYAFwgACMAoufiHn18ZAsGlsoyOGwc3gIRQvL4V8k7OYJ4hsNF7rZ+WT3/9PSUQhvxlgz7nGzslAJQSmjdL+QgyOv72x4esgTYK39eqCEAooQicI8rCAhCS2/FnCAQCJfBXKvvDz7sGRyDkz6kaLuD8ygCAG10gwt/XBgGgFHjeIuYmkE59WWQb+e4r2TyFCnn3tiijOwHg3dsv3ii0/9tSAKAE1EIKTxQAXvy76DH+UxcBgI0SgZaPOPLgKI+FV4/gXws7WIcBot2fAAAAAElFTkSuQmCC">
+<!-- Installable web app (2026-10-28, Tomer: "an option to install this app on
+     computer / mobile as a web app"): manifest + icons + service worker
+     (public/manifest.webmanifest, public/icons/, public/sw.js). -->
+<link rel="manifest" href="/manifest.webmanifest">
+<meta name="theme-color" content="#f9f9f7">
+<meta name="mobile-web-app-capable" content="yes">
+<meta name="apple-mobile-web-app-capable" content="yes">
+<meta name="apple-mobile-web-app-title" content="ND Lytics">
+<meta name="apple-mobile-web-app-status-bar-style" content="default">
+<link rel="apple-touch-icon" href="/icons/apple-touch-icon.png">
 <style>
   :root {
     color-scheme: light;
@@ -325,6 +335,15 @@
     background:var(--surface-1); color:var(--text-primary); border-radius:8px; padding:8px 13px;
     font-size:12.5px; font-weight:650; font-family:inherit; cursor:pointer; white-space:nowrap; }
   .mobile-toggle-btn:hover { background:var(--track); }
+  .install-app-btn { border-color: var(--series-1, #2a78d6); color: var(--series-1, #2a78d6); }
+  .install-app-btn[hidden] { display: none; }
+  .install-hint { position: fixed; z-index: 50; left: 50%; bottom: 20px; transform: translateX(-50%); width: min(420px, calc(100vw - 32px));
+    background: var(--surface-1); color: var(--text-primary); border: 1px solid var(--border); border-radius: 12px;
+    box-shadow: 0 10px 30px rgba(0,0,0,.18); padding: 14px 16px; font-size: 13.5px; line-height: 1.5; }
+  .install-hint[hidden] { display: none; }
+  .install-hint strong { display: block; margin-bottom: 4px; font-size: 14px; }
+  .install-hint ol { margin: 6px 0 0; padding-left: 20px; }
+  .install-hint button { float: right; border: none; background: none; font-size: 18px; line-height: 1; cursor: pointer; color: var(--text-secondary); padding: 0 0 0 8px; }
   /* Wraps today-date + the mobile toggle button so they stay one flex item
      -- on desktop this changes nothing visually (still one row, same gap
      via control-bar-top's own gap previously); on mobile it's what lets
@@ -350,7 +369,7 @@
   body.mobile-mode .brand { justify-content: center; }
   body.mobile-mode .brand-logo { height: 28px; }
   body.mobile-mode .brand h1 { font-size: 16px; }
-  body.mobile-mode .date-toggle-row { width: 100%; justify-content: center; }
+  body.mobile-mode .date-toggle-row { width: 100%; justify-content: center; flex-wrap: wrap; row-gap: 8px; }
   body.mobile-mode .controls { flex-direction: column; align-items: stretch; gap: 8px; }
   body.mobile-mode .site-tabs { display: none; }
   body.mobile-mode select.site-picker-mobile { display: block; width: 100%; border: 1px solid var(--border);
@@ -358,7 +377,7 @@
     font-size: 14px; font-weight: 650; font-family: inherit; }
   body.mobile-mode select.month-picker { width: 100%; padding: 11px 12px; font-size: 14px; }
   body.mobile-mode .sync-btn { width: 100%; justify-content: center; padding: 12px 13px; font-size: 13.5px; }
-  body.mobile-mode .sync-status { text-align: center; }
+  body.mobile-mode .sync-status { text-align: center; white-space: normal; overflow-wrap: anywhere; }
 
   /* sticky numbered jump-to-section bar — tap a number, smooth-scroll there.
      A centered "Jump to Section" title sits above the (also centered) pill
@@ -414,6 +433,11 @@
 </style>
 </head>
 <body>
+<div class="install-hint" id="install-hint" role="dialog" aria-labelledby="install-hint-title" hidden>
+  <button type="button" id="install-hint-close" aria-label="Close">×</button>
+  <strong id="install-hint-title">Install ND Lytics</strong>
+  <div id="install-hint-body"></div>
+</div>
 <div class="viz-root">
 <div class="wrap">
 
@@ -429,6 +453,7 @@
     <div class="date-toggle-row">
       <span class="today-date" id="today-date"></span>
       <button class="mobile-toggle-btn" id="mobile-toggle-btn" type="button">📱 Mobile View</button>
+      <button class="mobile-toggle-btn install-app-btn" id="install-app-btn" type="button" hidden>⬇ Install app</button>
     </div>
    </div>
    <div class="controls">
@@ -5448,8 +5473,50 @@ document.getElementById('mobile-toggle-btn').addEventListener('click', () => {
   setMobileMode(!document.body.classList.contains('mobile-mode'));
 });
 let initialMobileMode = false;
-try { initialMobileMode = localStorage.getItem(MOBILE_MODE_KEY) === '1'; } catch (e) { /* private browsing etc. — defaults to desktop view */ }
+try {
+  const saved = localStorage.getItem(MOBILE_MODE_KEY);
+  // 2026-10-28: with no saved choice, a phone-sized screen (e.g. the
+  // installed app on a phone) opens in Mobile View.
+  initialMobileMode = saved === null ? window.matchMedia('(max-width: 760px)').matches : saved === '1';
+} catch (e) { /* private browsing etc. — defaults to desktop view */ }
 setMobileMode(initialMobileMode);
+
+/* ---------------- Install as an app (2026-10-28) ----------------
+   Chrome / Edge (computer and Android) offer their own install prompt: the
+   "Install app" button shows once the browser says the page can be
+   installed, and opens that prompt. Safari has no prompt, so the button
+   shows short "Add to Home Screen / Add to Dock" steps instead. Hidden when
+   the dashboard is already running as the installed app. */
+(function setupInstall() {
+  const btn = document.getElementById('install-app-btn');
+  const hint = document.getElementById('install-hint');
+  const hintBody = document.getElementById('install-hint-body');
+  const standalone = window.matchMedia('(display-mode: standalone)').matches || window.navigator.standalone === true;
+  if ('serviceWorker' in navigator) {
+    window.addEventListener('load', () => { navigator.serviceWorker.register('/sw.js').catch(err => console.warn('service worker not registered:', err)); });
+  }
+  if (standalone) return;
+  const ua = navigator.userAgent;
+  const isIOS = /iPad|iPhone|iPod/.test(ua) || (navigator.platform === 'MacIntel' && navigator.maxTouchPoints > 1);
+  const isSafari = /Safari/.test(ua) && !/Chrome|CriOS|Chromium|Edg|FxiOS|Firefox/.test(ua);
+  let deferred = null;
+  const showHint = (html) => { hintBody.innerHTML = html; hint.hidden = false; };
+  document.getElementById('install-hint-close').addEventListener('click', () => { hint.hidden = true; });
+  window.addEventListener('beforeinstallprompt', (e) => { e.preventDefault(); deferred = e; btn.hidden = false; });
+  window.addEventListener('appinstalled', () => { deferred = null; btn.hidden = true; hint.hidden = true; });
+  if (isIOS || isSafari) btn.hidden = false;
+  btn.addEventListener('click', async () => {
+    if (deferred) {
+      deferred.prompt();
+      try { await deferred.userChoice; } catch (e) { /* dismissed */ }
+      deferred = null; btn.hidden = true;
+      return;
+    }
+    if (isIOS) showHint('On iPhone / iPad (Safari):<ol><li>Tap the Share button <span aria-hidden="true">⎙</span> at the bottom (or top) of Safari.</li><li>Choose <b>Add to Home Screen</b>, then <b>Add</b>.</li></ol>The dashboard then opens full-screen from its own icon.');
+    else if (isSafari) showHint('On Mac (Safari): open the <b>File</b> menu (or the Share button) and choose <b>Add to Dock</b>. The dashboard then opens in its own window from the Dock.');
+    else showHint('Open your browser’s menu (⋮) and choose <b>Install ND Lytics</b> or <b>Add to Home screen</b>.');
+  });
+})();
 
 renderSiteTabs();
 renderMonthPicker();
