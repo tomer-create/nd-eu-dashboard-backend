@@ -1264,6 +1264,27 @@ app.get('/api/us-states', async (req, res) => {
 // purpose: a Windsor pull takes 1–3 minutes, so the dashboard loads this in
 // the background after the section renders instead of making Sync wait.
 // start/end are YYYY-MM-DD, end exclusive. refresh=1 skips the cache.
+// Days in [from, end) — up to today in New York, the shop's day — with no
+// TikTok analytics figure, grouped into runs and estimated from TikTok's order
+// data (fetchGmvEstimate).
+const NY_DAY = new Intl.DateTimeFormat('en-CA', { timeZone: 'America/New_York', year: 'numeric', month: '2-digit', day: '2-digit' });
+async function gmvFill(perfDays, from, end) {
+  const plus = (iso, n) => new Date(Date.parse(iso + 'T00:00:00Z') + n * 86400000).toISOString().slice(0, 10);
+  const tomorrow = plus(NY_DAY.format(new Date()), 1);
+  const last = end < tomorrow ? end : tomorrow;
+  const have = new Set(perfDays);
+  const runs = [];
+  for (let d = from; d < last; d = plus(d, 1)) {
+    if (have.has(d)) continue;
+    const r = runs[runs.length - 1];
+    if (r && r.end === d) r.end = plus(d, 1); else runs.push({ start: d, end: plus(d, 1) });
+  }
+  if (runs.length > 12) throw new Error(`${runs.length} separate gaps in TikTok's analytics — not filled`);
+  const est = await Promise.all(runs.map((r) => fetchGmvEstimate('com', r.start, r.end)));
+  if (est.some((e) => !e)) throw new Error('Triple Whale isn\'t configured');
+  const days = runs.reduce((a, r) => a + Math.round((Date.parse(r.end) - Date.parse(r.start)) / 86400000), 0);
+  return { gmv: est.reduce((a, e) => a + e.gmv, 0), orders: est.reduce((a, e) => a + e.orders, 0), days, runs: est };
+}
 app.get('/api/tiktok-shop/seller-center', async (req, res) => {
   try {
     const { start, end } = req.query;
@@ -1273,13 +1294,22 @@ app.get('/api/tiktok-shop/seller-center', async (req, res) => {
     // last day TikTok has (perf_through) are filled from TikTok's order data
     // in Triple Whale on the same GMV formula. Computed on every request (not
     // cached) so today's orders keep coming in.
-    let gap = null;
+    let gap = null, fill = null;
     const p = out.payload || {};
-    const gapStart = p.perf_through ? new Date(Date.parse(p.perf_through + 'T00:00:00Z') + 86400000).toISOString().slice(0, 10) : null;
-    if (gapStart && !p.perf_error && gapStart < String(end)) {
-      gap = await fetchGmvEstimate('com', gapStart, String(end)).catch((err) => { console.error('seller-center gap fill failed:', err.message); return null; });
+    if (Array.isArray(p.perf_days) && p.perf_from && !p.perf_error) {
+      // 2026-10-28 (Tomer: "the GMV isn't up to date"): every day TikTok's
+      // analytics have no figure for — the latest days, and any day Windsor
+      // never returned (Oct 10 2026) — is filled from TikTok's order data in
+      // Triple Whale on the same GMV formula, run by run.
+      fill = await gmvFill(p.perf_days, p.perf_from, String(end)).catch((err) => { console.error('seller-center fill failed:', err.message); return { error: err.message }; });
+    } else {
+      // Older cached copies (no perf_days): fill only the days after the last one.
+      const gapStart = p.perf_through ? new Date(Date.parse(p.perf_through + 'T00:00:00Z') + 86400000).toISOString().slice(0, 10) : null;
+      if (gapStart && !p.perf_error && gapStart < String(end)) {
+        gap = await fetchGmvEstimate('com', gapStart, String(end)).catch((err) => { console.error('seller-center gap fill failed:', err.message); return null; });
+      }
     }
-    res.json({ ...p, gap, cache: out.cache });
+    res.json({ ...p, gap, fill, cache: out.cache });
   } catch (err) {
     console.error('seller-center failed:', err.message);
     res.status(err.status || 502).json({ error: err.message });
