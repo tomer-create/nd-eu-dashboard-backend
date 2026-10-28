@@ -67,7 +67,12 @@ const STABLE_AFTER_DAYS = 45;
 // COMPAT_MIN_VERSION in getSellerCenter.
 // v10 (2026-10-21): sample creators include samples awaiting shipment (see
 // pullSampleShipping); v8/v9 copies are served while they're re-pulled.
-const PAYLOAD_VERSION = 10;
+// v11 (2026-10-28): affiliate.creator_gmv (TikTok Affiliate Center's
+// "Creator-attributed GMV" definition, see pullAffiliateGmv), perf_days
+// (the real days TikTok's analytics have a figure for) and Shop Performance
+// days kept in windsor_tiktok_perf_days so a later partial answer from
+// Windsor never loses a day (see mergeStoredDays).
+const PAYLOAD_VERSION = 11;
 const COMPAT_MIN_VERSION = 8;
 
 // Core Shop Performance fields — the ones the dashboard's numbers come from.
@@ -218,6 +223,7 @@ const SETTLED_FIELDS = [
   'statement_transaction_order_create_datetime',
   'statement_transaction_type',
   'statement_transaction_revenue_subtotal_before_discount_amount',
+  'statement_transaction_revenue_seller_discount_amount',
   'statement_transaction_fee_affiliate_commission_amount',
   'statement_transaction_fee_affiliate_partner_commission_amount',
   'statement_transaction_fee_affiliate_ads_commission_amount',
@@ -228,6 +234,7 @@ const UNSETTLED_FIELDS = [
   'unsettled_transaction_order_create_datetime',
   'unsettled_transaction_type',
   'unsettled_transaction_revenue_subtotal_before_discount_amount',
+  'unsettled_transaction_revenue_seller_discount_amount',
   'unsettled_transaction_fee_affiliate_commission_amount',
   'unsettled_transaction_fee_affiliate_partner_commission_amount',
   'unsettled_transaction_fee_affiliate_ads_commission_amount',
@@ -239,6 +246,14 @@ function orderDay(dt) {
   if (!dt) return null;
   const d = new Date(dt);
   return isNaN(d) ? null : tzDay.format(d); // YYYY-MM-DD
+}
+// TikTok's Affiliate Center reports in Pacific time (GMT-8 / -7).
+const CREATOR_TZ = 'America/Los_Angeles';
+const tzDayPT = new Intl.DateTimeFormat('en-CA', { timeZone: CREATOR_TZ, year: 'numeric', month: '2-digit', day: '2-digit' });
+function orderDayPT(dt) {
+  if (!dt) return null;
+  const d = new Date(dt);
+  return isNaN(d) ? null : tzDayPT.format(d);
 }
 const truthy = (v) => v === true || v === 'True' || v === 'true' || v === 1 || v === '1';
 
@@ -266,16 +281,24 @@ async function pullAffiliateGmv(start, end) {
     return rows.filter((r) => { const id = r[idField]; if (!id) return true; const k = String(id); if (seen.has(k)) return false; seen.add(k); return true; });
   };
   const settled = dedupe(settledParts, 'statement_transaction_id');
-  const orders = new Map(); // order id -> { gross, aff, affAds, settled }
+  // Each order is kept when its New York day (the dashboard's day, used for
+  // everything below except creator_gmv) or its Pacific day (TikTok Affiliate
+  // Center's day, used for creator_gmv) falls in the period.
+  const orders = new Map(); // order id -> { gross, net, aff, affAds, settled, ny, pt }
+  const inRange = (d) => d && d >= start && d < end;
   const add = (prefix, rows, isSettled) => {
     rows.forEach((r) => {
       if (String(r[prefix + 'type'] || 'ORDER') !== 'ORDER') return;
       const id = String(r[prefix + 'order_id'] || '');
-      const day = orderDay(r[prefix + 'order_create_datetime']);
-      if (!id || !day || day < start || day >= end) return;
+      const created = r[prefix + 'order_create_datetime'];
+      const ny = inRange(orderDay(created)), pt = inRange(orderDayPT(created));
+      if (!id || (!ny && !pt)) return;
       if (!isSettled && orders.has(id) && orders.get(id).settled) return; // settled copy wins
-      const cur = (orders.get(id) && orders.get(id).settled === isSettled) ? orders.get(id) : { gross: 0, aff: 0, affAds: 0, settled: isSettled };
-      cur.gross += num(r[prefix + 'revenue_subtotal_before_discount_amount']);
+      const cur = (orders.get(id) && orders.get(id).settled === isSettled) ? orders.get(id) : { gross: 0, net: 0, aff: 0, affAds: 0, settled: isSettled, ny, pt };
+      const gross = num(r[prefix + 'revenue_subtotal_before_discount_amount']);
+      cur.gross += gross;
+      // Seller discount comes back negative; the sign is normalised.
+      cur.net += gross - Math.abs(num(r[prefix + 'revenue_seller_discount_amount']));
       cur.aff += Math.abs(num(r[prefix + 'fee_affiliate_commission_amount'])) + Math.abs(num(r[prefix + 'fee_affiliate_partner_commission_amount']));
       cur.affAds += Math.abs(num(r[prefix + 'fee_affiliate_ads_commission_amount']));
       orders.set(id, cur);
@@ -288,8 +311,20 @@ async function pullAffiliateGmv(start, end) {
   // i.e. ads run on the creator's content. TikTok counts these in its Ads
   // conversion value too, so the dashboard takes them out of TTS Ads to stop
   // them being subtracted twice in Organic GMV.
-  let gmv = 0, n = 0, adsOnly = 0, adsOnlyN = 0, total = 0, settledN = 0, both = 0, bothN = 0, commission = 0, adsCommission = 0;
+  let gmv = 0, n = 0, adsOnly = 0, adsOnlyN = 0, total = 0, settledN = 0, both = 0, bothN = 0, commission = 0, adsCommission = 0, seen = 0;
+  // Creator-attributed GMV (2026-10-28, Tomer: Affiliates Revenue must equal
+  // TikTok Affiliate Center → Performance → "Creator-attributed GMV"):
+  // product price before discounts − seller discount, for every order that
+  // paid an affiliate or affiliate-partner commission, by the order's
+  // Pacific-time day. Checked 28 Oct for Oct 1–25: TikTok $192,620.68 vs
+  // $198,528 here (+3.1%) — TikTok counts only the items a creator sold, so
+  // an order mixing a creator's item with other items counts in full here.
+  // No scaling, no overlap subtraction: the dashboard shows it as is.
+  let cGmv = 0, cN = 0, cAds = 0, cAdsN = 0;
   orders.forEach((o) => {
+    if (o.pt && o.aff > 0) { cGmv += o.net; cN++; if (o.affAds > 0) { cAds += o.net; cAdsN++; } }
+    if (!o.ny) return;
+    seen++;
     total += o.gross;
     commission += o.aff; adsCommission += o.affAds;
     if (o.settled) settledN++;
@@ -299,10 +334,13 @@ async function pullAffiliateGmv(start, end) {
     gmv, orders: n,
     affiliate_ads_only_gmv: adsOnly, affiliate_ads_only_orders: adsOnlyN,
     affiliate_with_ads_gmv: both, affiliate_with_ads_orders: bothN,
-    orders_seen: orders.size, orders_settled: settledN, gross_seen: total,
+    orders_seen: seen, orders_settled: settledN, gross_seen: total,
     // Affiliate + partner commission / affiliate ads commission on these
     // orders (by order date, settled or estimated) — added 2026-10-20.
     commission, ads_commission: adsCommission,
+    creator_gmv: cGmv, creator_orders: cN,
+    creator_with_ads_gmv: cAds, creator_with_ads_orders: cAdsN,
+    creator_tz: CREATOR_TZ,
   };
 }
 
@@ -404,6 +442,59 @@ function perfThrough(rows, end) {
   return real < cap ? real : cap;
 }
 
+// ---- Shop Performance days kept per day (2026-10-28) ----------------------
+// Tomer: "TikTok Shop GMV isn't up to date". Each dashboard day has its own
+// month-to-date cache key, and Windsor's first answer for it was often
+// partial (28 Oct: 18 of 27 days), and one day (Oct 10) never came back at
+// all. Every day Windsor does return is now saved by its real day
+// (label − 1, see the note at the top) and merged into later pulls, so a
+// partial answer no longer drops days that were seen before. Days Windsor
+// never returns are filled from TikTok's order data by the endpoint
+// (server.js, /api/tiktok-shop/seller-center → fill).
+const realDayOf = (r) => (r && r.date ? addDays(String(r.date).slice(0, 10), -1) : null);
+const memDays = new Map(); // fallback when there's no database
+async function storeDays(rows) {
+  const items = rows.map((r) => ({ day: realDayOf(r), row: r })).filter((x) => x.day && num(x.row.shop_performance_gmv_amount) > 0);
+  if (!items.length) return;
+  items.forEach((x) => memDays.set(x.day, x.row));
+  const p = getPool();
+  if (!p || !(await ensureSchema())) return;
+  await p.query(
+    `INSERT INTO windsor_tiktok_perf_days (day, row, fetched_at)
+     SELECT (x->>'day')::date, x->'row', now() FROM jsonb_array_elements($1::jsonb) AS x
+     ON CONFLICT (day) DO UPDATE SET row = EXCLUDED.row, fetched_at = now()`,
+    [JSON.stringify(items)]
+  );
+}
+async function readDays(from, to) {
+  const out = new Map();
+  memDays.forEach((row, day) => { if (day >= from && day < to) out.set(day, row); });
+  const p = getPool();
+  if (p && (await ensureSchema())) {
+    const { rows } = await p.query(
+      `SELECT to_char(day, 'YYYY-MM-DD') AS day, row FROM windsor_tiktok_perf_days WHERE day >= $1 AND day < $2`, [from, to]);
+    rows.forEach((r) => out.set(r.day, r.row));
+  }
+  return out;
+}
+// Fresh rows win; stored days fill the days this answer is missing. Returns
+// the rows re-labelled the Windsor way (real day + 1) so perfThrough works
+// unchanged, plus the real days covered.
+async function mergeStoredDays(perf, start, end) {
+  const fresh = new Map();
+  perf.forEach((r) => { const d = realDayOf(r); if (d && d >= start && d < end && num(r.shop_performance_gmv_amount) > 0) fresh.set(d, r); });
+  await storeDays([...fresh.values()]).catch((err) => console.error('windsor-tiktok: storing days failed:', err.message));
+  const stored = await readDays(start, end).catch((err) => { console.error('windsor-tiktok: reading days failed:', err.message); return new Map(); });
+  const merged = new Map(stored);
+  fresh.forEach((r, d) => merged.set(d, r));
+  const days = [...merged.keys()].sort();
+  return {
+    rows: days.map((d) => ({ ...merged.get(d), date: addDays(d, 1) })),
+    days,
+    fromStore: days.filter((d) => !fresh.has(d)).length,
+  };
+}
+
 // [start, end) — end exclusive like everywhere else in this app.
 async function pullSellerCenter(start, end) {
   const dateTo = addDays(end, -1);
@@ -413,7 +504,19 @@ async function pullSellerCenter(start, end) {
     soft(pullAffiliateGmv(start, end), 'affiliate GMV'),
     soft(pullSampleShipping(start, end), 'sample shipping'),
   ]);
-  const { perf, fees, statements, perfFrom, perfError } = sc;
+  const { fees, statements } = sc;
+  let { perfFrom, perfError } = sc;
+  // Saved days only cover days at/after the shop's start of operations, so
+  // they're merged from perfFrom (or the period start when Windsor failed
+  // outright — then the saved days stand in for the answer).
+  const startOfOpsMiss = !!perfError && START_OF_OPS_RE.test(perfError);
+  const mergeFrom = perfFrom || (startOfOpsMiss ? null : start);
+  const mergedDays = mergeFrom ? await mergeStoredDays(sc.perf, mergeFrom, end) : { rows: sc.perf, days: [], fromStore: 0 };
+  if (perfError && !startOfOpsMiss && mergedDays.days.length) {
+    console.error(`windsor-tiktok: shop performance failed for ${start}..${end}; using ${mergedDays.days.length} saved days`);
+    perfFrom = start; perfError = null;
+  }
+  const perf = mergedDays.rows;
   const traffic = sc.traffic || [];
   // No shop data at all for the period AND no sample orders: TikTok simply has
   // no history that far back — report samples as unavailable, not as $0.
@@ -445,6 +548,10 @@ async function pullSellerCenter(start, end) {
     end,
     days_with_data: days,
     perf_through: perfThrough(perf, end),
+    // Real days with a TikTok GMV figure (v11) — the endpoint fills any other
+    // day from TikTok's order data.
+    perf_days: mergedDays.days,
+    perf_days_from_store: mergedDays.fromStore,
     perf_partial: perfPartial(perfFrom || start, end, days, perfError),
     perf_from: perfFrom,
     perf_error: perfError,
@@ -492,6 +599,11 @@ function ensureSchema() {
         payload JSONB NOT NULL,
         fetched_at TIMESTAMPTZ NOT NULL DEFAULT now(),
         PRIMARY KEY (start_date, end_date)
+      );
+      CREATE TABLE IF NOT EXISTS windsor_tiktok_perf_days (
+        day DATE PRIMARY KEY,
+        row JSONB NOT NULL,
+        fetched_at TIMESTAMPTZ NOT NULL DEFAULT now()
       );`).then(() => true).catch((err) => {
       console.error('windsor-tiktok: schema failed:', err.message);
       schemaReady = null;
@@ -543,7 +655,10 @@ function pullAndStore(start, end) {
       const prev = await readCache(start, end).catch(() => null);
       const old = prev && prev.payload;
       const compatible = old && old.version >= COMPAT_MIN_VERSION && old.version <= PAYLOAD_VERSION;
-      if (compatible && num(old.days_with_data) > num(payload.days_with_data) && !old.perf_error) {
+      // Only a copy of the current version is kept over a shorter answer: an
+      // older copy (no creator GMV, no saved days) is replaced — the saved
+      // days and the endpoint's fill make up for days missing in the new one.
+      if (compatible && old.version === PAYLOAD_VERSION && num(old.days_with_data) > num(payload.days_with_data) && !old.perf_error) {
         console.error(`windsor-tiktok: refresh for ${start}..${end} has ${payload.days_with_data} days of shop performance vs ${old.days_with_data} saved — keeping the saved copy`);
         return old;
       }
@@ -587,6 +702,8 @@ function combinePayloads(start, end, parts) {
     perf_from: (withPerf[0] && withPerf[0].perf_from) || null,
     perf_partial: parts.some((p) => p.perf_partial),
     perf_through: (parts[parts.length - 1] || {}).perf_through || null,
+    perf_days: parts.every((p) => Array.isArray(p.perf_days)) ? [].concat(...parts.map((p) => p.perf_days)) : undefined,
+    perf_days_from_store: parts.reduce((a, p) => a + num(p.perf_days_from_store), 0),
     perf_error: withPerf.length ? null : ((parts.find((p) => p.perf_error) || {}).perf_error || null),
     fetched_at: parts.map((p) => p.fetched_at).filter(Boolean).sort()[0] || new Date().toISOString(),
   };
@@ -608,10 +725,13 @@ function combinePayloads(start, end, parts) {
       ...sumKeys(parts.map((p) => p.affiliate), ['gmv', 'orders', 'affiliate_ads_only_gmv', 'affiliate_ads_only_orders', 'affiliate_with_ads_gmv', 'affiliate_with_ads_orders', 'orders_seen', 'orders_settled', 'gross_seen']),
       // commission only when every month has it (v9+ months)
       ...(parts.every((p) => p.affiliate && typeof p.affiliate.commission === 'number') ? sumKeys(parts.map((p) => p.affiliate), ['commission', 'ads_commission']) : {}),
+      // creator GMV only when every month has it (v11+ months)
+      ...(parts.every((p) => p.affiliate && typeof p.affiliate.creator_gmv === 'number') ? { ...sumKeys(parts.map((p) => p.affiliate), ['creator_gmv', 'creator_orders', 'creator_with_ads_gmv', 'creator_with_ads_orders']), creator_tz: CREATOR_TZ } : {}),
       // Per-month figures so the dashboard can work out the Ads/Affiliate
       // overlap month by month — a quarter's Organic GMV then equals the sum
       // of its months' Organic GMV (audit 2026-10-07).
-      by_month: parts.map((p) => ({ start: p.start, gmv: num(p.affiliate.gmv), with_ads: num(p.affiliate.affiliate_with_ads_gmv), gross_seen: num(p.affiliate.gross_seen) })),
+      by_month: parts.map((p) => ({ start: p.start, gmv: num(p.affiliate.gmv), with_ads: num(p.affiliate.affiliate_with_ads_gmv), gross_seen: num(p.affiliate.gross_seen),
+        creator_gmv: typeof p.affiliate.creator_gmv === 'number' ? p.affiliate.creator_gmv : null, creator_with_ads_gmv: num(p.affiliate.creator_with_ads_gmv) })),
     };
   // A month with no TikTok sample history ("No TikTok sample data…") counts as 0;
   // any other sample error makes the period's total unavailable.
