@@ -26,7 +26,10 @@ const AUTH_BASE = 'https://auth.tiktok-shops.com';
 // US shops authorize on services.us.tiktokshop.com; overridable in case
 // TikTok's authorization link (Partner Center → app → Authorization) differs.
 const AUTHORIZE_URL = process.env.TIKTOK_AUTHORIZE_URL || 'https://services.us.tiktokshop.com/open/authorize';
-const TZ = 'America/Los_Angeles'; // Affiliate Center reports in Pacific time
+// Affiliate Center reports in fixed GMT-8 all year (no daylight saving) —
+// confirmed 28 Oct: daily items sold match TikTok's trend chart only on GMT-8 days.
+const TZ = 'Etc/GMT+8';
+const DATA_V = 2; // saved days from before the GMT-8 switch are re-pulled
 const REQUEST_TIMEOUT_MS = 60000;
 
 const num = (v) => Number(v || 0);
@@ -182,9 +185,7 @@ const tzFmt = new Intl.DateTimeFormat('en-CA', { timeZone: TZ, year: 'numeric', 
 const ptDay = (sec) => tzFmt.format(new Date(sec * 1000));
 // Unix seconds of 00:00 Pacific on an ISO day (handles DST).
 function ptMidnight(iso) {
-  const guess = Date.parse(iso + 'T08:00:00Z') / 1000; // PST midnight
-  for (const off of [0, -3600]) { const t = guess + off; if (ptDay(t) === iso && ptDay(t - 1) !== iso) return t; }
-  return guess;
+  return Date.parse(iso + 'T08:00:00Z') / 1000; // 00:00 GMT-8
 }
 const money = (o) => (o && o.amount !== undefined ? num(o.amount) : 0);
 
@@ -197,7 +198,7 @@ const money = (o) => (o && o.amount !== undefined ? num(o.amount) : 0);
 async function pullDays(startDay, endDay) {
   const ge = ptMidnight(startDay), lt = ptMidnight(endDay);
   const days = new Map();
-  const blank = () => ({ gmv: 0, price_sum: 0, commission_base: 0, est_commission: 0, est_partner_commission: 0, est_ads_commission: 0, refunded_value: 0, orders: 0, skus: 0, ineligible_gmv: 0, by_content: {} });
+  const blank = () => ({ v: DATA_V, gmv: 0, price_sum: 0, commission_base: 0, est_commission: 0, est_partner_commission: 0, est_ads_commission: 0, refunded_value: 0, orders: 0, skus: 0, ineligible_gmv: 0, by_content: {} });
   for (let d = startDay; d < endDay; d = plusDays(d, 1)) days.set(d, blank());
   let pageToken = '', pages = 0;
   do {
@@ -273,7 +274,7 @@ async function getCreatorGmv(start, end) {
   const stale = [];
   for (let d = start; d < last; d = plusDays(d, 1)) {
     const s = saved.get(d);
-    if (!s || Date.now() - s.fetched_at > maxAgeMs(d, todayPT)) stale.push(d);
+    if (!s || num(s.data && s.data.v) !== DATA_V || Date.now() - s.fetched_at > maxAgeMs(d, todayPT)) stale.push(d);
   }
   // Pull the stale days as contiguous spans (one paginated search each; the
   // API allows up to ~3 months per request).
@@ -315,7 +316,14 @@ function flatten(obj, prefix, row) {
   });
   return row;
 }
-async function diagRows(start, end) {
+// raw=1: the orders as TikTok returns them, minus anything about the buyer.
+const REDACT_RE = /buyer|address|phone|email|recipient|avatar/i;
+function redact(v) {
+  if (Array.isArray(v)) return v.map(redact);
+  if (v && typeof v === 'object') return Object.fromEntries(Object.entries(v).filter(([k]) => !REDACT_RE.test(k)).map(([k, x]) => [k, redact(x)]));
+  return v;
+}
+async function diagRows(start, end, raw = false) {
   if (!isoOk(start) || !isoOk(end) || end <= start || Date.parse(end) - Date.parse(start) > 8 * 86400000) { const e = new Error('start/end: YYYY-MM-DD, at most 8 days'); e.status = 400; throw e; }
   if (!configured()) { const e = new Error('TikTok Shop API isn\'t configured on the server'); e.status = 503; throw e; }
   // Pad a day on each side so any day boundary (PT or GMT-8) can be applied later.
@@ -330,6 +338,7 @@ async function diagRows(start, end) {
     if (!pages) Object.keys(data).forEach((k) => { if (k !== 'orders') firstPage[k] = typeof data[k] === 'object' ? '[object]' : data[k]; });
     (data.orders || []).forEach((o) => {
       orders++;
+      if (raw) { rows.push(redact(o)); return; }
       const base = flatten(o, 'o.', { oi: orders });
       if (!(o.skus || []).length) rows.push({ ...base, no_skus: true });
       (o.skus || []).forEach((s) => rows.push(flatten(s, '', { ...base })));
