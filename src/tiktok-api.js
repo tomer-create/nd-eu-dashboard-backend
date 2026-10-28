@@ -298,6 +298,49 @@ async function getCreatorGmv(start, end) {
   return { source: 'tiktok_affiliate_api', tz: TZ, start, end, through: plusDays(last, -1), ...total, by_day: byDay, oldest_fetch: fetched.length ? new Date(Math.min(...fetched)).toISOString() : null };
 }
 
+// Diagnostic (no buyer / creator details): every affiliate SKU line created in
+// [start, end) as a flat row of its numeric, money and enum fields, so the
+// dashboard figure can be matched to TikTok's Creator-attributed GMV.
+// Max 8 days per call.
+function flatten(obj, prefix, row) {
+  Object.entries(obj || {}).forEach(([k, v]) => {
+    const key = prefix + k;
+    if (v === null || v === undefined || k === 'skus') return;
+    if (typeof v === 'object' && !Array.isArray(v)) {
+      if (v.amount !== undefined) row[key] = num(v.amount);
+      else flatten(v, key + '.', row);
+    } else if (typeof v === 'number' || typeof v === 'boolean') row[key] = v;
+    else if (typeof v === 'string' && /^-?\d+(\.\d+)?$/.test(v) && v.length < 14) row[key] = Number(v);
+    else if (typeof v === 'string' && /^[A-Z][A-Z0-9_]{1,40}$/.test(v)) row[key] = v;
+  });
+  return row;
+}
+async function diagRows(start, end) {
+  if (!isoOk(start) || !isoOk(end) || end <= start || Date.parse(end) - Date.parse(start) > 8 * 86400000) { const e = new Error('start/end: YYYY-MM-DD, at most 8 days'); e.status = 400; throw e; }
+  if (!configured()) { const e = new Error('TikTok Shop API isn\'t configured on the server'); e.status = 503; throw e; }
+  // Pad a day on each side so any day boundary (PT or GMT-8) can be applied later.
+  const ge = ptMidnight(plusDays(start, -1)), lt = ptMidnight(plusDays(end, 1));
+  const rows = [], firstPage = {};
+  let pageToken = '', pages = 0, orders = 0;
+  do {
+    const data = await apiCall('POST', '/affiliate_seller/202410/orders/search', {
+      query: { page_size: '100', ...(pageToken ? { page_token: pageToken } : {}) },
+      body: { create_time_ge: ge, create_time_lt: lt },
+    });
+    if (!pages) Object.keys(data).forEach((k) => { if (k !== 'orders') firstPage[k] = typeof data[k] === 'object' ? '[object]' : data[k]; });
+    (data.orders || []).forEach((o) => {
+      orders++;
+      const base = flatten(o, 'o.', { oi: orders });
+      if (!(o.skus || []).length) rows.push({ ...base, no_skus: true });
+      (o.skus || []).forEach((s) => rows.push(flatten(s, '', { ...base })));
+    });
+    pageToken = data.next_page_token || '';
+    pages++;
+  } while (pageToken && pages < 200);
+  delete firstPage.next_page_token;
+  return { start, end, padded_from: ge, padded_to: lt, pages, orders, first_page: firstPage, rows };
+}
+
 async function status() {
   const auth = await loadAuth().catch(() => null);
   return {
@@ -314,4 +357,4 @@ async function status() {
   };
 }
 
-module.exports = { configured, authorizeUrl, checkState, exchangeCode, getCreatorGmv, status, _sign: sign, _ptMidnight: ptMidnight };
+module.exports = { configured, authorizeUrl, checkState, exchangeCode, getCreatorGmv, diagRows, status, _sign: sign, _ptMidnight: ptMidnight };
