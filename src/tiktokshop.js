@@ -245,27 +245,91 @@ async function fetchGmvEstimate(site, start, end) {
 // TikTok Gifting cost (2026-10-26, Tomer: "take all the $0 orders from
 // Channel TikTok and take their product costs, add them together"). The $0
 // orders are the creator samples TikTok sends out; they sync into Shopify
-// with sales channel TikTok (source_name 'tiktok'). Cost = Shopify's product
-// cost on those orders (Triple Whale cost_of_goods, imported from Shopify).
-// $0 = product total after discounts is zero (all of them, as Tomer asked —
-// cancelled ones included). Checked against the P&L sheet: Sep 2026
-// $2,094.58 vs the sheet's $2,095.
+// with sales channel TikTok (source_name 'tiktok'). $0 = product total after
+// discounts is zero (all of them, as Tomer asked — cancelled ones included).
+//
+// 2026-10-28 (Tomer: "go by what's inside those $0 orders"; then, the same
+// day: "product cost is always 20% of its price, whether Shopify has a cost
+// or not — calculate the $0 orders by that, by the quantities and products"):
+// cost = 20% × Σ (each product's price × quantity) over everything inside the
+// $0 orders — the same 20%-of-price rule as the dashboard's COGS. The products
+// and quantities come from Triple Whale (the Shopify orders' line items); the
+// price is the line's own price before the 100% discount. A line recorded at
+// $0 (6 variants in Oct, e.g. HY-GLAM FOUNDATION) takes that variant's price
+// from its other lines, or else from Shopify. Oct 1–28: 303 orders, 731
+// units, $28,439 at retail on the priced lines → ≈ $5,700.
+const GIFT_COST_PCT = 0.2;
+async function shopifyVariantPrices(variantIds) {
+  const { graphql } = require('./shopify');
+  const out = new Map();
+  const ids = [...new Set(variantIds.filter(Boolean).map(String))];
+  for (let i = 0; i < ids.length; i += 100) {
+    const batch = ids.slice(i, i + 100);
+    const data = await graphql('com', `
+      query VariantPrices($ids: [ID!]!) {
+        nodes(ids: $ids) { ... on ProductVariant { id price compareAtPrice } }
+      }`, { ids: batch.map((id) => `gid://shopify/ProductVariant/${id}`) });
+    (data.nodes || []).forEach((n) => {
+      if (!n || !n.id) return;
+      const p = Number(n.price && n.price.amount !== undefined ? n.price.amount : n.price);
+      const c = Number(n.compareAtPrice && n.compareAtPrice.amount !== undefined ? n.compareAtPrice.amount : n.compareAtPrice);
+      out.set(String(n.id).split('/').pop(), (Number.isFinite(p) && p > 0) ? p : (Number.isFinite(c) && c > 0 ? c : null));
+    });
+  }
+  return out;
+}
 async function fetchGifting(site, start, end) {
   if (!SITES_WITH_TIKTOK_SHOP.includes(site) || !process.env.TRIPLEWHALE_API_KEY) return null;
   if (!isoOk(start) || !isoOk(end) || end <= start) return null;
   const shopId = TW_SHOP_ID[site];
-  return cachedPast(`gift|${shopId}|${start}|${end}`, end, async () => {
-    const rows = await twSql(shopId, `
-      SELECT count() AS orders,
-             SUM(cost_of_goods) AS cost,
-             SUM(product_quantity_sold_in_order) AS units,
-             SUM(gross_product_sales) AS retail_value
-      FROM orders_table
-      WHERE event_date >= '${start}' AND event_date < '${end}'
+  return cachedPast(`gift3|${shopId}|${start}|${end}`, end, async () => {
+    const where = `event_date >= '${start}' AND event_date < '${end}'
         AND platform = 'shopify' AND source_name = 'tiktok'
-        AND gross_product_sales - discount_amount_for_product <= 0.005`.trim(), start, end);
-    const r = rows[0] || {};
-    return { start, end, cost: num(r.cost), orders: num(r.orders), units: num(r.units), retail_value: num(r.retail_value) };
+        AND gross_product_sales - discount_amount_for_product <= 0.005`;
+    const [tot, lines] = await Promise.all([
+      twSql(shopId, `
+        SELECT count() AS orders,
+               SUM(product_quantity_sold_in_order) AS units,
+               SUM(gross_product_sales) AS retail_value
+        FROM orders_table
+        WHERE ${where}`.trim(), start, end),
+      twSql(shopId, `
+        SELECT p.variant_id AS variant_id, any(p.product_name) AS name,
+               SUM(toFloat64(ifNull(p.product_name_quantity_sold, 0))) AS units,
+               SUM(toFloat64(ifNull(p.product_name_price, 0)) * toFloat64(ifNull(p.product_name_quantity_sold, 0))) AS priced_value,
+               SUM(if(ifNull(p.product_name_price, 0) > 0, 0, toFloat64(ifNull(p.product_name_quantity_sold, 0)))) AS units_no_price,
+               max(toFloat64(ifNull(p.product_name_price, 0))) AS max_price
+        FROM orders_table ARRAY JOIN products_info AS p
+        WHERE ${where}
+        GROUP BY variant_id`.trim(), start, end),
+    ]);
+    const r = tot[0] || {};
+    // Prices for lines recorded at $0 whose variant has no priced line here.
+    const needShopify = lines.filter((l) => num(l.units_no_price) > 0 && !(num(l.max_price) > 0)).map((l) => l.variant_id);
+    let shopPrices = new Map(), shopifyError = null;
+    if (needShopify.length) {
+      try { shopPrices = await shopifyVariantPrices(needShopify); } catch (err) { shopifyError = err.message; console.error('gifting: Shopify prices failed:', err.message); }
+    }
+    let retail = 0, unpriced = 0;
+    const missing = [];
+    lines.forEach((l) => {
+      retail += num(l.priced_value);
+      const n0 = num(l.units_no_price);
+      if (!n0) return;
+      const ref = num(l.max_price) > 0 ? num(l.max_price) : num(shopPrices.get(String(l.variant_id)));
+      if (ref > 0) retail += n0 * ref;
+      else { unpriced += n0; missing.push(`${l.name} (${n0})`); }
+    });
+    return {
+      start, end,
+      cost: retail * GIFT_COST_PCT,
+      cost_rule: '20% of price',
+      cost_pct: GIFT_COST_PCT,
+      retail_value: retail,
+      orders: num(r.orders), units: num(r.units),
+      units_no_price: unpriced, no_price_items: missing.slice(0, 10),
+      ...(shopifyError ? { shopify_error: shopifyError } : {}),
+    };
   });
 }
 
