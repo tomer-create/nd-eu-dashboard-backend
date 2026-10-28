@@ -266,12 +266,19 @@ const ORDERS_QUERY = `
           currentSubtotalPriceSet { shopMoney { amount } }
           subtotalPriceSet { shopMoney { amount } }
           totalDiscountsSet { shopMoney { amount currencyCode } presentmentMoney { amount } }
-          discountApplications(first: 10) {
+          discountApplications(first: 30) {
             nodes {
               __typename
               index
+              targetType
               ... on DiscountCodeApplication { code value { __typename ... on MoneyV2 { amount currencyCode } } }
+              ... on AutomaticDiscountApplication { title }
+              ... on ManualDiscountApplication { title }
+              ... on ScriptDiscountApplication { title }
             }
+          }
+          shippingLines(first: 5) {
+            nodes { discountAllocations { allocatedAmountSet { shopMoney { amount } } discountApplication { index } } }
           }
           shippingAddress { countryCode }
           lineItems(first: 100) {
