@@ -144,7 +144,8 @@ async function getWithMonthCache({ site, start, end, compare, refresh }, build) 
       // "Yotpo Loyalty" row (discounts_version < 2) is served as-is once and
       // re-pulled in the background, so it picks the row up by itself. Raised to
       // 3 the same day for the Yotpo Bday / Ref rows and discount groups.
-      const outdated = !(row.payload && row.payload.discounts_version >= 3);
+      // 4 (2026-10-28): program discounts by discount application.
+      const outdated = !(row.payload && row.payload.discounts_version >= 4);
       if (recentlyClosed && ageHours > STALE_AFTER_HOURS) {
         pullAndStore(key, args, build).catch((err) => console.error('month-cache: background refresh failed:', err.message));
         return { payload: row.payload, cache: 'stale', fetchedAt: row.fetched_at };
