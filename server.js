@@ -1370,7 +1370,7 @@ app.get('/api/tiktok-shop/creator-gmv', async (req, res) => {
 // SKU rows (numbers / enums only) for matching TikTok's Affiliate Center figure.
 app.get('/api/tiktok-shop/creator-gmv/diag', async (req, res) => {
   try {
-    res.json(await tiktokApi.diagRows(String(req.query.start || ''), String(req.query.end || '')));
+    res.json(await tiktokApi.diagRows(String(req.query.start || ''), String(req.query.end || ''), req.query.raw === '1'));
   } catch (err) {
     res.status(err.status || 502).json({ error: err.message });
   }
