@@ -101,14 +101,31 @@ async function graphql(site, query, variables = {}, attempt = 0) {
     );
   }
 
-  const res = await fetch(`https://${domain}/admin/api/${API_VERSION}/graphql.json`, {
-    method: 'POST',
-    headers: {
-      'Content-Type': 'application/json',
-      'X-Shopify-Access-Token': accessToken,
-    },
-    body: JSON.stringify({ query, variables }),
-  });
+  // 2026-10-29 review: a 90 s timeout per request, and a transient network
+  // error / 5xx is retried a few times instead of failing the whole sync.
+  let res;
+  try {
+    res = await fetch(`https://${domain}/admin/api/${API_VERSION}/graphql.json`, {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        'X-Shopify-Access-Token': accessToken,
+      },
+      body: JSON.stringify({ query, variables }),
+      signal: AbortSignal.timeout(90000),
+    });
+  } catch (err) {
+    if (attempt < 3) {
+      await new Promise((r) => setTimeout(r, 2000 * (attempt + 1)));
+      return graphql(site, query, variables, attempt + 1);
+    }
+    throw err;
+  }
+  if (res.status >= 500 && attempt < 3) {
+    await res.text().catch(() => {});
+    await new Promise((r) => setTimeout(r, 2000 * (attempt + 1)));
+    return graphql(site, query, variables, attempt + 1);
+  }
 
   if (res.status === 429 && attempt < 5) {
     const retryAfter = Number(res.headers.get('Retry-After') || '1');
@@ -527,7 +544,11 @@ async function fetchSalesReversals(site, startISO, endISOExclusive) {
   untilDate.setUTCDate(untilDate.getUTCDate() - 1);
   const untilISO = untilDate.toISOString().slice(0, 10);
 
-  const shopifyqlQueryString = `FROM sales SHOW sales_reversals SINCE ${startISO} UNTIL ${untilISO}`;
+  // quantity_returned added 2026-10-29 (code review): Units Returned now comes
+  // from here too, by refund date like the Returns $ figure — it used to count
+  // refunds on orders CREATED in the period, so last year's orders (a year of
+  // refunds) made Units Returned YoY read far too negative.
+  const shopifyqlQueryString = `FROM sales SHOW sales_reversals, quantity_returned SINCE ${startISO} UNTIL ${untilISO}`;
   const gqlQuery = `
     query SalesReversals($q: String!) {
       shopifyqlQuery(query: $q) {
@@ -540,15 +561,23 @@ async function fetchSalesReversals(site, startISO, endISOExclusive) {
     }
   `;
 
-  const data = await graphql(site, gqlQuery, { q: shopifyqlQueryString });
-  const result = data.shopifyqlQuery;
+  let data = await graphql(site, gqlQuery, { q: shopifyqlQueryString });
+  let result = data.shopifyqlQuery;
+  let withUnits = true;
   if (result.parseErrors && result.parseErrors.length) {
-    throw new Error(
-      `ShopifyQL parse error for "${site}" (query: ${shopifyqlQueryString}): ${result.parseErrors.join('; ')}`
-    );
+    // Safety net: if quantity_returned isn't accepted here, fall back to the
+    // Returns $ figure alone (units then stay on the Orders-API count).
+    const plain = `FROM sales SHOW sales_reversals SINCE ${startISO} UNTIL ${untilISO}`;
+    console.error(`ShopifyQL rejected quantity_returned for "${site}" (${result.parseErrors.join('; ')}) — retrying without it`);
+    data = await graphql(site, gqlQuery, { q: plain });
+    result = data.shopifyqlQuery;
+    withUnits = false;
+    if (result.parseErrors && result.parseErrors.length) {
+      throw new Error(`ShopifyQL parse error for "${site}" (query: ${plain}): ${result.parseErrors.join('; ')}`);
+    }
   }
   const rows = result.tableData.rows;
-  if (!rows || !rows.length) return 0;
+  if (!rows || !rows.length) return { value: 0, units: withUnits ? 0 : null };
   // BUG FIXED 2026-08-24: `rows` is an array of ROW OBJECTS keyed by column
   // name (e.g. { "sales_reversals": "-23994.49" }), NOT an array of arrays —
   // confirmed against a live shopifyqlQuery call. The original `rows[0][0]`
@@ -562,8 +591,13 @@ async function fetchSalesReversals(site, startISO, endISOExclusive) {
   // Shopify returns the value as a negative number (it reduces sales); this
   // file's convention is a positive "returns" figure that gets SUBTRACTED,
   // so flip the sign here rather than at every call site.
-  const rawValue = Object.values(rows[0])[0];
-  return Math.abs(Number(rawValue));
+  const row = rows[0];
+  const pick = (name, idx) => (Array.isArray(row) ? row[idx] : (name in row ? row[name] : Object.values(row)[idx]));
+  const units = withUnits ? pick('quantity_returned', 1) : null;
+  return {
+    value: Math.abs(Number(pick('sales_reversals', 0))),
+    units: units == null || units === '' || Number.isNaN(Number(units)) ? null : Math.abs(Number(units)),
+  };
 }
 
 // Shopify's own Cost of Goods Sold figure (ShopifyQL), pulled the same way
@@ -1171,34 +1205,51 @@ async function loadCollabsCodes(site) {
 // for orders in [startISO, endISOExclusive) that used a Collabs code.
 async function fetchCollabsCodeSales(site, startISO, endISOExclusive) {
   const codes = await fetchCollabsCodes(site);
-  const untilDate = new Date(endISOExclusive + 'T00:00:00Z');
-  untilDate.setUTCDate(untilDate.getUTCDate() - 1);
-  const untilISO = untilDate.toISOString().slice(0, 10);
   const startMs = new Date(startISO + 'T00:00:00Z').getTime();
-  const q = `FROM sales SHOW orders, gross_sales, discounts GROUP BY discount_name ORDER BY orders DESC SINCE ${startISO} UNTIL ${untilISO} LIMIT 5000`;
-  const data = await graphql(site, `
+  // 2026-10-29 review: one query per calendar month. Single-use Yotpo /
+  // Attentive codes each count as their own discount_name, so a quarter or
+  // YTD could pass the 5,000-row LIMIT and silently cut Collabs codes off.
+  const slices = [];
+  for (let a = startISO; a < endISOExclusive;) {
+    const d = new Date(a + 'T00:00:00Z');
+    const next = new Date(Date.UTC(d.getUTCFullYear(), d.getUTCMonth() + 1, 1)).toISOString().slice(0, 10);
+    const b = next < endISOExclusive ? next : endISOExclusive;
+    slices.push([a, b]);
+    a = b;
+  }
+  const out = { orders: 0, gross_sales: 0, discounts: 0, sales: 0, codes_used: 0 };
+  const used = new Set();
+  for (const [a, b] of slices) {
+    const untilDate = new Date(b + 'T00:00:00Z');
+    untilDate.setUTCDate(untilDate.getUTCDate() - 1);
+    const untilISO = untilDate.toISOString().slice(0, 10);
+    const q = `FROM sales SHOW orders, gross_sales, discounts GROUP BY discount_name ORDER BY orders DESC SINCE ${a} UNTIL ${untilISO} LIMIT 5000`;
+    const data = await graphql(site, `
     query CollabsSales($q: String!) {
       shopifyqlQuery(query: $q) { parseErrors tableData { columns { name } rows } }
     }`, { q });
-  const result = data.shopifyqlQuery;
-  if (result.parseErrors && result.parseErrors.length) {
-    throw new Error(`ShopifyQL parse error for "${site}" (query: ${q}): ${result.parseErrors.join('; ')}`);
+    const result = data.shopifyqlQuery;
+    if (result.parseErrors && result.parseErrors.length) {
+      throw new Error(`ShopifyQL parse error for "${site}" (query: ${q}): ${result.parseErrors.join('; ')}`);
+    }
+    const colNames = (result.tableData.columns || []).map((c) => c.name);
+    const rows = result.tableData.rows || [];
+    if (rows.length >= 5000) console.error(`collabs: ${site} ${a}..${b} hit the 5,000 discount-name limit — Collabs figures may be low`);
+    rows.forEach((row) => {
+      const values = Array.isArray(row) ? row : colNames.map((name) => row[name]);
+      const r = {};
+      colNames.forEach((name, k) => { r[name] = values[k]; });
+      const name = String(r.discount_name || '').trim().toUpperCase();
+      if (!name || !codes.has(name)) return;
+      const expiredAt = codes.get(name);
+      if (expiredAt !== null && expiredAt <= startMs) return;
+      out.orders += Number(r.orders) || 0;
+      out.gross_sales += Number(r.gross_sales) || 0;
+      out.discounts += Math.abs(Number(r.discounts) || 0);
+      used.add(name);
+    });
   }
-  const colNames = (result.tableData.columns || []).map((c) => c.name);
-  const out = { orders: 0, gross_sales: 0, discounts: 0, sales: 0, codes_used: 0 };
-  (result.tableData.rows || []).forEach((row) => {
-    const values = Array.isArray(row) ? row : colNames.map((name) => row[name]);
-    const r = {};
-    colNames.forEach((name, i) => { r[name] = values[i]; });
-    const name = String(r.discount_name || '').trim().toUpperCase();
-    if (!name || !codes.has(name)) return;
-    const expiredAt = codes.get(name);
-    if (expiredAt !== null && expiredAt <= startMs) return;
-    out.orders += Number(r.orders) || 0;
-    out.gross_sales += Number(r.gross_sales) || 0;
-    out.discounts += Math.abs(Number(r.discounts) || 0);
-    out.codes_used += 1;
-  });
+  out.codes_used = used.size;
   out.sales = out.gross_sales - out.discounts;
   return out;
 }
