@@ -145,7 +145,7 @@ function parseRedemptionsCsv(buffer, tierByEmail) {
     const receivedAt = parseDate(dateRaw, rowNum, 'date');
     if (!receivedAt) return; // no date at all — can't place it in a period, skip
     const pointsRaw = pick(row, ['points', 'Points']);
-    const points = pointsRaw !== null ? Math.abs(Number(pointsRaw)) || 0 : 0;
+    const points = pointsRaw !== null ? Math.abs(Number(String(pointsRaw).replace(/[,\s]/g, ''))) || 0 : 0; // "1,500" used to read as 0
     const rewardName = pick(row, ['description', 'Description', 'redemption_option']);
     const key = email.toLowerCase().trim();
     events.push({
@@ -274,6 +274,7 @@ async function importYotpoHistory(pool, site, { customersBuffer, redemptionsBuff
   // Last occurrence in the file wins.
   const dedupedCustomers = [...new Map(customersWithTier.map((c) => [c.email, c])).values()];
 
+  let newMembersToInsert = newMemberEvents, redemptionsToInsert = redemptionEvents;
   const client = await pool.connect();
   try {
     await client.query('BEGIN');
@@ -283,6 +284,20 @@ async function importYotpoHistory(pool, site, { customersBuffer, redemptionsBuff
       `DELETE FROM yotpo_events WHERE site = $1 AND topic IN ('backfill:customers_csv', 'backfill:redemptions_csv')`,
       [site]
     );
+
+    // 2026-10-29 review: an export that runs past the day live webhook
+    // collection started used to store those days a second time (CSV rows +
+    // the live events). CSV events from the first live event onwards are
+    // skipped, per event type.
+    const liveRes = await client.query(
+      `SELECT event_type, MIN(received_at) AS first_live FROM yotpo_events
+       WHERE site = $1 AND topic NOT LIKE 'backfill:%' GROUP BY event_type`,
+      [site]
+    );
+    const liveFrom = new Map(liveRes.rows.map((r) => [r.event_type, new Date(r.first_live)]));
+    const beforeLive = (type) => (e) => !liveFrom.has(type) || e.receivedAt < liveFrom.get(type);
+    newMembersToInsert = newMemberEvents.filter(beforeLive('new_member'));
+    redemptionsToInsert = redemptionEvents.filter(beforeLive('redemption'));
 
     // Seed/update yotpo_customers from the Customers export — this is what
     // both the redemption-tier approximation and future real webhook
@@ -309,7 +324,7 @@ async function importYotpoHistory(pool, site, { customersBuffer, redemptionsBuff
       'yotpo_events',
       ['site', 'topic', 'event_type', 'email', 'tier_at_event', 'received_at', 'raw_payload'],
       ['backfill:customers_csv', 'new_member'],
-      newMemberEvents,
+      newMembersToInsert,
       site,
       (e) => [e.email, e.tierAtEvent, e.receivedAt.toISOString(), JSON.stringify(e.rawRow)]
     );
@@ -319,7 +334,7 @@ async function importYotpoHistory(pool, site, { customersBuffer, redemptionsBuff
       'yotpo_events',
       ['site', 'topic', 'event_type', 'email', 'tier_at_event', 'points', 'reward_name', 'received_at', 'raw_payload'],
       ['backfill:redemptions_csv', 'redemption'],
-      redemptionEvents,
+      redemptionsToInsert,
       site,
       (e) => [e.email, e.tierAtEvent, e.points, e.rewardName, e.receivedAt.toISOString(), JSON.stringify(e.rawRow)]
     );
@@ -340,8 +355,9 @@ async function importYotpoHistory(pool, site, { customersBuffer, redemptionsBuff
   return {
     site,
     customers_seeded: dedupedCustomers.length,
-    new_members_imported: newMemberEvents.length,
-    redemptions_imported: redemptionEvents.length,
+    new_members_imported: newMembersToInsert.length,
+    redemptions_imported: redemptionsToInsert.length,
+    skipped_already_live: (newMemberEvents.length - newMembersToInsert.length) + (redemptionEvents.length - redemptionsToInsert.length),
     earliest_date: earliest ? earliest.toISOString().slice(0, 10) : null,
     latest_date: latest ? latest.toISOString().slice(0, 10) : null,
   };
