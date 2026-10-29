@@ -67,7 +67,9 @@ function isClosedFullMonth(start, end) {
   if (!/^\d{4}-\d{2}-01$/.test(String(start)) || !/^\d{4}-\d{2}-01$/.test(String(end))) return false;
   const s = new Date(start + 'T00:00:00Z');
   const expectedEnd = new Date(Date.UTC(s.getUTCFullYear(), s.getUTCMonth() + 1, 1)).toISOString().slice(0, 10);
-  return end === expectedEnd && end <= todayISO();
+  // Strictly before today (UTC): on the 1st itself ND.COM's month is still
+  // running for up to 5 hours after UTC midnight (2026-10-29 code review).
+  return end === expectedEnd && end < todayISO();
 }
 
 function daysSince(isoDate) {
@@ -145,7 +147,10 @@ async function getWithMonthCache({ site, start, end, compare, refresh }, build) 
       // re-pulled in the background, so it picks the row up by itself. Raised to
       // 3 the same day for the Yotpo Bday / Ref rows and discount groups.
       // 4 (2026-10-28): program discounts by discount application.
-      const outdated = !(row.payload && row.payload.discounts_version >= 4);
+      // A month stored while Triple Whale or the P&L sheet was down
+      // (partial_sources, 2026-10-29) is re-pulled — at most once a day.
+      const partial = row.payload && Array.isArray(row.payload.partial_sources) && row.payload.partial_sources.length > 0 && ageHours > 24;
+      const outdated = !(row.payload && row.payload.discounts_version >= 4) || partial;
       if (recentlyClosed && ageHours > STALE_AFTER_HOURS) {
         pullAndStore(key, args, build).catch((err) => console.error('month-cache: background refresh failed:', err.message));
         return { payload: row.payload, cache: 'stale', fetchedAt: row.fetched_at };
