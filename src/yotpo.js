@@ -461,6 +461,9 @@ async function getYotpoSummary(site, startDay, endDay) {
      -- (same payload) counts once — see LIVE_DEDUP.
      FROM (SELECT DISTINCT ON (${LIVE_DEDUP}) * FROM yotpo_events
            WHERE site = $1 AND event_type = 'redemption' AND topic NOT ILIKE '%reminder%'
+             -- Points redemptions only (2026-10-29, Tomer): free percentage
+             -- perks (0 points — 1,381 of ND.COM's 1,444 in Oct) are left out.
+             AND COALESCE(points, 0) > 0
              AND received_at >= $2 AND received_at < $3) e
      GROUP BY tier
      ORDER BY points_used DESC`,
