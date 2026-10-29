@@ -1442,6 +1442,55 @@ app.get('/api/tiktok-shop/gifting', async (req, res) => {
   }
 });
 
+// GET /api/yotpo/diag?site=com&start=2026-10-01&end=2026-10-30 (2026-10-29,
+// Tomer: "check it" — points used per redemption looked far too low).
+// Aggregates only, no emails / names: redemption events by topic and source
+// (live webhook vs CSV backfill) with their points, per-day counts, how many
+// payloads repeat exactly, and which fields the live payloads carry (field
+// names + count / sum of numeric values) so the points field can be found.
+app.get('/api/yotpo/diag', async (req, res) => {
+  const { site, start, end } = req.query;
+  if (!YOTPO_VALID_SITES.includes(site) || !/^\d{4}-\d{2}-\d{2}$/.test(String(start)) || !/^\d{4}-\d{2}-\d{2}$/.test(String(end)) || end <= start
+    || (Date.parse(end) - Date.parse(start)) / 86400000 > 120) {
+    return res.status(400).json({ error: 'site, start, end (YYYY-MM-DD, at most 120 days) required' });
+  }
+  const pool = getYotpoPool();
+  if (!pool) return res.status(503).json({ error: 'DATABASE_URL not configured' });
+  try {
+    const byTopic = await pool.query(
+      `SELECT topic, event_type, COUNT(*)::int AS n, COUNT(points)::int AS with_points,
+              COUNT(*) FILTER (WHERE points = 0)::int AS zero_points, COALESCE(SUM(points), 0)::float AS points,
+              COUNT(DISTINCT md5(raw_payload::text))::int AS distinct_payloads,
+              MIN(received_at) AS first_at, MAX(received_at) AS last_at
+       FROM yotpo_events WHERE site = $1 AND received_at >= $2 AND received_at < $3
+       GROUP BY topic, event_type ORDER BY n DESC`, [site, start, end]);
+    const byDay = await pool.query(
+      `SELECT to_char(received_at, 'YYYY-MM-DD') AS day, COUNT(*)::int AS n, COUNT(points)::int AS with_points, COALESCE(SUM(points), 0)::float AS points
+       FROM yotpo_events WHERE site = $1 AND event_type = 'redemption' AND received_at >= $2 AND received_at < $3
+       GROUP BY 1 ORDER BY 1`, [site, start, end]);
+    const live = await pool.query(
+      `SELECT topic, raw_payload FROM yotpo_events
+       WHERE site = $1 AND event_type = 'redemption' AND topic NOT LIKE 'backfill:%' AND received_at >= $2 AND received_at < $3
+       ORDER BY received_at DESC LIMIT 3000`, [site, start, end]);
+    const PII = /email|phone|name|address|first|last|zip|city|ip|token|code|url|birth/i;
+    const fields = {};
+    const walk = (v, path, topic, depth) => {
+      if (v && typeof v === 'object' && !Array.isArray(v) && depth < 4) { Object.entries(v).forEach(([k, x]) => walk(x, path ? path + '.' + k : k, topic, depth + 1)); return; }
+      const key = topic + ' :: ' + path;
+      const f = fields[key] || (fields[key] = { present: 0, numeric: 0, sum: 0, nonzero: 0 });
+      f.present++;
+      const n = typeof v === 'number' ? v : (typeof v === 'string' && /^-?\d+(\.\d+)?$/.test(v) && v.length < 10 ? Number(v) : null);
+      if (n !== null && !PII.test(path) && !/(^|\.)id$|_id$/.test(path)) { f.numeric++; f.sum += n; if (n) f.nonzero++; }
+    };
+    live.rows.forEach((r) => walk(r.raw_payload || {}, '', r.topic, 0));
+    const fieldList = Object.entries(fields).sort((a, b) => b[1].present - a[1].present).slice(0, 120)
+      .map(([k, f]) => ({ field: k, present: f.present, numeric: f.numeric, nonzero: f.nonzero, sum: Math.round(f.sum) }));
+    res.json({ site, start, end, by_topic: byTopic.rows, redemptions_by_day: byDay.rows, live_sampled: live.rows.length, live_fields: fieldList });
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
 app.get('/api/yotpo/summary', async (req, res) => {
   const { site, start, end, include_revenue } = req.query;
   if (!YOTPO_VALID_SITES.includes(site)) {
