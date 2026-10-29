@@ -578,8 +578,17 @@ function findRevenueAndCostRows(rows) {
 // function -- not just the row that surfaced it.
 function parseNum(v) {
   if (v === undefined || v === null || v === '') return null;
-  const n = Number(String(v).replace(/[,\s]/g, ''));
-  return Number.isFinite(n) ? n : null;
+  // 2026-10-29 review: also "12.5%" (a percent-formatted row such as Profit
+  // Margin → 0.125, it used to come back null and silently drop the goal),
+  // "(1,234)" accounting negatives and a leading currency symbol.
+  let t = String(v).replace(/[,\s]/g, '').replace(/^(-?)[$€₪£]/, '$1');
+  let sign = 1;
+  if (/^\(.*\)$/.test(t)) { sign = -1; t = t.slice(1, -1); }
+  let scale = 1;
+  if (t.endsWith('%')) { scale = 0.01; t = t.slice(0, -1); }
+  if (t === '' || t === '-') return null;
+  const n = Number(t);
+  return Number.isFinite(n) ? sign * n * scale : null;
 }
 
 // Fetches + parses one site's P&L tab as a 2D array of strings, or null on
@@ -611,7 +620,7 @@ async function downloadSheetRows(site) {
   if (!url) return null;
 
   try {
-    const res = await fetch(url);
+    const res = await fetch(url, { signal: AbortSignal.timeout(60000) }); // a hung download blocked every sheet reader (2026-10-29 review)
     if (!res.ok) {
       console.error(`googlesheets: CSV export request failed for site=${site} (${res.status}) — is the sheet shared as "Anyone with the link"?`);
       return null;
