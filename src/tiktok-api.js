@@ -29,7 +29,7 @@ const AUTHORIZE_URL = process.env.TIKTOK_AUTHORIZE_URL || 'https://services.us.t
 // Affiliate Center reports in fixed GMT-8 all year (no daylight saving) —
 // confirmed 28 Oct: daily items sold match TikTok's trend chart only on GMT-8 days.
 const TZ = 'Etc/GMT+8';
-const DATA_V = 2; // saved days from before the GMT-8 switch are re-pulled
+const DATA_V = 3; // v3 (29 Oct): + buyer shipping and order-level discounts (see orderAmounts)
 const REQUEST_TIMEOUT_MS = 60000;
 
 const num = (v) => Number(v || 0);
@@ -189,18 +189,42 @@ function ptMidnight(iso) {
 }
 const money = (o) => (o && o.amount !== undefined ? num(o.amount) : 0);
 
-// Every affiliate SKU order created in [startDay, endDay) Pacific, bucketed by
-// day. Per day: gmv = Σ price × quantity of the attributed SKUs (the Affiliate
-// Center's Creator-attributed GMV — to be confirmed against TikTok's screen
-// once connected, see /admin/tiktok/status), plus price-only, estimated
-// commission base, commission and refund figures so the definition can be
-// switched without re-pulling.
+// TikTok's Creator-attributed GMV per order = what the buyer paid for the
+// attributed items (after every discount, incl. order-level vouchers the SKU
+// price doesn't show) + the shipping fee the buyer paid. Matched to the cent
+// against the Affiliate Center for Oct 21–27 2026 (per day and per creator).
+// The API has neither shipping nor order-level vouchers, so they come from
+// Triple Whale's TikTok Shop orders (order_id = TikTok order id).
+async function orderAmounts(ids, startDay, endDay) {
+  const out = new Map();
+  if (!ids.length || !process.env.TRIPLEWHALE_API_KEY) return { map: out, ok: false };
+  const { TW_SHOP_ID, twSqlRequest } = require('./triplewhale');
+  const from = plusDays(startDay, -1), to = plusDays(endDay, 2);
+  for (let i = 0; i < ids.length; i += 200) {
+    const chunk = ids.slice(i, i + 200).filter((x) => /^\d+$/.test(x));
+    if (!chunk.length) continue;
+    const query = `SELECT order_id, SUM(gross_product_sales - discount_amount_for_product) AS net, SUM(shipping_price) AS ship, SUM(product_quantity_sold_in_order) AS qty
+      FROM orders_table WHERE event_date >= '${from}' AND event_date < '${to}' AND platform = 'tiktok-shops'
+      AND order_id IN (${chunk.map((x) => `'${x}'`).join(',')}) GROUP BY order_id`;
+    const res = await twSqlRequest(TW_SHOP_ID.com, query, from, to);
+    if (!res.ok) throw new Error(`Triple Whale SQL ${res.status}`);
+    const json = await res.json();
+    const rows = Array.isArray(json) ? json : json.rows || json.data || [];
+    rows.forEach((r) => out.set(String(r.order_id), { net: num(r.net), ship: num(r.ship), qty: num(r.qty) }));
+  }
+  return { map: out, ok: true };
+}
+
+// Every affiliate SKU order created in [startDay, endDay) GMT-8, bucketed by
+// day. gmv = Creator-attributed GMV (see orderAmounts); items_gmv = Σ SKU
+// price × quantity from the API alone, plus commission and refund figures.
 async function pullDays(startDay, endDay) {
   const ge = ptMidnight(startDay), lt = ptMidnight(endDay);
   const days = new Map();
-  const blank = () => ({ v: DATA_V, gmv: 0, price_sum: 0, commission_base: 0, est_commission: 0, est_partner_commission: 0, est_ads_commission: 0, refunded_value: 0, orders: 0, skus: 0, ineligible_gmv: 0, by_content: {} });
+  const blank = () => ({ v: DATA_V, gmv: 0, items_gmv: 0, shipping: 0, order_adjust: 0, tw_missing: 0, tw_error: false, price_sum: 0, commission_base: 0, est_commission: 0, est_partner_commission: 0, est_ads_commission: 0, refunded_value: 0, orders: 0, skus: 0, ineligible_gmv: 0, by_content: {} });
   for (let d = startDay; d < endDay; d = plusDays(d, 1)) days.set(d, blank());
   let pageToken = '', pages = 0;
+  const perOrder = [];
   do {
     const data = await apiCall('POST', '/affiliate_seller/202410/orders/search', {
       query: { page_size: '100', ...(pageToken ? { page_token: pageToken } : {}) },
@@ -211,10 +235,13 @@ async function pullDays(startDay, endDay) {
       const b = days.get(day);
       if (!b) return;
       b.orders++;
+      const po = { id: String(o.id || ''), day, value: 0, qty: 0 };
+      perOrder.push(po);
       (o.skus || []).forEach((s) => {
         const price = money(s.price), qty = num(s.quantity) || 1, v = price * qty;
+        po.value += v; po.qty += qty;
         b.skus++;
-        b.gmv += v;
+        b.items_gmv += v;
         b.price_sum += price;
         b.commission_base += money(s.estimated_commission_base);
         b.est_commission += money(s.estimated_paid_commission);
@@ -229,6 +256,21 @@ async function pullDays(startDay, endDay) {
     pageToken = data.next_page_token || '';
     pages++;
   } while (pageToken && pages < 2000);
+  let tw = { map: new Map(), ok: false };
+  try { tw = await orderAmounts(perOrder.map((x) => x.id), startDay, endDay); } catch (err) { console.error('tiktok-api: shipping lookup failed:', err.message); }
+  perOrder.forEach((po) => {
+    const b = days.get(po.day);
+    const t = tw.map.get(po.id);
+    if (!t) { b.gmv += po.value; b.tw_missing++; if (!tw.ok) b.tw_error = true; return; }
+    if (t.qty > 0 && po.qty >= t.qty) {
+      // every item in the order is creator-attributed: the order's own net
+      b.gmv += t.net + t.ship; b.shipping += t.ship; b.order_adjust += t.net - po.value;
+    } else {
+      const share = t.qty > 0 ? Math.min(1, po.qty / t.qty) : 1;
+      b.gmv += po.value + t.ship * share; b.shipping += t.ship * share;
+    }
+  });
+  days.forEach((b) => { ['gmv', 'items_gmv', 'shipping', 'order_adjust'].forEach((k) => { b[k] = Math.round(b[k] * 100) / 100; }); });
   return days;
 }
 
@@ -274,7 +316,7 @@ async function getCreatorGmv(start, end) {
   const stale = [];
   for (let d = start; d < last; d = plusDays(d, 1)) {
     const s = saved.get(d);
-    if (!s || num(s.data && s.data.v) !== DATA_V || Date.now() - s.fetched_at > maxAgeMs(d, todayPT)) stale.push(d);
+    if (!s || num(s.data && s.data.v) !== DATA_V || Date.now() - s.fetched_at > (s.data.tw_error ? 3600000 : maxAgeMs(d, todayPT))) stale.push(d);
   }
   // Pull the stale days as contiguous spans (one paginated search each; the
   // API allows up to ~3 months per request).
@@ -286,14 +328,14 @@ async function getCreatorGmv(start, end) {
     const days = await inFlight.get(k);
     days.forEach((data, d) => saved.set(d, { data, fetched_at: Date.now() }));
   }
-  const keys = ['gmv', 'price_sum', 'commission_base', 'est_commission', 'est_partner_commission', 'est_ads_commission', 'refunded_value', 'orders', 'skus', 'ineligible_gmv'];
+  const keys = ['gmv', 'items_gmv', 'shipping', 'order_adjust', 'tw_missing', 'price_sum', 'commission_base', 'est_commission', 'est_partner_commission', 'est_ads_commission', 'refunded_value', 'orders', 'skus', 'ineligible_gmv'];
   const total = Object.fromEntries(keys.map((k) => [k, 0]));
   const byDay = [];
   for (let d = start; d < last; d = plusDays(d, 1)) {
     const s = saved.get(d);
     if (!s) continue;
     keys.forEach((k) => { total[k] += num(s.data[k]); });
-    byDay.push({ day: d, gmv: num(s.data.gmv), orders: num(s.data.orders) });
+    byDay.push({ day: d, gmv: num(s.data.gmv), items_gmv: num(s.data.items_gmv), shipping: num(s.data.shipping), orders: num(s.data.orders) });
   }
   const fetched = [...saved.values()].map((s) => s.fetched_at).filter(Boolean);
   return { source: 'tiktok_affiliate_api', tz: TZ, start, end, through: plusDays(last, -1), ...total, by_day: byDay, oldest_fetch: fetched.length ? new Date(Math.min(...fetched)).toISOString() : null };
