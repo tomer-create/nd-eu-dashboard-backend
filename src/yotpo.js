@@ -213,6 +213,10 @@ const POINTS_PER_CURRENCY_UNIT = 10;
 // matching, not exact equality — see the file header for why.
 function classifyTopic(topic) {
   const t = (topic || '').toLowerCase();
+  // 2026-10-29: swell/redemption/reminder ("you have points to redeem") is
+  // not a redemption — it was counted as one (15.5K of ND.COM's 18K
+  // "redemptions" since Sep 6, all with 0 points). Same for any reminder.
+  if (t.includes('reminder')) return 'other';
   if (t.includes('tier')) return 'tier_change';
   if (t.includes('redemption') || t.includes('coupon') || t.includes('reward')) return 'redemption';
   if (t.includes('account') && t.includes('creat')) return 'new_member';
@@ -346,6 +350,10 @@ async function recordYotpoEvent(site, topic, payload) {
 // Store-local day boundaries (2026-10-29 review): the date strings used to be
 // read in the database's UTC, so an event near midnight landed on the
 // neighbouring day / month compared with the Shopify figures.
+// One row per distinct live webhook payload (Yotpo delivers at least once —
+// ~4–6% of stored deliveries before 2026-10-29 were exact repeats); CSV
+// backfill rows are each their own event.
+const LIVE_DEDUP = `CASE WHEN topic LIKE 'backfill:%' THEN id::text ELSE md5(raw_payload::text) END`;
 const YOTPO_SITE_TZ = { com: 'America/New_York', eu: 'Europe/Amsterdam', il: 'Asia/Jerusalem' };
 function tzOffsetMs(utcMs, tz) {
   const parts = Object.fromEntries(new Intl.DateTimeFormat('en-US', { timeZone: tz, hourCycle: 'h23', year: 'numeric', month: '2-digit', day: '2-digit', hour: '2-digit', minute: '2-digit', second: '2-digit' })
@@ -448,8 +456,12 @@ async function getYotpoSummary(site, startDay, endDay) {
        COUNT(DISTINCT email) AS redemptions,
        COUNT(*) AS uses,
        COALESCE(SUM(points), 0) AS points_used
-     FROM yotpo_events
-     WHERE site = $1 AND event_type = 'redemption' AND received_at >= $2 AND received_at < $3
+     -- 2026-10-29: reminders stored as redemptions before classifyTopic
+     -- learned them are left out, and a live webhook delivered more than once
+     -- (same payload) counts once — see LIVE_DEDUP.
+     FROM (SELECT DISTINCT ON (${LIVE_DEDUP}) * FROM yotpo_events
+           WHERE site = $1 AND event_type = 'redemption' AND topic NOT ILIKE '%reminder%'
+             AND received_at >= $2 AND received_at < $3) e
      GROUP BY tier
      ORDER BY points_used DESC`,
     [
@@ -480,9 +492,9 @@ async function getYotpoSummary(site, startDay, endDay) {
   // query already dropped literal tier_from = tier_to pairs.
   const movementRaw = await p.query(
     `SELECT tier_from, tier_to, COUNT(*) AS n
-     FROM yotpo_events
-     WHERE site = $1 AND event_type = 'tier_change' AND tier_from IS NOT NULL AND tier_from <> tier_to
-       AND received_at >= $2 AND received_at < $3
+     FROM (SELECT DISTINCT ON (${LIVE_DEDUP}) * FROM yotpo_events
+           WHERE site = $1 AND event_type = 'tier_change' AND tier_from IS NOT NULL AND tier_from <> tier_to
+             AND received_at >= $2 AND received_at < $3) e
      GROUP BY tier_from, tier_to
      ORDER BY n DESC`,
     [site, start, end]
