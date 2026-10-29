@@ -291,7 +291,7 @@ async function importYotpoHistory(pool, site, { customersBuffer, redemptionsBuff
     // skipped, per event type.
     const liveRes = await client.query(
       `SELECT event_type, MIN(received_at) AS first_live FROM yotpo_events
-       WHERE site = $1 AND topic NOT LIKE 'backfill:%' GROUP BY event_type`,
+       WHERE site = $1 AND topic NOT LIKE 'backfill:%' AND topic NOT ILIKE '%reminder%' GROUP BY event_type`,
       [site]
     );
     const liveFrom = new Map(liveRes.rows.map((r) => [r.event_type, new Date(r.first_live)]));
