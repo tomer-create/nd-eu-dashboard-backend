@@ -75,6 +75,9 @@ async function cachedPast(key, end, fn) {
   const hit = pastCache.get(key);
   if (hit && Date.now() - hit.at < PAST_TTL_MS) return hit.value;
   const value = await fn();
+  // A result with a failed part (e.g. gifting's Shopify price lookup) isn't
+  // kept, so the next request tries again (2026-10-29 review).
+  if (value && value.shopify_error) return value;
   pastCache.set(key, { at: Date.now(), value });
   if (pastCache.size > 200) pastCache.delete(pastCache.keys().next().value);
   return value;
@@ -233,11 +236,21 @@ async function fetchTikTokShop(site, start, end, { yoyRange, momRange } = {}) {
 async function fetchGmvEstimate(site, start, end) {
   if (!SITES_WITH_TIKTOK_SHOP.includes(site) || !process.env.TRIPLEWHALE_API_KEY) return null;
   if (!isoOk(start) || !isoOk(end) || end <= start) return null;
+  // 2026-10-29 (Tomer: "the TikTok Shop GMV looks wrong"): matched to the
+  // cent against Seller Center → Shop analytics, Oct 10–28 day by day:
+  // TikTok's days are GMT-8 by order creation time — Triple Whale stores a
+  // TikTok order's created_at in that same clock, while event_date is the
+  // store's New York day (that put the Oct 10 fill $1,022 over) — and unpaid
+  // orders (auto-cancelled exactly 1 hour after they were placed) are left out.
+  const from = new Date(Date.parse(start + 'T00:00:00Z') - 86400000).toISOString().slice(0, 10);
+  const to = new Date(Date.parse(end + 'T00:00:00Z') + 86400000).toISOString().slice(0, 10);
+  const unpaid = `(fulfillment_status = 'CANCELLED' AND toInt64(toUnixTimestamp(cancelled_at)) - toInt64(toUnixTimestamp(created_at)) BETWEEN 3590 AND 3620)`;
   const rows = await twSql(TW_SHOP_ID[site], `
-    SELECT uniq(order_id) AS orders,
-           SUM(gross_product_sales) + SUM(shipping_price) - SUM(discount_amount_for_product) AS gmv
+    SELECT uniqIf(order_id, NOT ${unpaid}) AS orders,
+           sumIf(gross_product_sales + shipping_price - discount_amount_for_product, NOT ${unpaid}) AS gmv
     FROM orders_table
-    WHERE event_date >= '${start}' AND event_date < '${end}' AND platform = 'tiktok-shops'`.trim(), start, end);
+    WHERE event_date >= '${from}' AND event_date < '${to}' AND platform = 'tiktok-shops'
+      AND created_at >= '${start} 00:00:00' AND created_at < '${end} 00:00:00'`.trim(), from, to);
   const r = rows[0] || {};
   return { start, end, gmv: num(r.gmv), orders: num(r.orders) };
 }
