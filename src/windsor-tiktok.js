@@ -257,8 +257,10 @@ function orderDay(dt) {
   const d = new Date(dt);
   return isNaN(d) ? null : tzDay.format(d); // YYYY-MM-DD
 }
-// TikTok's Affiliate Center reports in Pacific time (GMT-8 / -7).
-const CREATOR_TZ = 'America/Los_Angeles';
+// TikTok's Affiliate Center reports in fixed GMT-8 all year (confirmed
+// 2026-10-28 against its daily figures; was America/Los_Angeles, which is
+// GMT-7 in summer — 2026-10-29 code review).
+const CREATOR_TZ = 'Etc/GMT+8';
 const tzDayPT = new Intl.DateTimeFormat('en-CA', { timeZone: CREATOR_TZ, year: 'numeric', month: '2-digit', day: '2-digit' });
 function orderDayPT(dt) {
   if (!dt) return null;
@@ -399,6 +401,10 @@ function sumRows(rows, field) { return rows.reduce((a, r) => a + num(r[field]), 
 const START_OF_OPS_RE = /start of operations/i;
 async function pullShopPerformance(start, dateTo, coreTo) {
   const tryFrom = async (from) => {
+    // Fees / statements failing used to turn into $0 fees with no flag
+    // (2026-10-29 review): now caught and reported as fees_error.
+    let feesError = null;
+    const feeCatch = (what) => (err) => { console.error(`windsor-tiktok: ${what} failed:`, err.message); feesError = err.message; return []; };
     const [perf, detail, traffic, fees, statements] = await Promise.all([
       // 2026-10-28: asked through `end` (one more day): Windsor's date filter
       // turned out to apply to the row LABEL (Oct 1–28 returned labels Oct
@@ -409,10 +415,10 @@ async function pullShopPerformance(start, dateTo, coreTo) {
       windsorQuery(PERF_CORE_FIELDS, from, coreTo || dateTo),
       windsorQuery(PERF_DETAIL_FIELDS, from, dateTo).catch((err) => { console.error('windsor-tiktok: shop performance details failed:', err.message); return []; }),
       windsorQuery(PERF_FIELDS, from, dateTo).catch((err) => { console.error('windsor-tiktok: traffic breakdowns failed:', err.message); return []; }),
-      windsorQuery(['date', ...Object.keys(FEE_FIELDS)], from, dateTo),
-      windsorQuery(STATEMENT_FIELDS, from, dateTo),
+      windsorQuery(['date', ...Object.keys(FEE_FIELDS)], from, dateTo).catch(feeCatch('fees')),
+      windsorQuery(STATEMENT_FIELDS, from, dateTo).catch(feeCatch('statements')),
     ]);
-    return { perf, detail, traffic, fees, statements, perfFrom: from, perfError: null };
+    return { perf, detail, traffic, fees, statements, perfFrom: from, perfError: null, feesError };
   };
   let from = start;
   for (let i = 0; i < 13; i++) {
@@ -575,6 +581,7 @@ async function pullSellerCenter(start, end) {
     perf_partial: perfPartial(perfFrom || start, end, days, perfError),
     perf_from: perfFrom,
     perf_error: perfError,
+    fees_error: sc.feesError || null,
     gmv: s('gmv_amount'),
     gmv_by_type: byType('gmv_breakdowns'),
     orders: s('orders'),
@@ -647,6 +654,18 @@ async function readCache(start, end) {
   }
   return memCache.get(k) || null;
 }
+// Kept-copy retry clock (2026-10-29 review): when a refresh is rejected the
+// saved copy is dated so the next try is in about an hour, instead of every
+// request starting another 1–3 min Windsor pull.
+async function touchCache(start, end) {
+  const at = new Date(Date.now() - Math.max(0, STALE_AFTER_HOURS - 1) * 3600000);
+  const m = memCache.get(start + '|' + end);
+  if (m) m.fetched_at = at.toISOString();
+  const p = getPool();
+  if (p && (await ensureSchema())) {
+    await p.query('UPDATE windsor_tiktok_cache SET fetched_at = $3 WHERE start_date = $1 AND end_date = $2', [start, end, at]);
+  }
+}
 async function writeCache(start, end, payload) {
   memCache.set(start + '|' + end, { payload, fetched_at: new Date().toISOString() });
   try {
@@ -668,6 +687,11 @@ const inFlight = new Map();
 // a refresh that finds noticeably fewer TikTok orders than the saved copy is
 // a partial answer from Windsor — keep the saved copy instead.
 function seenOrders(p) { return p && p.affiliate && !p.affiliate.error ? num(p.affiliate.orders_seen) : 0; }
+// Any part of the pull that failed (2026-10-29 review): such a copy is never
+// kept over a good one, and never treated as final for an old month.
+function hasErrors(p) {
+  return !!(p && ((p.perf_error && !START_OF_OPS_RE.test(p.perf_error)) || p.fees_error || (p.affiliate && p.affiliate.error) || (p.samples && p.samples.error)));
+}
 function pullAndStore(start, end) {
   const k = start + '|' + end;
   if (inFlight.has(k)) return inFlight.get(k);
@@ -681,11 +705,17 @@ function pullAndStore(start, end) {
       // days and the endpoint's fill make up for days missing in the new one.
       if (compatible && old.version === PAYLOAD_VERSION && num(old.days_with_data) > num(payload.days_with_data) && !old.perf_error) {
         console.error(`windsor-tiktok: refresh for ${start}..${end} has ${payload.days_with_data} days of shop performance vs ${old.days_with_data} saved — keeping the saved copy`);
+        await touchCache(start, end).catch(() => {});
+        return old;
+      }
+      if (compatible && hasErrors(payload) && !hasErrors(old)) {
+        console.error(`windsor-tiktok: refresh for ${start}..${end} had errors — keeping the saved copy`);
+        await touchCache(start, end).catch(() => {});
         return old;
       }
       if (old && seenOrders(old) > 0 && seenOrders(payload) < seenOrders(old) * 0.95) {
         console.error(`windsor-tiktok: refresh for ${start}..${end} found ${seenOrders(payload)} orders vs ${seenOrders(old)} saved — keeping the saved copy`);
-        if (compatible) return old;
+        if (compatible) { await touchCache(start, end).catch(() => {}); return old; }
       }
       await writeCache(start, end, payload);
       return payload;
@@ -790,8 +820,9 @@ async function getSellerCenter(start, end, { refresh } = {}) {
     }
     if (row && row.payload && row.payload.version === PAYLOAD_VERSION) {
       const ageHours = (Date.now() - new Date(row.fetched_at).getTime()) / 3600000;
-      const stable = end <= todayISO() && (Date.now() - new Date(end + 'T00:00:00Z').getTime()) / 86400000 > STABLE_AFTER_DAYS;
-      if (!stable && ageHours > (row.payload.perf_partial ? PARTIAL_STALE_HOURS : STALE_AFTER_HOURS)) {
+      const errored = hasErrors(row.payload);
+      const stable = !errored && end <= todayISO() && (Date.now() - new Date(end + 'T00:00:00Z').getTime()) / 86400000 > STABLE_AFTER_DAYS;
+      if (!stable && ageHours > (row.payload.perf_partial || errored ? PARTIAL_STALE_HOURS : STALE_AFTER_HOURS)) {
         pullAndStore(start, end).catch((err) => console.error('windsor-tiktok: background refresh failed:', err.message));
         return { payload: row.payload, cache: 'stale' };
       }
