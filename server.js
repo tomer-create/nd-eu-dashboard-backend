@@ -94,6 +94,11 @@ app.get('/auth/callback', async (req, res) => {
   if (!code || !site) {
     return res.status(400).send('Missing code or state in callback — start again at /auth/<site>.');
   }
+  // 2026-10-29 code review: only a known site may reach the page / error
+  // text below (it used to be echoed back unescaped).
+  if (!Object.values(ROUTE_TO_SITE).includes(String(site))) {
+    return res.status(400).send('Unknown site in callback — start again at /auth/<site>.');
+  }
   try {
     const token = await exchangeCodeForToken(site, code);
     res.send(`<!doctype html><html><body style="font-family:sans-serif;max-width:640px;margin:60px auto;line-height:1.5">
@@ -102,7 +107,7 @@ app.get('/auth/callback', async (req, res) => {
       <textarea readonly style="width:100%;height:80px;font-family:monospace;font-size:13px;padding:8px">${token}</textarea>
     </body></html>`);
   } catch (err) {
-    res.status(500).send(err.message);
+    res.status(500).send(escHtml(err.message));
   }
 });
 
@@ -110,7 +115,7 @@ app.get('/auth/:route', (req, res) => {
   const { route } = req.params;
   const site = ROUTE_TO_SITE[route];
   if (!site) {
-    return res.status(400).send(`Unknown site "${route}". Must be one of: ${Object.keys(ROUTE_TO_SITE).join(', ')}`);
+    return res.status(400).send(`Unknown site "${escHtml(route)}". Must be one of: ${Object.keys(ROUTE_TO_SITE).join(', ')}`);
   }
   const redirectUri = `${req.protocol}://${req.get('host')}/auth/callback`;
   try {
@@ -120,15 +125,24 @@ app.get('/auth/:route', (req, res) => {
   }
 });
 
+// Shifts [start, end) back by whole years/months. The day is clamped to the
+// target month's last day (2026-10-29 code review: Mar 30 − 1 month used to
+// roll over to Mar 2, so the MoM range overlapped the current one), and the
+// end is shifted as its last INCLUDED day + 1, so a full month maps to the
+// full prior month.
 function shiftDateRange(startISO, endISO, { years = 0, months = 0 } = {}) {
-  const start = new Date(startISO + 'T00:00:00Z');
-  const end = new Date(endISO + 'T00:00:00Z');
-  start.setUTCFullYear(start.getUTCFullYear() - years);
-  end.setUTCFullYear(end.getUTCFullYear() - years);
-  start.setUTCMonth(start.getUTCMonth() - months);
-  end.setUTCMonth(end.getUTCMonth() - months);
+  const shiftDay = (iso) => {
+    const [y, m, d] = iso.split('-').map(Number);
+    const total = (y - years) * 12 + (m - 1) - months;
+    const ty = Math.floor(total / 12), tm = total - ty * 12;
+    const last = new Date(Date.UTC(ty, tm + 1, 0)).getUTCDate();
+    return new Date(Date.UTC(ty, tm, Math.min(d, last)));
+  };
   const fmt = (d) => d.toISOString().slice(0, 10);
-  return { start: fmt(start), end: fmt(end) };
+  const lastIncl = new Date(Date.parse(endISO + 'T00:00:00Z') - 86400000).toISOString().slice(0, 10);
+  const end = shiftDay(lastIncl);
+  end.setUTCDate(end.getUTCDate() + 1);
+  return { start: fmt(shiftDay(startISO)), end: fmt(end) };
 }
 
 function pctChange(curr, prev) {
@@ -194,17 +208,36 @@ app.get('/health', (req, res) => res.json({ ok: true, time: new Date().toISOStri
 // Pulls fresh Shopify data for [start, end) and returns it in the shape the
 // dashboard's renderers expect. Shared by both the GET lookup (used when
 // switching dates) and the POST sync (used by the "Sync" button).
+const SITE_TZ = { com: 'America/New_York', eu: 'Europe/Amsterdam', il: 'Asia/Jerusalem' };
+function storeTodayISO(site) {
+  return new Intl.DateTimeFormat('en-CA', { timeZone: SITE_TZ[site] || 'UTC', year: 'numeric', month: '2-digit', day: '2-digit' }).format(new Date());
+}
+function plusOneDayISO(iso) {
+  return new Date(Date.parse(iso + 'T00:00:00Z') + 86400000).toISOString().slice(0, 10);
+}
 async function buildDataResponse({ site, start, end, compare }) {
   if (!site || !VALID_SITES.includes(site)) {
     const err = new Error(`site must be one of: ${VALID_SITES.join(', ')}`);
     err.status = 400;
     throw err;
   }
-  if (!start || !end) {
-    const err = new Error('start and end (YYYY-MM-DD) are required');
+  if (!/^\d{4}-\d{2}-\d{2}$/.test(String(start)) || !/^\d{4}-\d{2}-\d{2}$/.test(String(end)) || end <= start) {
+    const err = new Error('start and end (YYYY-MM-DD, end after start) are required');
     err.status = 400;
     throw err;
   }
+  // 2026-10-29 code review: cap the span (these routes are public and each
+  // pull pages through every order in the range, 3×), and clamp `end` to
+  // tomorrow in the store's own time zone — a browser past midnight UTC
+  // used to send a day the store hasn't reached yet, which stretched the
+  // YoY/MoM ranges by a day while the current period had no data for it.
+  if ((Date.parse(end) - Date.parse(start)) / 86400000 > 400) {
+    const err = new Error('The date range is limited to 400 days');
+    err.status = 400;
+    throw err;
+  }
+  const storeTomorrow = plusOneDayISO(storeTodayISO(site));
+  if (end > storeTomorrow && start < storeTomorrow) end = storeTomorrow;
 
   const wantYoy = compare.includes('yoy');
   const wantMom = compare.includes('mom');
@@ -729,6 +762,13 @@ async function buildDataResponse({ site, start, end, compare }) {
 
   const tiktokShop = await tiktokShopPromise;
   if (tiktokShop) result.tiktok_shop = tiktokShop;
+  // Sources that came back empty (an outage at sync time) — a closed month
+  // stored like this is re-pulled later instead of kept forever (2026-10-29
+  // code review; see src/month-cache.js).
+  const partial = [];
+  if (!result.channels) partial.push('channels');
+  if (!pnlSheetOtherCosts) partial.push('pnl_sheet');
+  if (partial.length) result.partial_sources = partial;
   const slow = Object.entries(timing.parts).sort((a, b) => b[1] - a[1]).slice(0, 8).map(([k, ms]) => `${k} ${(ms / 1000).toFixed(1)}s`).join(', ');
   console.log(`sync timing site=${site} ${start}..${end}: total ${((Date.now() - timing.t0) / 1000).toFixed(1)}s — slowest: ${slow}`);
   return result;
@@ -846,7 +886,14 @@ function applySalesSummary(aggResult, summary) {
 // (order-created-date based) — Tomer's request was specifically about the
 // Returns dollar figure, and Shopify's ShopifyQL sales_reversals metric
 // doesn't expose a units figure to replace it with.
-function applySalesReversals(aggResult, salesReversals) {
+function applySalesReversals(aggResult, reversals) {
+  // fetchSalesReversals returns { value, units } since 2026-10-29 (units =
+  // ShopifyQL quantity_returned, by refund date — replaces aggregate()'s
+  // order-created-date count, which skewed Units Returned YoY).
+  const salesReversals = reversals && typeof reversals === 'object' ? reversals.value : reversals;
+  if (reversals && typeof reversals === 'object' && reversals.units !== null && reversals.units !== undefined) {
+    aggResult = { ...aggResult, kpis: { ...aggResult.kpis, units_returned: reversals.units } };
+  }
   const { kpis } = aggResult;
   const netSales = kpis.gross_sales - kpis.discounts_total - salesReversals;
   // AOV = Shopify's own average_order_value (2026-10-19, Tomer: "you should
@@ -975,21 +1022,24 @@ app.post('/api/yotpo/webhook/:site', async (req, res) => {
   if (!YOTPO_VALID_SITES.includes(site)) {
     return res.status(404).json({ error: `Unknown site "${site}"` });
   }
+  // 2026-10-29 review: without the secret the route accepted anyone's events.
   const expected = process.env.YOTPO_WEBHOOK_SECRET;
-  if (expected && req.query.token !== expected) {
+  if (!expected) {
+    console.error('yotpo webhook: YOTPO_WEBHOOK_SECRET is not set — delivery refused');
+    return res.status(503).json({ error: 'Webhook secret not configured' });
+  }
+  if (req.query.token !== expected) {
     return res.status(403).json({ error: 'Invalid or missing token' });
   }
   try {
     const topic = req.body && req.body.topic;
-    await recordYotpoEvent(site, topic, req.body || {});
-    res.json({ ok: true });
+    const r = await recordYotpoEvent(site, topic, req.body || {});
+    res.json({ ok: true, duplicate: !!(r && r.duplicate) });
   } catch (err) {
     console.error(`yotpo webhook (site=${site}) failed:`, err.message);
-    // Still 200 — an infra hiccup on our end shouldn't make Yotpo think
-    // this endpoint is broken and back off retries/disable the target;
-    // the error is logged for us to catch, the event is just not saved
-    // this one time.
-    res.status(200).json({ ok: false, error: err.message });
+    // 503 (2026-10-29 review; was 200): Yotpo retries the delivery instead of
+    // the event being lost — safe now that repeats are de-duplicated.
+    res.status(503).json({ ok: false, error: 'Temporarily unable to save the event' });
   }
 });
 
@@ -1271,7 +1321,8 @@ app.get('/api/us-states', async (req, res) => {
 const NY_DAY = new Intl.DateTimeFormat('en-CA', { timeZone: 'America/New_York', year: 'numeric', month: '2-digit', day: '2-digit' });
 async function gmvFill(perfDays, from, end) {
   const plus = (iso, n) => new Date(Date.parse(iso + 'T00:00:00Z') + n * 86400000).toISOString().slice(0, 10);
-  const tomorrow = plus(NY_DAY.format(new Date()), 1);
+  // TikTok's own days are GMT-8 (Seller Center analytics, 2026-10-29).
+  const tomorrow = plus(new Intl.DateTimeFormat('en-CA', { timeZone: 'Etc/GMT+8', year: 'numeric', month: '2-digit', day: '2-digit' }).format(new Date()), 1);
   const last = end < tomorrow ? end : tomorrow;
   const have = new Set(perfDays);
   const runs = [];
@@ -1395,6 +1446,12 @@ app.get('/api/yotpo/summary', async (req, res) => {
   const { site, start, end, include_revenue } = req.query;
   if (!YOTPO_VALID_SITES.includes(site)) {
     return res.status(400).json({ error: `Unknown or missing site "${site}"` });
+  }
+  // 2026-10-29 review: missing dates used to return all-zero data as if real,
+  // and a huge range queued years of Shopify order paging.
+  if (!/^\d{4}-\d{2}-\d{2}$/.test(String(start)) || !/^\d{4}-\d{2}-\d{2}$/.test(String(end)) || end <= start
+    || (Date.parse(end) - Date.parse(start)) / 86400000 > 400) {
+    return res.status(400).json({ error: 'start and end (YYYY-MM-DD, end after start, at most 400 days) are required' });
   }
   try {
     const summary = await getYotpoSummary(site, start, end);
@@ -1688,7 +1745,13 @@ app.get('/admin/yotpo/import', (req, res) => {
 </html>`);
 });
 
-app.post('/admin/yotpo/import', yotpoUpload.fields([{ name: 'customers_csv', maxCount: 1 }, { name: 'redemptions_csv', maxCount: 1 }]), async (req, res) => {
+// Token checked BEFORE multer reads up to 50 MB into memory (2026-10-29 review).
+const adminTokenFirst = (req, res, next) => {
+  const t = process.env.ADMIN_SETUP_TOKEN;
+  if (!t || req.query.token !== t) return res.status(403).send('Invalid or missing token.');
+  next();
+};
+app.post('/admin/yotpo/import', adminTokenFirst, yotpoUpload.fields([{ name: 'customers_csv', maxCount: 1 }, { name: 'redemptions_csv', maxCount: 1 }]), async (req, res) => {
   const adminToken = process.env.ADMIN_SETUP_TOKEN;
   if (!adminToken || req.query.token !== adminToken) {
     return res.status(403).send('Invalid or missing token.');
@@ -1751,10 +1814,11 @@ async function upgradeClosedMonths() {
   const now = new Date();
   const year = now.getUTCFullYear();
   const months = [];
+  const todayUTC = now.toISOString().slice(0, 10);
   for (let m = 0; m < now.getUTCMonth(); m++) {
     const start = new Date(Date.UTC(year, m, 1)).toISOString().slice(0, 10);
     const end = new Date(Date.UTC(year, m + 1, 1)).toISOString().slice(0, 10);
-    months.push([start, end]);
+    if (end < todayUTC) months.push([start, end]); // the 1st itself: not over everywhere yet
   }
   let pulled = 0;
   // Newest months first: those are the ones people look at.
