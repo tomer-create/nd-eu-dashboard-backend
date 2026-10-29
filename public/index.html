@@ -648,7 +648,12 @@ function renderTodayDate() {
 }
 
 function pad2(n) { return String(n).padStart(2, '0'); }
-function isoDate(d) { return d.getFullYear() + '-' + pad2(d.getMonth()+1) + '-' + pad2(d.getDate()); }
+// HTML-escapes text from outside sources (product titles, states, tiers)
+// before it goes into innerHTML (2026-10-29 review).
+function escText(v) { return String(v === null || v === undefined ? '' : v).replace(/[&<>"']/g, c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c])); }
+// Every caller builds its date with Date.UTC(...), so read it back in UTC — local getters
+// shifted every date a day early for viewers west of UTC (2026-10-29 review).
+function isoDate(d) { return d.getUTCFullYear() + '-' + pad2(d.getUTCMonth()+1) + '-' + pad2(d.getUTCDate()); }
 
 // Returns { start, end } (end-exclusive) for a given site's month, in 2026.
 // The current month uses today as the end date (month-to-date); a completed
@@ -658,8 +663,14 @@ function monthDateRange(month, isCurrent) {
   const start = new Date(Date.UTC(2026, mi, 1));
   let end;
   if (isCurrent) {
-    end = new Date(); // today, end-exclusive so today's orders are included by the backend's "<" filter being one day ahead isn't needed here — backend uses created_at < end, so add a day
-    end = new Date(Date.UTC(end.getUTCFullYear(), end.getUTCMonth(), end.getUTCDate() + 1));
+    // Tomorrow by the viewer's LOCAL date (end-exclusive), never before the
+    // month's 2nd. 2026-10-29 review: the UTC date ran a day ahead in US
+    // evenings (stretching YoY/MoM by a day) and gave an empty range just
+    // after local midnight on the 1st in Israel. The backend also clamps
+    // `end` to tomorrow in each store's own time zone.
+    const now = new Date();
+    end = new Date(Date.UTC(now.getFullYear(), now.getMonth(), now.getDate() + 1));
+    if (end <= start) end = new Date(start.getTime() + 86400000);
   } else {
     end = new Date(Date.UTC(2026, mi + 1, 1));
   }
@@ -1198,11 +1209,11 @@ function mergeLiveIntoMonthData(monthData, live, site) {
     const updatedCosts = merged.other_costs.map(row => {
       if (site === 'com' && row.label === 'PR Box Cost + Product Cost') {
         const prBox = byLabel.get('PR Box Cost');
-        if (cogs === undefined || !prBox || prBox.no_data) return row;
+        if (cogs === undefined || cogs === null || !prBox || prBox.no_data) return row; // null COGS (ShopifyQL failed) kept the old line (2026-10-29 review)
         return Object.assign({}, row, { actual: prBox.actual + cogs, _cogs_part: cogs });
       }
       if (row.label === 'Product Cost') {
-        if (cogs === undefined) return row;
+        if (cogs === undefined || cogs === null) return row;
         return Object.assign({}, row, { actual: cogs });
       }
       const liveRow = byLabel.get(row.label);
@@ -1324,8 +1335,10 @@ function mergeLiveIntoMonthData(monthData, live, site) {
       if (otherCostsTotal !== undefined && otherCostsTotal !== null) {
         const profitNow = netSales - otherCostsTotal;
         const marginNow = grossSales ? profitNow / grossSales : null;
-        profitMomChange = profitMomPrior ? (profitNow - profitMomPrior) / profitMomPrior : null;
-        marginMomChange = (marginMomPrior && marginNow !== null) ? (marginNow - marginMomPrior) / marginMomPrior : null;
+        // ÷ |prior| like the backend's pctChange: a loss last month used to flip the sign
+        // (−$67K → +$84K showed −225%) — 2026-10-29 review.
+        profitMomChange = profitMomPrior ? (profitNow - profitMomPrior) / Math.abs(profitMomPrior) : null;
+        marginMomChange = (marginMomPrior && marginNow !== null) ? (marginNow - marginMomPrior) / Math.abs(marginMomPrior) : null;
       }
     }
 
@@ -1335,13 +1348,13 @@ function mergeLiveIntoMonthData(monthData, live, site) {
       merged.kpis = merged.kpis.map(k => {
         if (k.label === 'Profit') {
           const goal = k.goal;
-          const pct_of_goal = (goal !== null && goal !== undefined && goal !== 0) ? profit / goal : null;
+          const pct_of_goal = (goal !== null && goal !== undefined && goal > 0) ? profit / goal : null; // ≤ 0 goal → Met/Below pill
           const mom = profitMomChange !== null ? profitMomChange : k.mom;
           return Object.assign({}, k, { actual: profit, pct_of_goal, mom, no_data: false });
         }
         if (k.label === 'Profit Margin') {
           const goal = k.goal;
-          const pct_of_goal = (goal !== null && goal !== undefined && goal !== 0 && margin !== null) ? margin / goal : null;
+          const pct_of_goal = (goal !== null && goal !== undefined && goal > 0 && margin !== null) ? margin / goal : null;
           const mom = marginMomChange !== null ? marginMomChange : k.mom;
           return Object.assign({}, k, { actual: margin, pct_of_goal, mom, no_data: margin === null });
         }
@@ -1577,7 +1590,7 @@ function deriveRatioChange(entries, getNum, getDen, numIsCurrency, denIsCurrency
   if (!any || !priorDen || !curDen) return null;
   const nowRatio = curNum / curDen, priorRatio = priorNum / priorDen;
   if (!priorRatio) return null;
-  return (nowRatio - priorRatio) / priorRatio;
+  return (nowRatio - priorRatio) / Math.abs(priorRatio); // |prior|: a negative margin last period kept its sign (2026-10-29 review)
 }
 function deriveRatioYoY(entries, getNum, getDen, numIsCurrency, denIsCurrency) {
   return deriveRatioChange(entries, getNum, getDen, numIsCurrency, denIsCurrency, 'yoy');
@@ -1736,8 +1749,8 @@ function combineKPIsRaw(entries, isYTD) {
     rawByLabel[label] = {
       actual, goal: goalHasValue ? goalSum : null, fmt, higher_is_better,
       no_data: dataCount === 0, partial: dataCount > 0 && dataCount < entries.length,
-      yoy: (yoyCount && yoyPrior) ? (yoyActual - yoyPrior) / yoyPrior : null,
-      mom: (momCount && momPrior) ? (momActual - momPrior) / momPrior : null,
+      yoy: (yoyCount && yoyPrior) ? (yoyActual - yoyPrior) / Math.abs(yoyPrior) : null,
+      mom: (momCount && momPrior) ? (momActual - momPrior) / Math.abs(momPrior) : null,
     };
   });
   return { labels, rawByLabel };
@@ -1812,10 +1825,25 @@ function combineMonthDatas(entries, opts) {
   rawByLabel['Profit Margin'].yoy = deriveRatioYoY(entries, m => m['Profit'], m => m['Gross Sales'], true, true);
   rawByLabel['Profit Margin'].mom = isYTD ? null : deriveRatioChange(entries, m => m['Profit'], m => m['Gross Sales'], true, true, 'mom');
 
+  // 2026-10-29 review: same basis as each month's tile (Gross Sales ÷ the P&L
+  // sheet's marketing spend) — each entry's spend is implied from its own
+  // tile (gross ÷ ROAS) and summed. The Section 4 channel sum used before
+  // gave e.g. ND.EU Q3 6.6x while every one of its months read ~10x.
+  const impliedSpend = (key) => {
+    let spend = 0, gross = 0, n = 0;
+    for (const e of entries) {
+      const r = e.monthData.kpis.find(x => x.label === 'Blended ROAS');
+      const g = e.monthData.kpis.find(x => x.label === 'Gross Sales');
+      const rv = r && r[key], gv = g && g[key];
+      if (typeof rv === 'number' && rv > 0 && typeof gv === 'number' && gv > 0) { spend += gv / rv * e.fx; gross += gv * e.fx; n++; }
+    }
+    return n === entries.length && spend > 0 ? gross / spend : undefined;
+  };
   const totalSpend = chanSpendActual + (ppcFee.actual || 0);
   const totalSpendGoal = chanSpendGoal + (ppcFee.goal || 0);
-  rawByLabel['Blended ROAS'].actual = totalSpend ? grossActual / totalSpend : null;
-  rawByLabel['Blended ROAS'].goal = totalSpendGoal ? grossGoal / totalSpendGoal : null;
+  const roasA = impliedSpend('actual'), roasG = impliedSpend('goal');
+  rawByLabel['Blended ROAS'].actual = roasA !== undefined ? roasA : (totalSpend ? grossActual / totalSpend : null);
+  rawByLabel['Blended ROAS'].goal = roasG !== undefined ? roasG : (totalSpendGoal ? grossGoal / totalSpendGoal : null);
   // Blended ROAS has no YoY/MoM in the single-site view either (see the
   // note in mergeLiveIntoMonthData) — no source data to derive either from,
   // combined view or not.
@@ -1824,8 +1852,9 @@ function combineMonthDatas(entries, opts) {
 
   const kpis = labels.map(label => {
     const r = rawByLabel[label];
-    const pct_of_goal = (r.goal !== null && r.goal !== undefined && r.goal !== 0) ? r.actual / r.goal : null;
-    return { label, actual: r.actual, goal: r.goal, fmt: r.fmt, higher_is_better: r.higher_is_better, pct_of_goal, yoy: r.yoy, mom: r.mom, no_data: r.no_data, met_goal: null };
+    const pct_of_goal = (r.goal !== null && r.goal !== undefined && r.goal > 0) ? r.actual / r.goal : null;
+    const met_goal = (typeof r.goal === 'number' && r.goal <= 0 && typeof r.actual === 'number') ? (r.higher_is_better === false ? r.actual <= r.goal : r.actual >= r.goal) : null;
+    return { label, actual: r.actual, goal: r.goal, fmt: r.fmt, higher_is_better: r.higher_is_better, pct_of_goal, yoy: r.yoy, mom: r.mom, no_data: r.no_data, met_goal };
   });
   const partialLabels = labels.filter(l => rawByLabel[l].partial && !rawByLabel[l].no_data);
 
@@ -1898,8 +1927,8 @@ function combineMonthDatas(entries, opts) {
       acc.gross_sales += (item.gross_sales || 0) * fx;
       acc.net_sales += (item.net_sales || 0) * fx;
       if (item.return_rate !== null && item.return_rate !== undefined) { acc._rw += item.return_rate * (item.orders || 0); acc._rwt += (item.orders || 0); }
-      if (item.yoy !== null && item.yoy !== undefined) { const prior = (item.gross_sales || 0) / (1 + item.yoy); acc._yn += (item.gross_sales || 0) * fx; acc._yp += prior * fx; acc._yh = true; }
-      if (item.mom !== null && item.mom !== undefined) { const prior = (item.gross_sales || 0) / (1 + item.mom); acc._mn += (item.gross_sales || 0) * fx; acc._mp += prior * fx; acc._mh = true; }
+      if (item.yoy !== null && item.yoy !== undefined && (1 + item.yoy) !== 0) { const prior = (item.gross_sales || 0) / (1 + item.yoy); acc._yn += (item.gross_sales || 0) * fx; acc._yp += prior * fx; acc._yh = true; }
+      if (item.mom !== null && item.mom !== undefined && (1 + item.mom) !== 0) { const prior = (item.gross_sales || 0) / (1 + item.mom); acc._mn += (item.gross_sales || 0) * fx; acc._mp += prior * fx; acc._mh = true; }
     },
     recompute: item => {
       item.aov = item.orders ? item.net_sales / item.orders : null;
@@ -2374,9 +2403,15 @@ function renderKPIs(monthData) {
       // neutral "info" color (see pbarClass) rather than a good/warn/crit
       // threshold read — a users-mix share isn't a goal being hit or missed.
       progressHtml = renderPBar(pctOfTotal, true, true) + `<div class="pbar-pct">${pctLabel(pctOfTotal)} of total users</div>`;
-    } else if (k.pct_of_goal === null && k.met_goal !== null && k.met_goal !== undefined) {
-      // goal is zero/negative (e.g. a loss-making profit target) — a ratio isn't meaningful
-      progressHtml = `<div class="pbar-pct"><span class="pill ${k.met_goal ? 'good' : 'crit'}">${k.met_goal ? 'Met goal' : 'Below goal'}</span></div>`;
+    } else if ((k.pct_of_goal === null && k.met_goal !== null && k.met_goal !== undefined)
+      || (typeof k.goal === 'number' && k.goal <= 0 && typeof k.actual === 'number')) {
+      // goal is zero/negative (e.g. a loss-making profit target) — a ratio isn't meaningful.
+      // 2026-10-29 review: a negative goal used to show e.g. "-212% of goal" in red even when
+      // the goal was beaten (live merges and combined views recompute pct_of_goal = actual/goal).
+      const met = (typeof k.goal === 'number' && k.goal <= 0 && typeof k.actual === 'number')
+        ? (k.higher_is_better === false ? k.actual <= k.goal : k.actual >= k.goal)
+        : k.met_goal;
+      progressHtml = `<div class="pbar-pct"><span class="pill ${met ? 'good' : 'crit'}">${met ? 'Met goal' : 'Below goal'}</span></div>`;
     } else {
       // "MTD" only makes sense for a single (in-progress) month. Year to
       // Date rolls up 8-9 complete months plus one in-progress month, and
@@ -2663,7 +2698,7 @@ function renderTikTokShop(monthData, opts = {}) {
     tile('Units Sold', tt.units, 'number', 'units', true, ''),
     tile('Refunds', tt.refunds, 'currency-full', 'refunds', false, gmvShown ? fmtVal(tt.refunds / gmvShown, 'percent') + ' of GMV' : ''),
     tileV('Discount Ratio', fmtVal(discRatio, 'percent'), discRatioYoy, discRatioMom, false, hasProdDisc ? fmtVal(prodDisc, 'currency-full') + ' product discounts ÷ gross sales before discounts (excl. ' + fmtVal((tt.discounts || 0) - prodDisc, 'currency-full') + ' shipping discounts)' : 'Product discounts not loaded yet — click Sync', 'Product discounts ÷ Gross Sales TikTok (shipping discounts not included)'),
-    tile('New-Customer Orders', tt.new_customer_orders, 'number', 'new_customer_orders', true, tt.orders ? fmtVal(tt.new_customer_orders / tt.orders, 'percent') + ' of orders' : ''),
+    tile('New-Customer Orders', tt.new_customer_orders, 'number', 'new_customer_orders', true, (tt.orders && typeof tt.new_customer_orders === 'number') ? fmtVal(tt.new_customer_orders / tt.orders, 'percent') + ' of orders' : ''),
   ];
 
   // Revenue by source — updated 2026-10-07 per Tomer: TTS Ads conversion
@@ -2804,7 +2839,7 @@ function renderTikTokShop(monthData, opts = {}) {
     ? `<div class="tt-share" role="img" aria-label="TikTok Shop Ads ${fmtVal(adsShare,'percent')}, affiliate ${fmtVal(affShare,'percent')}, organic ${fmtVal(orgShare,'percent')} of GMV">
         <span style="width:${pctW(adsShare)}%;background:${C1}"></span><span style="width:${pctW(affShare)}%;background:${C2}"></span><span style="width:${pctW(orgShare)}%;background:${C3}"></span>
       </div>
-      <div class="tt-legend"><span><i style="background:${C1}"></i>TikTok Ads ${fmtVal(adsShare,'percent')}</span><span><i style="background:${C2}"></i>Affiliate ${fmtVal(affShareFull,'percent')}${ovlShown > 0.5 && gmvBase ? ` (${fmtVal(ovlShown / gmvBase,'percent')} also in TikTok Ads)` : ''}</span><span><i style="background:${C3}"></i>Organic ${fmtVal(orgShare,'percent')}</span></div>`
+      <div class="tt-legend"><span><i style="background:${C1}"></i>TikTok Ads ${fmtVal(adsShare,'percent')}</span><span><i style="background:${C2}"></i>Affiliate ${fmtVal(affShareFull,'percent')}</span><span><i style="background:${C3}"></i>Organic ${fmtVal(orgShare,'percent')}</span></div>`
     : `<div class="tt-share" role="img" aria-label="TikTok Shop Ads ${fmtVal(adsShare,'percent')} of GMV, affiliate and organic ${fmtVal(comboShare,'percent')}">
         <span style="width:${pctW(adsShare)}%;background:${C1}"></span><span style="width:${pctW(comboShare)}%;background:${C2}"></span>
       </div>
@@ -2977,7 +3012,8 @@ function renderTikTokShop(monthData, opts = {}) {
     if (x.aff) {
       const aov = nonAffAovOf(x.aff, x.gmv);
       lines.push({ name: 'Affiliate', color: C2, rev: x.affNet, cost: x.affCost, orders: x.affOrdersNet, costSub: x.affCostSub });
-      if (x.overlap > 0.5) lines.push({ name: 'Counted by both', overlapLine: true, color: 'var(--text-muted)', rev: -x.overlap, cost: null, orders: null, costSub: '', ordersWhy: 'Already in TikTok Ads and Affiliate' });
+      // 2026-10-29 (Tomer): the "Counted by both" row is hidden — still taken into account in Organic.
+      if (false && x.overlap > 0.5) lines.push({ name: 'Counted by both', overlapLine: true, color: 'var(--text-muted)', rev: -x.overlap, cost: null, orders: null, costSub: '', ordersWhy: 'Already in TikTok Ads and Affiliate' });
       lines.push({ name: 'Organic', color: C3, rev: x.organic, cost: null, orders: aov && x.organic ? x.organic / aov : null, ordersEst: true, costSub: 'no direct cost', ordersWhy: 'TikTok’s order data isn’t loaded for this period' });
     } else {
       lines.push({ name: 'Affiliate + Organic', color: C2, rev: x.gmv - x.adsCV, cost: x.affCost, orders: null, costSub: x.affCostSub, ordersWhy: 'Needs TikTok’s order data (affiliate split) for this period' });
@@ -3093,7 +3129,7 @@ function renderTikTokShop(monthData, opts = {}) {
     if (!al) return { why: scPending ? 'Loading TikTok’s order data…' : (lowCoverageMsg || 'TikTok’s affiliate order data isn’t available for this period') };
     const cy = chgFor(al, 'yoy'), cm = chgFor(al, 'mom');
     return { aov: m && m.aov !== null ? m.aov : null, rev: m && m.aov !== null ? al.rev * al.nr : 0, orders: al.orders,
-      gross: al.rev, yoy: cy.rev ?? null, mom: cm.rev ?? null, partial, api: !!(aff && aff.creator_src === 'api') };
+      gross: al.rev, yoy: cy.rev ?? null, mom: cm.rev ?? null, partial, api: !!(aff && aff.creator_src === 'api'), overlap: ovlShown || 0 };
   }
   const rcChip = (v, neutral) => { if (v === null || v === undefined) return '<span class="kpi-yoy flat">—</span>'; const c = ttChange(v, true); return `<span class="kpi-yoy ${neutral ? 'neutral' : c.dir}">${c.str}</span>`; };
   const rcChg = (line, key) => { const y = chgFor(line, 'yoy')[key], m = chgFor(line, 'mom')[key]; return `<div class="tt-rc-chg"><span class="lbl">YoY</span>${rcChip(y, key === 'cost')}<span class="lbl">${mLabel}</span>${rcChip(m, key === 'cost')}</div>`; };
@@ -3126,8 +3162,8 @@ function renderTikTokShop(monthData, opts = {}) {
       </tbody>
     </table>
     <div class="tt-note">Revenue: TikTok Ads = Triple Whale's TikTok Ads conversion value (the same figure as in Marketing &amp; Sales Channel Performance); ${creatorMode
-      ? `Affiliate = ${aff.creator_src === 'api' ? `TikTok Affiliate Center's Creator-attributed GMV, straight from TikTok (TikTok Shop API: what buyers paid for the creator-attributed items of every affiliate order, incl. the shipping they paid, by order day in GMT-8 like the Affiliate Center).` : `TikTok's creator-attributed GMV estimated from TikTok's order data (TikTok's own figure isn't connected yet): price − seller discount of every order that paid a creator commission, by order day in Pacific time. TikTok counts only the items a creator sold, so this runs a few % above TikTok's.`} Counted by both = ${fmtVal(overlap,'currency-full')} of those orders that TikTok Ads also claims (ads on a creator's content${overlapEstimated ? '; partly estimated so Organic isn’t below $0' : ''}), taken off once; Organic = TikTok Shop GMV − TikTok Ads − Affiliate + Counted by both.`
-      : `Affiliate = the share of TikTok's order data that paid a creator commission, applied to TikTok Shop GMV, less ${fmtVal(overlap,'currency-full')} of affiliate orders TikTok Ads already counts${overlapEstimated ? ' (partly estimated)' : ''}; Organic = TikTok Shop GMV − (Affiliate + TikTok Ads).`} The lines add up to TikTok Shop GMV — the same figure as the GMV tile above. Costs as in “TikTok costs” below, grouped by source — Affiliate = commission + samples (TikTok Gifting) + sample shipping. ROAS = revenue ÷ cost. AOV is on Net Sales, like the AOV tile: each line's share of TikTok Net Sales ÷ its orders, so the Total equals the tile. Every line's share = its revenue × Net Sales ÷ TikTok Shop GMV. Orders: TikTok Ads = TikTok's own conversions for its ads; Affiliate = ${creatorMode ? 'the orders that paid a creator commission' : 'affiliate orders in TikTok\'s order data, less the ones TikTok Ads also counts'}; Organic is estimated — Organic GMV ÷ the average order without a creator commission (TikTok counts many affiliate orders as Ads conversions too, so they can't simply be subtracted). YoY / ${mLabel}: same calculation for the comparison period; the Affiliate cost's changes use TikTok's own commission and sample figures for the same days (see “TikTok costs”). The comparison periods use TikTok’s order data for GMV (gross + shipping − product discounts). The TikTok Shop transaction fee covers every order, so it isn't given to a source and isn't in this table (it is in “TikTok costs” and the TikTok ROAS tile).</div>`;
+      ? `Affiliate = ${aff.creator_src === 'api' ? `TikTok Affiliate Center's Creator-attributed GMV, straight from TikTok (TikTok Shop API: what buyers paid for the creator-attributed items of every affiliate order, incl. the shipping they paid, by order day in GMT-8 like the Affiliate Center).` : `TikTok's creator-attributed GMV estimated from TikTok's order data (TikTok's own figure isn't connected yet): price − seller discount of every order that paid a creator commission, by order day in Pacific time. TikTok counts only the items a creator sold, so this runs a few % above TikTok's.`} Organic = TikTok Shop GMV − TikTok Ads − Affiliate, with the ${fmtVal(overlap,'currency-full')} of affiliate orders TikTok Ads also claims (ads on a creator's content${overlapEstimated ? '; partly estimated so Organic isn’t below $0' : ''}) counted once.`
+      : `Affiliate = the share of TikTok's order data that paid a creator commission, applied to TikTok Shop GMV, less ${fmtVal(overlap,'currency-full')} of affiliate orders TikTok Ads already counts${overlapEstimated ? ' (partly estimated)' : ''}; Organic = TikTok Shop GMV − (Affiliate + TikTok Ads).`} ${creatorMode && overlap > 0.5 ? 'Total = TikTok Shop GMV, the same figure as the GMV tile above (TikTok Ads and Affiliate overlap by the orders both claim).' : 'The lines add up to TikTok Shop GMV — the same figure as the GMV tile above.'} Costs as in “TikTok costs” below, grouped by source — Affiliate = commission + samples (TikTok Gifting) + sample shipping. ROAS = revenue ÷ cost. AOV is on Net Sales, like the AOV tile: each line's share of TikTok Net Sales ÷ its orders, so the Total equals the tile. Every line's share = its revenue × Net Sales ÷ TikTok Shop GMV. Orders: TikTok Ads = TikTok's own conversions for its ads; Affiliate = ${creatorMode ? 'the orders that paid a creator commission' : 'affiliate orders in TikTok\'s order data, less the ones TikTok Ads also counts'}; Organic is estimated — Organic GMV ÷ the average order without a creator commission (TikTok counts many affiliate orders as Ads conversions too, so they can't simply be subtracted). YoY / ${mLabel}: same calculation for the comparison period; the Affiliate cost's changes use TikTok's own commission and sample figures for the same days (see “TikTok costs”). The comparison periods use TikTok’s order data for GMV (gross + shipping − product discounts). The TikTok Shop transaction fee covers every order, so it isn't given to a source and isn't in this table (it is in “TikTok costs” and the TikTok ROAS tile).</div>`;
 
   // Top products
   // YoY / MoM per product (2026-10-08): prior-period sales of the same product
@@ -3146,7 +3182,7 @@ function renderTikTokShop(monthData, opts = {}) {
   const prodTable = prods.length ? `
     <table class="dtable">
       <thead><tr><th style="text-align:left">Product</th><th>Gross sales</th><th>Units</th><th>% of gross</th><th>YoY</th><th>${mLabel}</th></tr></thead>
-      <tbody>${prods.map((p, i) => `<tr><td><div class="tt-title" title="${p.title.replace(/"/g,'&quot;')}">${i+1}. ${p.title}</div></td><td>${fmtVal(p.gross_sales,'currency-full')}</td><td>${fmtVal(p.units,'number')}</td><td>${gmv ? fmtVal(p.gross_sales/gmv,'percent') : '—'}</td><td>${pCell(p.gross_sales, p.yoy_gross)}</td><td>${pCell(p.gross_sales, multi ? (qoqOk ? p.prev3_gross : undefined) : p.prev_gross)}</td></tr>`).join('')}</tbody>
+      <tbody>${prods.map((p, i) => `<tr><td><div class="tt-title" title="${escText(p.title)}">${i+1}. ${escText(p.title)}</div></td><td>${fmtVal(p.gross_sales,'currency-full')}</td><td>${fmtVal(p.units,'number')}</td><td>${gmv ? fmtVal(p.gross_sales/gmv,'percent') : '—'}</td><td>${pCell(p.gross_sales, p.yoy_gross)}</td><td>${pCell(p.gross_sales, multi ? (qoqOk ? p.prev3_gross : undefined) : p.prev_gross)}</td></tr>`).join('')}</tbody>
     </table>${tt.top_products_note ? `<div class="tt-note">${tt.top_products_note}</div>` : ''}` : `<div class="tt-pending">No product-level TikTok Shop data for this period.</div>`;
 
   const partial = tt.months_with_data && tt.months_total && tt.months_with_data < tt.months_total
@@ -3200,13 +3236,25 @@ async function fetchSellerCenter(start, end, attempt = 0) {
 // GMV and sample shipping (the Seller Center panel itself was removed
 // 2026-10-08 per Tomer). Returns the cache entry for [start, end) and starts
 // the pull if there isn't one; when it finishes, the TikTok section re-renders.
+// A range still in progress (ends after today) — its figures keep changing.
+function rangeInProgress(range) {
+  const t = new Date(); const today = isoDate(new Date(Date.UTC(t.getFullYear(), t.getMonth(), t.getDate())));
+  return range.end > today;
+}
 function ttEnsureSC(range) {
   const key = range.start + '|' + range.end;
-  if (!sellerCenterCache[key]) {
-    sellerCenterCache[key] = { status: 'loading' };
+  const prev = sellerCenterCache[key];
+  // 2026-10-29 review: an error used to stick until the page was reloaded, and
+  // the month in progress never refreshed — errors retry after a minute, and
+  // an in-progress range re-pulls in the background every 15 min (the old
+  // figures stay on screen meanwhile).
+  const retry = prev && prev.status === 'error' && Date.now() - (prev.at || 0) > 60000;
+  const refresh = prev && prev.status === 'ok' && !prev.refreshing && rangeInProgress(range) && Date.now() - (prev.at || 0) > 15 * 60000;
+  if (!prev || retry || refresh) {
+    if (refresh) prev.refreshing = true; else sellerCenterCache[key] = { status: 'loading' };
     fetchSellerCenter(range.start, range.end)
-      .then(d => { sellerCenterCache[key] = { status: 'ok', data: d }; })
-      .catch(err => { sellerCenterCache[key] = { status: 'error', error: err.message }; })
+      .then(d => { sellerCenterCache[key] = { status: 'ok', data: d, at: Date.now() }; })
+      .catch(err => { if (refresh) { prev.refreshing = false; prev.at = Date.now(); } else sellerCenterCache[key] = { status: 'error', error: err.message, at: Date.now() }; })
       .finally(() => { if (state.site === 'com') renderTikTokShop(getMonthData()); if (state.site === 'com' || state.site === 'all') renderChannels(getMonthData()); });
   }
   return sellerCenterCache[key];
@@ -3222,6 +3270,16 @@ function ttEnsureCreatorApi(range) {
   const key = range.start + '|' + range.end;
   const prev = creatorApiCache[key];
   const retryAfter = prev && prev.status === 'unavailable' ? 600000 : 60000;
+  // In-progress range: refreshed every 30 min in the background (2026-10-29 review).
+  const refresh = prev && prev.status === 'ok' && !prev.refreshing && rangeInProgress(range) && Date.now() - (prev.at || 0) > 30 * 60000;
+  if (refresh) {
+    prev.refreshing = true;
+    fetch(`${BACKEND_URL}/api/tiktok-shop/creator-gmv?start=${range.start}&end=${range.end}`).then(r => r.ok ? r.json() : null).catch(() => null)
+      .then(d => {
+        if (d && typeof d.gmv === 'number') { creatorApiCache[key] = { status: 'ok', data: d, at: Date.now() }; if (state.site === 'com') renderTikTokShop(getMonthData()); if (state.site === 'com' || state.site === 'all') renderChannels(getMonthData()); }
+        else { prev.refreshing = false; prev.at = Date.now(); }
+      });
+  }
   if (!prev || ((prev.status === 'error' || prev.status === 'unavailable') && Date.now() - (prev.at || 0) > retryAfter)) {
     creatorApiCache[key] = { status: 'loading' };
     (async () => {
@@ -3238,7 +3296,7 @@ function ttEnsureCreatorApi(range) {
       }
       throw lastErr || new Error('Couldn’t load');
     })()
-      .then(d => { creatorApiCache[key] = d && d.unavailable ? { status: 'unavailable', error: d.error, at: Date.now() } : { status: 'ok', data: d }; if (d && !d.unavailable) { if (state.site === 'com') renderTikTokShop(getMonthData()); if (state.site === 'com' || state.site === 'all') renderChannels(getMonthData()); } })
+      .then(d => { creatorApiCache[key] = d && d.unavailable ? { status: 'unavailable', error: d.error, at: Date.now() } : { status: 'ok', data: d, at: Date.now() }; if (d && !d.unavailable) { if (state.site === 'com') renderTikTokShop(getMonthData()); if (state.site === 'com' || state.site === 'all') renderChannels(getMonthData()); } })
       .catch(err => { creatorApiCache[key] = { status: 'error', error: err.message, at: Date.now() }; });
   }
   return creatorApiCache[key];
@@ -3277,9 +3335,25 @@ function ttEnsureGifting(range) {
   }
   return giftingCache[key];
 }
+// Shifts [start, end) back by `months` (and `years`), clamping the day to the
+// target month's last day and shifting the end as last-included-day + 1 —
+// Mar 30 − 1 month used to roll over to Mar 2 (2026-10-29 review). Same rule
+// as the backend's shiftDateRange.
+function shiftRangeClamped(startISO, endISO, years, months) {
+  const shiftDay = (iso) => {
+    const [y, m, d] = iso.split('-').map(Number);
+    const total = (y - years) * 12 + (m - 1) - months;
+    const ty = Math.floor(total / 12), tm = total - ty * 12;
+    const last = new Date(Date.UTC(ty, tm + 1, 0)).getUTCDate();
+    return new Date(Date.UTC(ty, tm, Math.min(d, last)));
+  };
+  const fmt = (d) => d.toISOString().slice(0, 10);
+  const end = shiftDay(new Date(Date.parse(endISO + 'T00:00:00Z') - 86400000).toISOString().slice(0, 10));
+  end.setUTCDate(end.getUTCDate() + 1);
+  return { start: fmt(shiftDay(startISO)), end: fmt(end) };
+}
 function ttShiftRange(r, months) {
-  const f = iso => { const d = new Date(iso + 'T00:00:00Z'); d.setUTCMonth(d.getUTCMonth() - months); return d.toISOString().slice(0, 10); };
-  return { start: f(r.start), end: f(r.end) };
+  return shiftRangeClamped(r.start, r.end, 0, months);
 }
 // Comparison ranges for the selected period: YoY = same dates last year;
 // MoM = previous month (same number of days for the month in progress);
@@ -3593,7 +3667,9 @@ function c4OrganicPlug(md, hidden) {
   if (!g || g.no_data || !(g.actual > 0)) return md;
   const gross = g.actual;
   const others = md.channels.filter(c => !c.no_data && c.label !== 'Organic' && !hidden.includes(c.label)).reduce((t, c) => t + (c.revenue_actual || 0), 0);
-  const plug = gross - others;
+  // TikTok Ads + TikTok Affiliates overlap counted once (see c4TikTokAffiliatesLive).
+  const ovl = !hidden.includes('TikTok Affiliates') && !hidden.includes('TikTok Ads') ? (md.c4_tt_overlap || 0) : 0;
+  const plug = gross - others + ovl;
   let channels = md.channels.map(c => c.label === 'Organic'
     ? Object.assign({}, c, { no_data: false, revenue_actual: plug, sheet_revenue: c.no_data ? null : c.revenue_actual, spend_actual: c.spend_actual || 0, roas: c.spend_actual ? plug / c.spend_actual : null, plug: true })
     : Object.assign({}, c));
@@ -3618,7 +3694,12 @@ function c4TikTokAffiliatesLive(md) {
   const c = md.channels[i];
   const channels = md.channels.slice();
   channels[i] = Object.assign({}, c, { revenue_actual: f.gross, revenue_sheet: c.revenue_actual, revenue_source: 'tiktok', tt_rev_yoy: f.yoy, tt_rev_mom: f.mom, roas: c.spend_actual ? f.gross / c.spend_actual : null });
-  return Object.assign({}, md, { channels });
+  // Orders both TikTok Ads (Triple Whale CV) and TikTok Affiliates claim (ads
+  // on a creator's content) — counted once in Organic and the Total
+  // (2026-10-29, Tomer). Only when the TikTok Ads row is there too.
+  const hasAds = md.channels.some(x => x.label === 'TikTok Ads' && !x.no_data);
+  const overlap = hasAds && f.overlap > 0.5 ? f.overlap : 0;
+  return Object.assign({}, md, { channels, c4_tt_overlap: overlap });
 }
 // TikTok Affiliates Avg order for Section 4 (2026-10-21): the TikTok Shop
 // section's Affiliate line for ND.COM in the period on screen (All Sites:
@@ -3962,9 +4043,12 @@ function renderChannels(monthData) {
 
   const totSpendActual = dataChannels.reduce((s,c) => s + (c.spend_actual||0), 0);
   const totSpendGoal = dataChannels.reduce((s,c) => s + (c.spend_goal||0), 0);
-  const totRevActual = dataChannels.reduce((s,c) => s + (c.revenue_actual||0), 0);
+  // The TikTok Ads / TikTok Affiliates overlap is in both rows — taken off the
+  // Total once, so it still equals Gross Sales.
+  const c4Ovl = !hidden.includes('TikTok Affiliates') && !hidden.includes('TikTok Ads') ? (monthData.c4_tt_overlap || 0) : 0;
+  const totRevActual = dataChannels.reduce((s,c) => s + (c.revenue_actual||0), 0) - c4Ovl;
   const totRevGoal = dataChannels.reduce((s,c) => s + (c.revenue_goal||0), 0);
-  const totRevRatio = dataChannels.reduce((s,c) => s + (c.revenue_ratio||0), 0);
+  const totRevRatio = dataChannels.reduce((s,c) => s + (c.revenue_ratio||0), 0) - (monthData.c4_gross ? c4Ovl / monthData.c4_gross : 0);
   const totRoas = totSpendActual ? totRevActual / totSpendActual : null;
   const totRoasGoal = totSpendGoal ? totRevGoal / totSpendGoal : null;
   // Total-row changes and AOV cover the Triple Whale channels (the only ones
@@ -4049,7 +4133,7 @@ function renderChannels(monthData) {
       <li><b>Avg order</b> — channel revenue ÷ the orders attributed to it (Triple Whale Pixel orders, or the channel’s own reported conversions for Channel-CV channels). <b>Collabs Affiliate</b>: Shopify has no “Collabs order” flag, so its Avg order uses the orders that used a Collabs creator code — their sales after discount ÷ their number. The Collabs app’s revenue also includes link-only orders without a code, so those orders aren’t in this figure.</li>
       <li><b>% of Gross Sales</b> — the channel’s revenue ÷ Gross Sales; the bar shows that share (a full bar = 100%).</li>
       <li><b>Groups</b> — Paid ads (Google, Meta, Snapchat, Pinterest, Shop App, Microsoft, TikTok Ads, ChatGPT Ads), Email, SMS &amp; retargeting (Attentive, RTB House — Criteo until September 2026), Affiliates (Collabs, impact.com, TikTok Affiliates) and Organic. Each group is its own block: four tiles (Spend, Revenue, Overall ROAS, Avg order value); “Show breakdown” opens its channels and total row. Organic is one line — Revenue and Avg order value only: its revenue is Gross Sales minus every other channel (so it includes TikTok Organic, which isn’t shown on its own), and its Avg order value comes from Triple Whale’s organic channels (Organic &amp; Social + Direct): their revenue ÷ their orders, the same method as the other channels. The group’s spend (total cost) and revenue add up its channels; Overall ROAS = group revenue ÷ group spend; Avg order value = revenue ÷ orders of the group’s channels that have an order count; its change adds up the channels that have that comparison, shown when they make up at least 80% of the group. The <b>All channels</b> block at the top shows the totals for every channel: Total Marketing Spend, Revenue from channels (equals Gross Sales), Overall ROAS, the top revenue channel and Avg order. <b>Avg order</b> there is Shopify’s AOV — (Gross Sales − Discounts) ÷ orders — the same as AOV in Key Metrics. Each group’s Avg order value is the revenue ÷ orders Triple Whale attributes to that group’s channels.</li>
-      ${monthData.c4_gross ? `<li><b>Organic</b> — Gross Sales (${fmtVal(monthData.c4_gross, 'currency-full')}, as in Key Metrics) minus every other channel above, so the Total always equals Gross Sales. The P&amp;L sheet’s Organic row works the same way, but several channels here come live from Triple Whale rather than from the sheet, so it’s recomputed on the dashboard’s own figures${(() => { const o = monthData.channels.find(c => c.plug); return o && o.sheet_revenue != null ? ` (the sheet’s Organic figure: ${fmtVal(o.sheet_revenue, 'currency-full')})` : ''; })()}.${state.month === DATA.meta.current_month ? ' For the month in progress, channels from the sheet run through its last update, so Organic also picks up the days the sheet hasn’t reached yet.' : ''}</li>` : ''}
+      ${monthData.c4_gross ? `<li><b>Organic</b> — Gross Sales (${fmtVal(monthData.c4_gross, 'currency-full')}, as in Key Metrics) minus every other channel above, so the Total always equals Gross Sales.${monthData.c4_tt_overlap > 0.5 ? ` TikTok Ads and TikTok Affiliates both include ${fmtVal(monthData.c4_tt_overlap, 'currency-full')} of TikTok orders (ads on a creator’s content) — counted once in Organic and in the Total.` : ''} The P&amp;L sheet’s Organic row works the same way, but several channels here come live from Triple Whale rather than from the sheet, so it’s recomputed on the dashboard’s own figures${(() => { const o = monthData.channels.find(c => c.plug); return o && o.sheet_revenue != null ? ` (the sheet’s Organic figure: ${fmtVal(o.sheet_revenue, 'currency-full')})` : ''; })()}.${state.month === DATA.meta.current_month ? ' For the month in progress, channels from the sheet run through its last update, so Organic also picks up the days the sheet hasn’t reached yet.' : ''}</li>` : ''}
       <li><b>Changes (switch: vs last year / vs last ${periodWord})</b> — Triple Whale channels compare the same dates last year and ${prevAvailable ? 'in the previous ' + periodWord : '(no previous period here)'}. Channels from the P&amp;L sheet (Organic, TikTok Affiliates, TikTok Organic, Collabs, Attentive…) have no YoY: the sheet’s 2025 columns only hold Gross and Net Sales, not channels. Their ${momLabel()} compares the previous closed ${periodWord} on this dashboard${isCurMonth ? `; for the month in progress the sheet has one month-to-date figure, so it compares per day — this month’s figure ÷ the days it covers against last month’s full figure ÷ its days (ROAS as is). The days covered come from the sheet’s own Gross Sales as a share of Shopify’s so far${pace ? ` (${Math.round(pace.share * 100)}% of ${pace.elapsed} days ≈ ${pace.curDays.toFixed(1)} days)` : ''}. Those chips have a dotted underline; hover one for details` : ''}. The Total’s changes and Avg order cover the Triple Whale channels. Spend changes are grey — more spend isn’t good or bad by itself. Hover a “—” to see why it’s blank.</li>
       ${attNote}
       ${monthData.channels_note ? `<li><b>Sources</b> — ${monthData.channels_note}</li>` : ''}
@@ -4223,14 +4307,14 @@ function yotpoDateRange(month) {
     const start = isoDate(new Date(Date.UTC(2026, MONTH_INDEX[ms[0]], 1)));
     if (isQuarterInProgress(month)) {
       const now = new Date();
-      return { start, end: isoDate(new Date(Date.UTC(now.getUTCFullYear(), now.getUTCMonth(), now.getUTCDate() + 1))) };
+      return { start, end: isoDate(new Date(Date.UTC(now.getFullYear(), now.getMonth(), now.getDate() + 1))) };
     }
     return { start, end: isoDate(new Date(Date.UTC(2026, MONTH_INDEX[ms[2]] + 1, 1))) };
   }
   if (month === 'YTD') {
     const start = isoDate(new Date(Date.UTC(2026, 0, 1)));
     const now = new Date();
-    const end = isoDate(new Date(Date.UTC(now.getUTCFullYear(), now.getUTCMonth(), now.getUTCDate() + 1)));
+    const end = isoDate(new Date(Date.UTC(now.getFullYear(), now.getMonth(), now.getDate() + 1)));
     return { start, end };
   }
   const isCurrent = DATA.sites.com.months[month] ? DATA.sites.com.months[month].is_current : false;
@@ -4261,14 +4345,7 @@ function yotpoCanonicalTiers() {
 // date-shifted fetches rather than reading a pre-computed yoy/mom field off
 // monthData the way every other section does.
 function yotpoShiftDateRange(startISO, endISO, { years = 0, months = 0 } = {}) {
-  const start = new Date(startISO + 'T00:00:00Z');
-  const end = new Date(endISO + 'T00:00:00Z');
-  start.setUTCFullYear(start.getUTCFullYear() - years);
-  end.setUTCFullYear(end.getUTCFullYear() - years);
-  start.setUTCMonth(start.getUTCMonth() - months);
-  end.setUTCMonth(end.getUTCMonth() - months);
-  const fmt = (d) => d.toISOString().slice(0, 10);
-  return { start: fmt(start), end: fmt(end) };
+  return shiftRangeClamped(startISO, endISO, years, months);
 }
 function yotpoPctChange(curr, prev) {
   if (!prev) return null;
@@ -4443,7 +4520,9 @@ async function renderYotpoLoyalty() {
       el,
       combineYotpoSummaries(taggedEntries(keys)),
       combineYotpoSummaries(taggedEntries(yoyKeys)),
-      combineYotpoSummaries(taggedEntries(momKeys)),
+      // No MoM for YTD or a quarter still in progress (same rule as the rest of
+      // the dashboard — 2026-10-29 review: it used to compare overlapping windows).
+      usStatesRanges().prev ? combineYotpoSummaries(taggedEntries(momKeys)) : null,
       true
     );
 
@@ -4477,7 +4556,7 @@ async function renderYotpoLoyalty() {
       el,
       yotpoCache[key] === 'error' ? { no_data: true, fetch_error: true } : yotpoCache[key],
       readComparison(yoyKey),
-      readComparison(momKey),
+      usStatesRanges().prev ? readComparison(momKey) : null,
       false
     );
     yotpoRetryPendingRevenue([state.site], [key], yotpoDateRange(state.month));
@@ -4507,7 +4586,7 @@ async function renderYotpoLoyalty() {
       el,
       yotpoCache[key] === 'error' ? { no_data: true, fetch_error: true } : yotpoCache[key],
       readComparison(yoyKey),
-      readComparison(momKey),
+      usStatesRanges().prev ? readComparison(momKey) : null,
       false
     );
     yotpoRetryPendingRevenue([state.site], [key], { start, end });
@@ -4542,6 +4621,13 @@ function yotpoRetryPendingRevenue(sites, keys, range) {
 }
 
 function renderYotpoSection(el, data, yoyData, momData, combined) {
+  // A second request for the same period (switching away and back while the
+  // first was loading) can leave the cache at 'loading' when the first one
+  // finishes — that newer request paints when it lands (2026-10-29 review:
+  // this crashed with "reading 'toLocaleString'").
+  if (data === 'loading') return;
+  if (yoyData === 'loading') yoyData = null;
+  if (momData === 'loading') momData = null;
   if (!data || data.no_data) {
     el.innerHTML = `<div class="placeholder">
       <div class="ph-title">${data && data.fetch_error ? 'Couldn’t reach the Yotpo data endpoint' : 'No Yotpo data collected yet for this period'}</div>
@@ -4613,8 +4699,20 @@ function renderYotpoSection(el, data, yoyData, momData, combined) {
       mom: momRow ? yotpoPctChange(cur.points_used || 0, momRow.points_used) : null,
     };
   });
+  // Value ($) = the Discounts Breakdown's "Loyalty Points" discount for the
+  // same period (2026-10-29, Tomer): what the Yotpo points codes actually took
+  // off in Shopify, split across tiers by points redeemed. Falls back to
+  // points ÷ 10 when the breakdown isn't loaded for this period.
+  const yMd = getMonthData();
+  const yLoyalty = yMd && Array.isArray(yMd.discounts)
+    ? yMd.discounts.find(d => d.label === 'Loyalty Points' || d.label === 'Yotpo Loyalty' || d.tag === 'Yotpo points codes') : null;
+  const yPtsTotal = rows.reduce((s, r) => s + r.points_used, 0);
+  const valueFromDiscounts = !!(yLoyalty && typeof yLoyalty.discount_value === 'number');
+  if (valueFromDiscounts) {
+    rows.forEach(r => { r.points_value = yPtsTotal ? yLoyalty.discount_value * r.points_used / yPtsTotal : 0; });
+  }
   const tierRows = rows.map(r => `<tr>
-      <td>${r.tier}</td>
+      <td>${escText(r.tier)}</td>
       <td>${r.redemptions.toLocaleString('en-US')}</td>
       <td>${r.uses.toLocaleString('en-US')}</td>
       <td>${r.points_used.toLocaleString('en-US')}</td>
@@ -4633,7 +4731,7 @@ function renderYotpoSection(el, data, yoyData, momData, combined) {
   const totalRedemptions = rows.reduce((s, r) => s + r.redemptions, 0);
   const totalUses = rows.reduce((s, r) => s + r.uses, 0);
   const totalPoints = rows.reduce((s, r) => s + r.points_used, 0);
-  const totalValue = rows.reduce((s, r) => s + r.points_value, 0);
+  const totalValue = valueFromDiscounts ? yLoyalty.discount_value : rows.reduce((s, r) => s + r.points_value, 0);
   const totalNetSales = rows.reduce((s, r) => s + r.net_sales, 0);
   const yoyTotalPoints = (yoyData && yoyData.redemptions_by_tier)
     ? yoyData.redemptions_by_tier.reduce((s, r) => s + (r.points_used || 0), 0)
@@ -4665,7 +4763,7 @@ function renderYotpoSection(el, data, yoyData, momData, combined) {
     <table class="dtable">
       <thead><tr><th style="text-align:left">Tier change</th><th>Customers</th></tr></thead>
       <tbody>${data.tier_movement.map(m => `<tr>
-      <td>${m.from} → ${m.to}</td>
+      <td>${escText(m.from)} → ${escText(m.to)}</td>
       <td>${m.count.toLocaleString('en-US')}</td>
     </tr>`).join('')}</tbody>
     </table>`
@@ -4680,7 +4778,7 @@ function renderYotpoSection(el, data, yoyData, momData, combined) {
     </div>
     <div style="font-size:12.5px;font-weight:600;margin:4px 0 6px">Points redeemed by tier</div>
     <table class="dtable">
-      <thead><tr><th style="text-align:left">Tier</th><th>Redeemers</th><th>Uses</th><th>Points used</th><th>Value (${sym()})</th><th>Net Sales (${sym()})</th><th>YoY</th><th>${momLabel()}</th></tr></thead>
+      <thead><tr><th style="text-align:left">Tier</th><th>Redeemers</th><th>Uses</th><th>Points used</th><th title="${valueFromDiscounts ? 'The Loyalty Points discount from the Discounts Breakdown (what the Yotpo points codes took off in Shopify), split across tiers by points used' : 'Points used ÷ 10 (the Discounts Breakdown isn’t loaded for this period yet)'}">Value (${sym()})</th><th>Net Sales (${sym()})</th><th>YoY</th><th>${momLabel()}</th></tr></thead>
       <tbody>${tierRows}${totalRow}</tbody>
     </table>
     ${movementSection}
@@ -4787,7 +4885,7 @@ function renderTopProducts(monthData) {
     ? (periodErr ? 'Shopify’s full-period product list didn’t load (' + String(periodErr).replace(/</g, '&lt;') + ') — showing each month’s own top 15 added up, which leaves out months where a product wasn’t in that month’s top 15. ' : '') + (monthData.top_products_combined_note || 'Combined from the underlying periods/sites client-side.')
     : `Pulled live from Shopify (best-sellers by revenue, last ${monthData.top_products_window_days} days ≈ month-to-date). Net Sales is estimated using the store's overall net/gross ratio for the month, not a per-product figure. YoY / MoM aren't available from this tool — it only returns a rolling window from today, not arbitrary past periods.`;
   const rows = monthData.top_products.map((p, i) => `<tr>
-      <td>${i+1}. ${p.title}</td>
+      <td>${i+1}. ${escText(p.title)}</td>
       <td>${fmtVal(p.gross_sales, 'currency-full')}</td>
       <td>${p.net_sales_est !== null ? fmtVal(p.net_sales_est, 'currency-full') : '—'}</td>
       <td>${p.units_sold !== null && p.units_sold !== undefined ? p.units_sold.toLocaleString('en-US') : '—'}</td>
@@ -4877,7 +4975,7 @@ const PLACEHOLDERS = {
 function renderPlaceholder(id) {
   const p = PLACEHOLDERS[id];
   document.getElementById(id).innerHTML = `<div class="placeholder">
-    <div class="ph-title">${p.title}</div>
+    <div class="ph-title">${escText(p.title)}</div>
     <ul>${p.items.map(i => `<li>${i}</li>`).join('')}</ul>
   </div>`;
 }
@@ -4908,9 +5006,11 @@ function returnsChangeData(monthData) {
   const sites = state.site === 'all' ? Object.keys(DATA.sites) : [state.site];
   const ck = [state.site, r.cur.start, r.cur.end, r.prev ? r.prev.start : ''].join('|');
   const entry = returnsChangeCache[ck];
-  if (entry && entry.error) { delete returnsChangeCache[ck]; return entry; } // shown as "—" once, retried on the next view
-  if (entry && entry !== 'loading') return entry;
-  if (!entry) {
+  // An error is shown as "—" and retried after a minute (2026-10-29 review: deleting it on the
+  // first read made the second read in the same render refetch → fail → re-render → … in a loop).
+  if (entry && entry.error && Date.now() - (entry.at || 0) < 60000) return entry;
+  if (entry && !entry.error && entry !== 'loading') return entry;
+  if (!entry || entry.error) {
     returnsChangeCache[ck] = 'loading';
     const view = state.site + '|' + state.month;
     Promise.all(sites.map(site => {
@@ -4957,7 +5057,7 @@ function returnsChangeData(monthData) {
         })) : null;
         returnsChangeCache[ck] = { map, hasPrev: !!r.prev, top };
       })
-      .catch(err => { console.error('returns-change fetch failed:', err); returnsChangeCache[ck] = { error: true }; })
+      .catch(err => { console.error('returns-change fetch failed:', err); returnsChangeCache[ck] = { error: true, at: Date.now() }; })
       .finally(() => { if (state.site + '|' + state.month === view) renderReturns(getMonthData()); });
   }
   return 'loading';
@@ -5024,7 +5124,7 @@ function renderReturns(monthData) {
     return '<td>' + returnsChangeCell(pctChg(cur, yoy)) + '</td><td>' + returnsChangeCell(chg.hasPrev ? pctChg(cur, prev) : null) + '</td>';
   };
   const rows = products.map((p, i) => `<tr>
-      <td>${i+1}. ${p.title}</td>
+      <td>${i+1}. ${escText(p.title)}</td>
       <td>${fmtVal(p.gross_sales, 'currency-full')}</td>
       <td>${fmtVal(p.return_value, 'currency-full')}</td>
       <td>${typeof p.units_returned === 'number' ? p.units_returned.toLocaleString('en-US') : '<span style="color:var(--text-muted)" title="Not in this period’s saved data yet — click Sync">—</span>'}</td>
@@ -5151,7 +5251,7 @@ function usStateRows(key, monthData) {
   const all = !!usStatesAll[key];
   const shown = all ? states : states.slice(0, US_STATES_PAGE_SIZE);
   const rows = shown.map(x => `<tr class="state-row">
-      <td>${x.state}</td>
+      <td>${escText(x.state)}</td>
       <td>${(x.orders || 0).toLocaleString('en-US')}</td>
       <td>${fmtVal(x.gross_sales, 'currency-full')}</td>
       <td>${fmtVal(x.net_sales, 'currency-full')}</td>
