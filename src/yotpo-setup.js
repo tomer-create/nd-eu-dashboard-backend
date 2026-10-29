@@ -136,13 +136,23 @@ async function registerYotpoWebhooksForSite(site, { storeId, secret, callbackUrl
   const steps = {};
   const token = await generateAccessToken(storeId, secret);
   steps.access_token_generated = true;
+  // 2026-10-29 review: running this twice used to create a second target +
+  // subscription, so every event arrived twice. Stop if one already exists.
+  const targetsRes = await callYotpo(`${CORE_API_BASE}/stores/${storeId}/webhooks/targets`, { method: 'GET', token }).catch(() => null);
+  const existing = targetsRes && findObjects(targetsRes, 'url').find((o) => typeof o.url === 'string' && o.url.includes(`/api/yotpo/webhook/${site}`) && o.id != null);
+  if (existing) {
+    steps.already_registered = true;
+    steps.target_id = existing.id;
+    steps.note = 'A webhook target for this site already exists — nothing changed (use add-topics to add topics).';
+    return steps;
+  }
   const targetId = await createTarget(storeId, token, callbackUrl);
   steps.target_id = targetId;
   const filterId = await createFilter(storeId, token, TOPICS);
   steps.filter_id = filterId;
   const subscription = await createSubscription(storeId, token, targetId, filterId);
   steps.subscription = subscription;
-  steps.callback_url = callbackUrl;
+  steps.callback_url = String(callbackUrl).replace(/token=[^&]+/, 'token=***'); // secret kept out of the response
   steps.topics = TOPICS;
   return steps;
 }
