@@ -134,6 +134,10 @@ function getPool() {
       // example uses.
       ssl: { rejectUnauthorized: false },
     });
+    // Without this, an idle connection dropped by Postgres maintenance or a
+    // network blip is an uncaught 'error' event that exits the whole server
+    // (2026-10-29 code review). The pool replaces the client by itself.
+    pool.on('error', (err) => console.error('Postgres pool error:', err.message));
   }
   return pool;
 }
@@ -172,6 +176,12 @@ function ensureYotpoSchema() {
         );
         CREATE INDEX IF NOT EXISTS idx_yotpo_events_lookup
           ON yotpo_events (site, event_type, received_at);
+        -- 2026-10-29 review: Yotpo delivers at least once, so a retried
+        -- delivery used to be stored (and counted) again. event_key = the
+        -- payload's own id, or a hash of the payload.
+        ALTER TABLE yotpo_events ADD COLUMN IF NOT EXISTS event_key TEXT;
+        CREATE UNIQUE INDEX IF NOT EXISTS idx_yotpo_events_key
+          ON yotpo_events (site, event_key) WHERE event_key IS NOT NULL;
       `)
       .then(() => true)
       .catch((err) => {
@@ -219,11 +229,10 @@ function classifyTopic(topic) {
 // differently across event types (sometimes top-level `email`, sometimes
 // under a `customer` object). Try both rather than assuming one shape.
 function extractEmail(payload) {
-  return (
-    payload.email ||
-    (payload.customer && payload.customer.email) ||
-    null
-  );
+  const e = payload.email || (payload.customer && payload.customer.email) || null;
+  // Lower-cased like the CSV import and the tier map (2026-10-29 review), so
+  // a live event finds the imported customer row.
+  return e ? String(e).trim().toLowerCase() : null;
 }
 function extractTierName(payload) {
   return (
@@ -251,10 +260,20 @@ function extractRewardName(payload) {
 // recognition/parsing miss — the raw payload is always saved, so a shape
 // we don't fully understand yet still leaves a durable trail to fix later
 // rather than silently vanishing.
+function eventKeyOf(topic, payload) {
+  const pl = payload || {};
+  const id = pl.id || pl.event_id || pl.uuid || (pl.data && (pl.data.id || pl.data.event_id));
+  const basis = id ? `${topic || ''}|id:${id}` : `${topic || ''}|${JSON.stringify(pl)}`;
+  return require('crypto').createHash('sha256').update(basis).digest('hex');
+}
 async function recordYotpoEvent(site, topic, payload) {
   const p = getPool();
   if (!p) throw new Error('DATABASE_URL not configured — cannot record Yotpo event');
   await ensureYotpoSchema();
+  // A repeated delivery of the same event is acknowledged and not stored again.
+  const eventKey = eventKeyOf(topic, payload);
+  const dup = await p.query('SELECT 1 FROM yotpo_events WHERE site = $1 AND event_key = $2 LIMIT 1', [site, eventKey]);
+  if (dup.rows.length) return { duplicate: true };
 
   const eventType = classifyTopic(topic);
   const email = extractEmail(payload || {});
@@ -309,10 +328,12 @@ async function recordYotpoEvent(site, topic, payload) {
     console.log(`yotpo webhook (site=${site}): topic=${topic || 'unknown'} -> ${eventType}${email ? '' : ' (no email)'}`);
   }
   await p.query(
-    `INSERT INTO yotpo_events (site, topic, event_type, email, tier_from, tier_to, tier_at_event, points, reward_name, raw_payload)
-     VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)`,
-    [site, topic || 'unknown', eventType, email, tierFrom, tierTo, tierAtEvent, points, rewardName, JSON.stringify(payload || {})]
+    `INSERT INTO yotpo_events (site, topic, event_type, email, tier_from, tier_to, tier_at_event, points, reward_name, raw_payload, event_key)
+     VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11)
+     ON CONFLICT DO NOTHING`,
+    [site, topic || 'unknown', eventType, email, tierFrom, tierTo, tierAtEvent, points, rewardName, JSON.stringify(payload || {}), eventKey]
   );
+  return { duplicate: false };
 }
 
 // Returns Section 8's summary for one site over [start, end) (ISO date
@@ -322,7 +343,25 @@ async function recordYotpoEvent(site, topic, payload) {
 // backfill" note in the file header; the frontend must show "no data
 // collected yet" rather than a misleading all-zero summary for a period
 // before go-live.
-async function getYotpoSummary(site, start, end) {
+// Store-local day boundaries (2026-10-29 review): the date strings used to be
+// read in the database's UTC, so an event near midnight landed on the
+// neighbouring day / month compared with the Shopify figures.
+const YOTPO_SITE_TZ = { com: 'America/New_York', eu: 'Europe/Amsterdam', il: 'Asia/Jerusalem' };
+function tzOffsetMs(utcMs, tz) {
+  const parts = Object.fromEntries(new Intl.DateTimeFormat('en-US', { timeZone: tz, hourCycle: 'h23', year: 'numeric', month: '2-digit', day: '2-digit', hour: '2-digit', minute: '2-digit', second: '2-digit' })
+    .formatToParts(new Date(utcMs)).filter((x) => x.type !== 'literal').map((x) => [x.type, Number(x.value)]));
+  return Date.UTC(parts.year, parts.month - 1, parts.day, parts.hour, parts.minute, parts.second) - utcMs;
+}
+function storeMidnightISO(day, site) {
+  const tz = YOTPO_SITE_TZ[site];
+  const guess = Date.parse(day + 'T00:00:00Z');
+  if (!tz || Number.isNaN(guess)) return day;
+  let t = guess - tzOffsetMs(guess, tz);
+  t = guess - tzOffsetMs(t, tz); // second pass settles DST-change days
+  return new Date(t).toISOString();
+}
+async function getYotpoSummary(site, startDay, endDay) {
+  const start = storeMidnightISO(startDay, site), end = storeMidnightISO(endDay, site);
   const p = getPool();
   if (!p) return null;
   await ensureYotpoSchema();
@@ -330,7 +369,7 @@ async function getYotpoSummary(site, start, end) {
   const earliestRes = await p.query('SELECT MIN(received_at) AS earliest FROM yotpo_events WHERE site = $1', [site]);
   const earliestEventAt = earliestRes.rows[0].earliest;
   if (!earliestEventAt) {
-    return { site, start, end, collecting_since: null, new_members: 0, redemptions_by_tier: [], tier_movement: [], no_data: true };
+    return { site, start: startDay, end: endDay, collecting_since: null, new_members: 0, redemptions_by_tier: [], tier_movement: [], no_data: true };
   }
 
   const newMembersRes = await p.query(
@@ -467,8 +506,8 @@ async function getYotpoSummary(site, start, end) {
 
   return {
     site,
-    start,
-    end,
+    start: startDay,
+    end: endDay,
     collecting_since: earliestEventAt,
     no_data: false,
     new_members: Number(newMembersRes.rows[0].n),
