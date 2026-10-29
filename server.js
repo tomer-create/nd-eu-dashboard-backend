@@ -1356,7 +1356,7 @@ app.get('/admin/tiktok/status', async (req, res) => {
   }
   res.json(out);
 });
-// GET /api/tiktok-shop/creator-gmv?start=2026-10-01&end=2026-10-29 (Pacific days, end exclusive)
+// GET /api/tiktok-shop/creator-gmv?start=2026-10-01&end=2026-10-29 (GMT-8 days, end exclusive)
 app.get('/api/tiktok-shop/creator-gmv', async (req, res) => {
   try {
     res.json(await tiktokApi.getCreatorGmv(String(req.query.start || ''), String(req.query.end || '')));
@@ -1370,6 +1370,8 @@ app.get('/api/tiktok-shop/creator-gmv', async (req, res) => {
 // SKU rows (numbers / enums only) for matching TikTok's Affiliate Center figure.
 app.get('/api/tiktok-shop/creator-gmv/diag', async (req, res) => {
   try {
+    // raw=1 (order ids, creator handles) only with the admin token.
+    if (req.query.raw === '1' && !adminOk(req)) return res.status(403).json({ error: 'raw=1 needs ?token=<ADMIN_SETUP_TOKEN>' });
     res.json(await tiktokApi.diagRows(String(req.query.start || ''), String(req.query.end || ''), req.query.raw === '1'));
   } catch (err) {
     res.status(err.status || 502).json({ error: err.message });
