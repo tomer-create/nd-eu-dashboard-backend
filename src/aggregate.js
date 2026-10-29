@@ -512,7 +512,9 @@ function aggregate(orders, { tagLabels = DEFAULT_TAG_LABELS } = {}) {
     // 3: Yotpo Loyalty Points / Bday / Ref rows + discount_groups
     // (2026-10-26). The month cache re-pulls a stored closed month below 3.
     // 4 (2026-10-28): program discounts by discount application (byApp).
-    discounts_version: sawDiscountApps ? (byApp ? 4 : 3) : 1,
+    // A period with no orders has nothing to re-pull (it used to stay at 1 and
+    // be re-pulled on every view — 2026-10-29 review).
+    discounts_version: orders.length === 0 ? 4 : (sawDiscountApps ? (byApp ? 4 : 3) : 1),
     discounts_by_app: byApp,
   };
 }
