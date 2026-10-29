@@ -97,7 +97,7 @@ function checkState(state) {
 }
 async function tokenRequest(path, params) {
   const qs = new URLSearchParams({ app_key: process.env.TIKTOK_APP_KEY, app_secret: process.env.TIKTOK_APP_SECRET, ...params });
-  const res = await fetch(`${AUTH_BASE}${path}?${qs.toString()}`);
+  const res = await fetch(`${AUTH_BASE}${path}?${qs.toString()}`, { signal: AbortSignal.timeout(30000) });
   const json = await res.json().catch(() => null);
   if (!json || json.code !== 0 || !json.data || !json.data.access_token) {
     throw new Error(`TikTok token request failed: ${json ? (json.message || json.code) : 'HTTP ' + res.status}`); // never includes secrets
@@ -334,7 +334,8 @@ async function getCreatorGmv(start, end) {
     const s = saved.get(d);
     // Days whose orders weren't all in Triple Whale yet (it syncs TikTok orders
     // with a lag) are re-checked hourly for a week.
-    const recheck = s && s.data && (s.data.tw_error || (num(s.data.tw_missing) > 0 && Date.parse(todayPT) - Date.parse(d) <= 7 * 86400000));
+    const recentDay = Date.parse(todayPT) - Date.parse(d) <= 7 * 86400000;
+    const recheck = s && s.data && (s.data.tw_error ? Date.parse(todayPT) - Date.parse(d) <= 60 * 86400000 : (num(s.data.tw_missing) > 0 && recentDay));
     if (!s || num(s.data && s.data.v) !== DATA_V || Date.now() - s.fetched_at > (recheck ? 3600000 : maxAgeMs(d, todayPT))) stale.push(d);
   }
   // Pull the stale days as contiguous spans (one paginated search each; the
