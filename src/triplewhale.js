@@ -169,6 +169,8 @@ async function twSqlRequest(shopId, query, start, end) {
         method: 'POST',
         headers: { 'Content-Type': 'application/json', 'x-api-key': process.env.TRIPLEWHALE_API_KEY },
         body: JSON.stringify({ shopId, query, period: { startDate: start, endDate: end } }),
+        // A hung request used to hold a queue slot for up to 5 min (2026-10-29 review).
+        signal: AbortSignal.timeout(120000),
       });
     } finally {
       twRelease();
@@ -282,9 +284,12 @@ function inWindow(c, start, end) {
 // TRIPLEWHALE_API_KEY isn't configured yet or the request failed (logged,
 // never thrown — a Triple Whale hiccup shouldn't break the rest of the
 // Shopify sync).
+const ISO_DAY = /^\d{4}-\d{2}-\d{2}$/;
 async function fetchChannelPerformance(site, start, end) {
   const apiKey = process.env.TRIPLEWHALE_API_KEY;
   if (!apiKey) return null;
+  // Dates go into the SQL text — only plain YYYY-MM-DD (2026-10-29 review).
+  if (!ISO_DAY.test(String(start)) || !ISO_DAY.test(String(end))) return null;
 
   const shopId = TW_SHOP_ID[site];
   if (!shopId) return null;
@@ -430,6 +435,7 @@ function attentiveBucket(medium, name) {
 }
 async function fetchAttentiveSplit(site, start, end) {
   if (!process.env.TRIPLEWHALE_API_KEY) return null;
+  if (!ISO_DAY.test(String(start)) || !ISO_DAY.test(String(end))) return null;
   const shopId = TW_SHOP_ID[site];
   if (!shopId) return null;
   const query = `
