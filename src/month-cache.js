@@ -151,7 +151,8 @@ async function getWithMonthCache({ site, start, end, compare, refresh }, build) 
       // (partial_sources, 2026-10-29) is re-pulled — at most once a day.
       const partial = row.payload && Array.isArray(row.payload.partial_sources) && row.payload.partial_sources.length > 0 && ageHours > 24;
       // 5 (2026-11-02): the Discounts Breakdown's own Total row.
-      const outdated = !(row.payload && row.payload.discounts_version >= 5) || partial;
+      // 6 (2026-11-02): ATTENTIVE group + TikTok Shop discounts line.
+      const outdated = !(row.payload && row.payload.discounts_version >= 6) || partial;
       if (recentlyClosed && ageHours > STALE_AFTER_HOURS) {
         pullAndStore(key, args, build).catch((err) => console.error('month-cache: background refresh failed:', err.message));
         return { payload: row.payload, cache: 'stale', fetchedAt: row.fetched_at };
