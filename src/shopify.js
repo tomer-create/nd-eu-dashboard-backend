@@ -279,6 +279,7 @@ const ORDERS_QUERY = `
           id
           createdAt
           tags
+          sourceName
           presentmentCurrencyCode
           currentSubtotalPriceSet { shopMoney { amount } }
           subtotalPriceSet { shopMoney { amount } }
