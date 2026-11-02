@@ -150,7 +150,8 @@ async function getWithMonthCache({ site, start, end, compare, refresh }, build) 
       // A month stored while Triple Whale or the P&L sheet was down
       // (partial_sources, 2026-10-29) is re-pulled — at most once a day.
       const partial = row.payload && Array.isArray(row.payload.partial_sources) && row.payload.partial_sources.length > 0 && ageHours > 24;
-      const outdated = !(row.payload && row.payload.discounts_version >= 4) || partial;
+      // 5 (2026-11-02): the Discounts Breakdown's own Total row.
+      const outdated = !(row.payload && row.payload.discounts_version >= 5) || partial;
       if (recentlyClosed && ageHours > STALE_AFTER_HOURS) {
         pullAndStore(key, args, build).catch((err) => console.error('month-cache: background refresh failed:', err.message));
         return { payload: row.payload, cache: 'stale', fetchedAt: row.fetched_at };
