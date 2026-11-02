@@ -1862,7 +1862,7 @@ app.listen(PORT, () => {
   setTimeout(() => prewarmYotpoTierRevenue(YOTPO_VALID_SITES), 60000);
   // Every closed month of this year on the current Discounts Breakdown method
   // (2026-10-28, Tomer: "make all months use the new calculation"): stored
-  // months below discounts_version 4 are re-pulled one at a time, and months
+  // months below the current discounts_version (5 since 2026-11-02) are re-pulled one at a time, and months
   // never stored are pulled once — so nothing waits for someone to open it.
   setTimeout(() => upgradeClosedMonths().catch((err) => console.error('month upgrade sweep failed:', err.message)), 120000);
 });
