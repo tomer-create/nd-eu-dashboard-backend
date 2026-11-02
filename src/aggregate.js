@@ -291,6 +291,12 @@ function aggregate(orders, { tagLabels = DEFAULT_TAG_LABELS } = {}) {
   const tagMap = new Map(); // tag -> { grossSales, discountValue, orders }
   const yotpoAcc = new Map(YOTPO_KINDS.map((k) => [k.key, { value: 0, grossSales: 0, orders: 0 }]));
   const groupAcc = new Map(DISCOUNT_GROUPS.map((g) => [g.key, { value: 0, grossSales: 0, orders: 0, discGross: 0 }]));
+  // Total row of the Discounts Breakdown (2026-11-02, Tomer: "add for the
+  // total line the real numbers of the total"): every order with a program
+  // shown in the table (a Yotpo code or a grouped program tag), counted once,
+  // and only those programs' own discounts — not the store-wide figure, which
+  // also holds TikTok Shop orders, free shipping and codes not in the table.
+  const tableAcc = { value: 0, grossSales: 0, orders: 0, discGross: 0 };
   let sawDiscountApps = false;
   // Program discounts by discount application (see the note above).
   const programTags = new Set([...Object.keys(tagLabels), ...FREE_SHIPPING_TAGS]);
@@ -374,6 +380,25 @@ function aggregate(orders, { tagLabels = DEFAULT_TAG_LABELS } = {}) {
           g.value += orderDiscount;
         }
       });
+      if (yc.size || inGroups.size) {
+        tableAcc.orders += 1; tableAcc.grossSales += orderGross;
+        if (byApp) {
+          // Group programs never take Yotpo / code discounts (programPart), so
+          // the Yotpo codes' own amount is added on top without overlap.
+          const apps = new Set(), lines = new Set();
+          orderTags.filter((t) => TAG_GROUP[t]).forEach((t) => { const p = programPart(order, t); p.apps.forEach((i) => apps.add(i)); p.lines.forEach((l) => lines.add(l)); });
+          appsOf.get(order).apps.forEach((a) => { if (apps.has(a.idx)) tableAcc.value += a.amount; });
+          tableAcc.value += yTotal;
+          // Discount % base: the discounted items, or the whole order when a
+          // Yotpo code (spread over the order) was used.
+          let dg = 0;
+          if (yc.size) dg = orderGross;
+          else lines.forEach((l) => { dg += appsOf.get(order).lineGross[l] || 0; });
+          tableAcc.discGross += dg;
+        } else {
+          tableAcc.value += orderDiscount; tableAcc.discGross += orderGross;
+        }
+      }
     }
 
     const tags = order.tags || [];
@@ -509,12 +534,19 @@ function aggregate(orders, { tagLabels = DEFAULT_TAG_LABELS } = {}) {
     discounts_total_abs: discountsTotal,
     discounts_total_orders: ordersCount,
     discount_groups: discountGroups,
+    discounts_table_total: sawDiscountApps ? {
+      gross_sales: tableAcc.grossSales,
+      discount_value: tableAcc.value,
+      discounted_gross: tableAcc.discGross,
+      orders: tableAcc.orders,
+    } : undefined,
     // 3: Yotpo Loyalty Points / Bday / Ref rows + discount_groups
     // (2026-10-26). The month cache re-pulls a stored closed month below 3.
     // 4 (2026-10-28): program discounts by discount application (byApp).
     // A period with no orders has nothing to re-pull (it used to stay at 1 and
     // be re-pulled on every view — 2026-10-29 review).
-    discounts_version: orders.length === 0 ? 4 : (sawDiscountApps ? (byApp ? 4 : 3) : 1),
+    // 5 (2026-11-02): discounts_table_total (the table's own Total row).
+    discounts_version: orders.length === 0 ? 5 : (sawDiscountApps ? (byApp ? 5 : 3) : 1),
     discounts_by_app: byApp,
   };
 }
