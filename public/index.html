@@ -2665,14 +2665,17 @@ function renderTikTokShop(monthData, opts = {}) {
     // any day TikTok's analytics never returned — from TikTok's order data
     // (`fill`). The period counts as covered once TikTok's analytics start at
     // the period start; the figure is TikTok's days + the filled days.
-    if (d && !d.perf_error && d.perf_from === gmvRange.start && Array.isArray(d.perf_days) && d.fill && typeof d.fill.gmv === 'number') {
-      const f = d.fill, tikDays = d.perf_days.length;
+    // 2026-11-02: the backend fills from the period start (fill_from) — also
+    // the months before TikTok's analytics begin (May 1 2026) and periods with
+    // none at all — on the order-data formula that matches Seller Center.
+    const filledFromStart = d && d.fill_from === gmvRange.start && d.fill && typeof d.fill.gmv === 'number';
+    if (d && d.fill && typeof d.fill.gmv === 'number' && (filledFromStart || (!d.perf_error && d.perf_from === gmvRange.start && Array.isArray(d.perf_days)))) {
+      const f = d.fill, tikDays = d.perf_error ? 0 : (d.perf_days || []).length;
       const runsTxt = (f.runs || []).map(r => c4RangeText({ start: r.start, end: r.end })).join(', ');
-      const mostlyEst = f.days > tikDays;
-      const note = (mostlyEst ? '≈ ' : '') + (f.days
+      const note = (!tikDays ? 'TikTok order data (same formula as TikTok’s analytics)' + (gmvRange.end > todayIso ? ' · to date' : '') : '') || (f.days
         ? `TikTok Shop analytics (${tikDays} day${tikDays === 1 ? '' : 's'}) + TikTok order data for ${runsTxt}${gmvRange.end > todayIso ? ' · month to date' : ''}`
         : 'TikTok Shop analytics');
-      return { value: d.gmv + f.gmv, orders: d.orders + f.orders, tiktok: true, note };
+      return { value: (tikDays ? d.gmv : 0) + f.gmv, orders: (tikDays ? d.orders : 0) + f.orders, tiktok: true, note };
     }
     const gap = covered && d.gap && d.gap.gmv !== undefined ? d.gap : null;
     const lastDay = new Date(Date.parse((gmvRange.end <= todayIso ? gmvRange.end : new Date(Date.parse(todayIso + 'T00:00:00Z') + 86400000).toISOString().slice(0, 10)) + 'T00:00:00Z') - 86400000).toISOString().slice(0, 10);
@@ -2685,13 +2688,19 @@ function renderTikTokShop(monthData, opts = {}) {
       : { value: hasProdDiscEarly ? proxyNow : null, orders: tt.orders, tiktok: false, note: (hasProdDiscEarly ? '≈ estimate from TikTok order data — ' : '') + why };
   })();
   const gmvShown = gmvInfo.value;
+  const ttOrdersShown = gmvInfo.tiktok && typeof gmvInfo.orders === 'number' ? gmvInfo.orders : tt.orders;
   const gmvTip = 'TikTok Shop GMV = price × items sold + shipping fees − seller promotions − platform co-funding (TikTok Shop analytics). TikTok’s analytics run about two days behind, so the latest days — and any day TikTok’s analytics are missing — are filled from TikTok’s order data (Triple Whale) on the same formula to keep it month to date. YoY / ' + mLabel + ': same formula on TikTok’s order data, same days.';
   const tileList = [
     // What GMV includes (2026-10-26, Tomer asked for it inside the tile).
     tileV('TikTok Shop GMV', gmvShown === null ? '—' : fmtVal(gmvShown, 'currency-full'), proxyChange('yoy'), proxyChange('mom'), true,
       '<span class="tt-gmv-incl">All TikTok Shop orders — TikTok Ads + Affiliate + Organic (TikTok Ads isn’t added on top).</span>' + gmvInfo.note, gmvTip),
     tile('Net Sales', tt.net_sales, 'currency-full', 'net_sales', true, 'Gross sales − discounts − refunds'),
-    tile('Orders', tt.orders, 'number', 'orders', true, tt.orders && tt.units ? (tt.units / tt.orders).toFixed(1) + ' units per order' : ''),
+    // 2026-11-02 (Tomer: "Seller Center shows 6077 orders for October"): the
+    // Orders tile counts the same orders as the GMV tile — TikTok Shop
+    // analytics' order count (+ the filled days on the GMV formula: GMT-8 days,
+    // unpaid orders out). tt.orders is Triple Whale's count by New York day,
+    // unpaid orders included (Oct 2026: 6,114 vs Seller Center's 6,077).
+    tile('Orders', ttOrdersShown, 'number', 'orders', true, ttOrdersShown && tt.units ? (tt.units / ttOrdersShown).toFixed(1) + ' units per order' : ''),
     // 2026-10-26 (Tomer: "keep the real AOV"): the "GMV per order" line under
     // it is removed — only Net Sales ÷ Orders is shown.
     tileV('AOV', fmtVal(aov, 'currency'), aovYoy, aovMom, true, 'Net Sales ÷ orders (after discounts and refunds)', 'Average order value: TikTok Shop Net Sales ÷ Orders (Key Metrics’ AOV is Shopify’s: (Gross Sales − Discounts) ÷ Orders)'),
