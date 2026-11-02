@@ -1034,8 +1034,7 @@ function mergeLiveIntoMonthData(monthData, live, site) {
     merged.discounts_total_gross = live.discounts_total_gross;
     merged.discounts_total_abs = live.discounts_total_abs;
     merged.discounts_total_orders = live.discounts_total_orders;
-    merged.discounts_table_total = live.discounts_table_total;
-    merged.discounts_tiktok = live.discounts_tiktok;
+    merged.discounts_programs_total = live.discounts_programs_total;
     merged.discounts_note = 'Pulled live from the sync backend by order tag.';
   }
 
@@ -1987,20 +1986,11 @@ function combineMonthDatas(entries, opts) {
   const discTotalGross = entries.reduce((s, e) => s + ((e.monthData.discounts_total_gross || 0) * e.fx), 0);
   const discTotalAbs = entries.reduce((s, e) => s + ((e.monthData.discounts_total_abs || 0) * e.fx), 0);
   const discTotalOrders = entries.reduce((s, e) => s + (e.monthData.discounts_total_orders || 0), 0);
-  // TikTok Shop orders' discounts (2026-11-02): summed only when every part has them.
-  let discTikTok;
-  if (discEntries.length && discEntries.every(e => e.monthData.discounts_tiktok)) {
-    discTikTok = discEntries.reduce((a, e) => {
-      const t = e.monthData.discounts_tiktok;
-      a.gross_sales += (t.gross_sales || 0) * e.fx; a.discount_value += (t.discount_value || 0) * e.fx; a.orders += t.orders || 0;
-      return a;
-    }, { gross_sales: 0, discount_value: 0, orders: 0 });
-  }
   // The table's own Total row (2026-11-02): summed only when every part has it.
   let discTableTotal;
-  if (discEntries.length && discEntries.every(e => e.monthData.discounts_table_total)) {
+  if (discEntries.length && discEntries.every(e => e.monthData.discounts_programs_total)) {
     discTableTotal = discEntries.reduce((a, e) => {
-      const t = e.monthData.discounts_table_total;
+      const t = e.monthData.discounts_programs_total;
       a.gross_sales += (t.gross_sales || 0) * e.fx; a.discount_value += (t.discount_value || 0) * e.fx;
       a.discounted_gross += (t.discounted_gross || 0) * e.fx; a.orders += t.orders || 0;
       return a;
@@ -2027,7 +2017,7 @@ function combineMonthDatas(entries, opts) {
     top_returns_note: tr.list ? ('Combined for ' + label + '.' + combinedTail + (tr.partial ? ' Only ' + tr.sourcesCount + ' of ' + tr.totalSources + ' site/period combination(s) had return-level data to merge.' : '')) : undefined,
     by_country: cc.list,
     by_country_note: cc.list ? ('Combined for ' + label + '.' + combinedTail + (cc.partial ? ' Only ' + cc.sourcesCount + ' of ' + cc.totalSources + ' site/period combination(s) had country-level data to merge; Return Rate is an orders-weighted average where available.' : ' Return Rate is an orders-weighted average across the combined periods.')) : undefined,
-    discounts: dd.list, discount_groups: discGroups, discounts_yotpo_cover: discYotpoCover, discounts_total_gross: discTotalGross, discounts_total_abs: discTotalAbs, discounts_total_orders: discTotalOrders, discounts_table_total: discTableTotal, discounts_tiktok: discTikTok,
+    discounts: dd.list, discount_groups: discGroups, discounts_yotpo_cover: discYotpoCover, discounts_total_gross: discTotalGross, discounts_total_abs: discTotalAbs, discounts_total_orders: discTotalOrders, discounts_programs_total: discTableTotal,
     discounts_note: dd.list ? ('Combined for ' + label + '.' + combinedTail + (dd.partial ? ' Only ' + dd.sourcesCount + ' of ' + dd.totalSources + ' site/period combination(s) had discount-level data to merge.' : '')) : undefined,
     tiktok_shop: ttCombined,
     combined_label: label,
@@ -5420,7 +5410,6 @@ const DISCOUNT_GROUP_DEFS = [
   { key: 'sales', label: 'SALES', desc: 'Sale events' },
   { key: 'gifts', label: 'GIFTS & SAMPLES', desc: 'Tier free gifts, free samples, free makeup bag' },
   { key: 'segments', label: 'SEGMENTS', desc: 'Pro-Artist, BA' },
-  { key: 'attentive', label: 'ATTENTIVE', desc: 'Attentive’s single-use SMS / email codes' },
   { key: 'other', label: 'OTHER', desc: 'Programs not in a group yet' },
 ];
 function discountGroupOf(d) {
@@ -5452,7 +5441,7 @@ function renderDiscounts(monthData) {
   const cov = monthData.discounts_yotpo_cover;
   const partialYotpo = cov && cov.with < cov.of;
   const progRow = (d, gk) => {
-    const sub = d.points ? `${fmtVal(d.points, 'number')} points spent (10 points = ${state.site === 'all' ? '1 unit of each store’s currency' : sym() + '1'})` : (gk === 'yotpo' ? 'Yotpo ' + d.label + ' codes' : gk === 'attentive' ? 'Single-use codes from Attentive SMS / email offers' : d.tag);
+    const sub = d.points ? `${fmtVal(d.points, 'number')} points spent (10 points = ${state.site === 'all' ? '1 unit of each store’s currency' : sym() + '1'})` : (gk === 'yotpo' ? 'Yotpo ' + d.label + ' codes' : d.tag);
     return `<tr class="disc-prog" data-group="${gk}"${discGroupOpen[gk] ? '' : ' hidden'}>
       <td style="padding-left:28px">${d.label}<div style="font-size:10px;color:var(--text-muted);font-weight:500">${sub}</div></td>
       <td>${cur(d.gross_sales)}</td>
@@ -5491,15 +5480,14 @@ function renderDiscounts(monthData) {
       <td><strong>${pctCell(ofGross(tot.discount_value))}</strong></td>
     </tr>` + items.map(d => progRow(d, g.key)).join('');
   });
-  const totalGross = monthData.discounts_total_gross;
-  const totalDiscPct = totalGross ? totalAbs / totalGross : null;
   // Total row (2026-11-02, Tomer: "add for the total line the real numbers of
   // the total"): the programs in this table — each order counted once, only
-  // those programs' own discounts (backend discounts_table_total). Until a
+  // those programs' own discounts (backend discounts_programs_total). Until a
   // period is re-pulled it adds up the group rows (≈ — an order in two groups
-  // counts twice there). Shopify's store-wide figure (Key Metrics' Discounts,
-  // incl. TikTok Shop orders and codes not listed here) moves to its own line.
-  let tRow = monthData.discounts_table_total, tApprox = false;
+  // counts twice there). Later the same day (Tomer): Attentive and the
+  // TikTok Shop / Not listed / All Shopify discounts lines were taken out —
+  // the table is only YOTPO, SALES, GIFTS & SAMPLES and SEGMENTS.
+  let tRow = monthData.discounts_programs_total, tApprox = false;
   if (!tRow) {
     const gs = DISCOUNT_GROUP_DEFS.map(g => groupsSent.get(g.key)).filter(Boolean);
     if (gs.length) {
@@ -5518,44 +5506,13 @@ function renderDiscounts(monthData) {
       <td>${ap}${pctCell(tPct)}</td>
       <td>${ap}${(tRow.orders || 0).toLocaleString('en-US')}</td>
       <td>${ap}${pctCell(ofGross(tRow.discount_value))}</td>
-    </tr>` : '') + (() => {
-    // 2026-11-02 (Tomer): TikTok Shop orders' discounts on their own line, and
-    // what's left of Shopify's figure that the table doesn't list (Collabs /
-    // affiliate codes and bundles — left out on purpose, Collabs has its own
-    // section).
-    const tk = monthData.discounts_tiktok;
-    if (!tk) return '';
-    const rest = tRow && !tApprox ? totalAbs - tRow.discount_value - tk.discount_value : null;
-    const muted = 'style="color:var(--text-muted)"', sub = t => `<div style="font-size:10px;font-weight:500">${t}</div>`;
-    return `<tr class="disc-store-row" ${muted}>
-      <td>TikTok Shop orders${sub('TikTok vouchers, creator samples and seller discounts on TikTok Shop orders synced into Shopify')}</td>
-      <td>${cur(tk.gross_sales)}</td>
-      <td>${fmtVal(tk.discount_value, 'currency-full')}</td>
-      <td>${pctCell(tk.gross_sales ? tk.discount_value / tk.gross_sales : null)}</td>
-      <td>${(tk.orders || 0).toLocaleString('en-US')}</td>
-      <td>${pctCell(ofGross(tk.discount_value))}</td>
-    </tr>` + (rest !== null && rest > 0.5 ? `<tr class="disc-store-row" ${muted}>
-      <td>Not listed${sub('Collabs &amp; affiliate codes, bundles / sets and other codes')}</td>
-      <td>—</td>
-      <td>${fmtVal(rest, 'currency-full')}</td>
-      <td>—</td>
-      <td>—</td>
-      <td>${pctCell(ofGross(rest))}</td>
     </tr>` : '');
-  })() + `<tr class="disc-store-row" style="color:var(--text-muted)">
-      <td>All Shopify discounts<div style="font-size:10px;font-weight:500">Store-wide, as in Key Metrics — incl. TikTok Shop orders and codes not listed above</div></td>
-      <td>${cur(totalGross)}</td>
-      <td>${fmtVal(totalAbs, 'currency-full')}</td>
-      <td>${pctCell(totalDiscPct)}</td>
-      <td>${monthData.discounts_total_orders !== undefined ? monthData.discounts_total_orders.toLocaleString('en-US') : '—'}</td>
-      <td>${pctCell(totalDiscPct)}</td>
-    </tr>`;
   const el = document.getElementById('section-6');
   el.innerHTML = `<table class="dtable">
     <thead><tr><th style="text-align:left">Program</th><th>Gross Sales</th><th>Discount $</th><th title="Discount $ ÷ the gross sales of the items the program discounted (Pro-Artist → 30%)">Discount %</th><th>Orders</th><th title="Discount $ ÷ the period's store-wide Gross Sales">% of Gross Sales</th></tr></thead>
     <tbody>${body}${totalRow}</tbody>
   </table>
-  <div style="margin-top:10px;font-size:11px;color:var(--text-muted)">${monthData.discounts_note || 'Pulled live from Shopify analytics by order tag.'} Click a group to open its programs. Group totals count each order once, even when it used two programs of the same group. Programs (by order tag): Gross Sales and Orders are the orders that carry the tag. Discount $ is only that program's own Shopify discount on those orders — other discounts on the same order (a free sample, the makeup bag, Yotpo / Attentive / affiliate codes) count under their own programs, not this one. Discount % = Discount $ ÷ the gross sales of the items the program discounted (Pro-Artist → 30%; free gifts and samples → 100%). % of Gross Sales = Discount $ ÷ the period's store-wide Gross Sales.${(monthData.discounts || []).some(d => d.tag && d.tag.startsWith('DISCOUNT-') && d.discounted_gross === undefined) ? ' Some months here were stored before this method (2026-10-28) and still count the orders’ full discount until they refresh on their own.' : ''} YOTPO (Yotpo’s single-use codes in Shopify — Loyalty Points: 8-character fixed-amount codes from spent points; Bday: BDAY… codes; Ref: REF… codes): Discount $ is only what those codes took off; Gross Sales and Orders are the orders they were used on. Free shipping, Collabs Affiliate and bundle / set programs aren't listed. Total = the programs above: every order that used one of them, counted once, and only those programs' own discounts (Discount % = ÷ the items they discounted, or the whole order for a Yotpo code). ATTENTIVE: Attentive's single-use SMS / email codes; Discount $ is only what those codes took off. TikTok Shop orders = the discounts on TikTok Shop orders synced into Shopify (they belong to the TikTok channel). Not listed = Shopify's store-wide figure − Total − TikTok Shop orders: Collabs / affiliate codes (Collabs has its own section), bundles / sets and other codes. All Shopify discounts = Shopify's store-wide figure (Key Metrics' Discounts).</div>`;
+  <div style="margin-top:10px;font-size:11px;color:var(--text-muted)">${monthData.discounts_note || 'Pulled live from Shopify analytics by order tag.'} Click a group to open its programs. Group totals count each order once, even when it used two programs of the same group. Programs (by order tag): Gross Sales and Orders are the orders that carry the tag. Discount $ is only that program's own Shopify discount on those orders — other discounts on the same order (a free sample, the makeup bag, Yotpo / Attentive / affiliate codes) count under their own programs, not this one. Discount % = Discount $ ÷ the gross sales of the items the program discounted (Pro-Artist → 30%; free gifts and samples → 100%). % of Gross Sales = Discount $ ÷ the period's store-wide Gross Sales.${(monthData.discounts || []).some(d => d.tag && d.tag.startsWith('DISCOUNT-') && d.discounted_gross === undefined) ? ' Some months here were stored before this method (2026-10-28) and still count the orders’ full discount until they refresh on their own.' : ''} YOTPO (Yotpo’s single-use codes in Shopify — Loyalty Points: 8-character fixed-amount codes from spent points; Bday: BDAY… codes; Ref: REF… codes): Discount $ is only what those codes took off; Gross Sales and Orders are the orders they were used on. Free shipping, Collabs Affiliate and bundle / set programs aren't listed. Total = the programs above: every order that used one of them, counted once, and only those programs' own discounts (Discount % = ÷ the items they discounted, or the whole order for a Yotpo code). Discount $ never counts twice: each program only counts its own discounts, so the groups' Discount $ adds up to the Total. An order that used programs from two groups (e.g. a Yotpo code + a free sample) is in both groups' Orders and Gross Sales; the Total counts it once. Attentive, Collabs / affiliate codes, bundles / sets and TikTok Shop orders aren't part of this table.</div>`;
   el.querySelectorAll('.disc-toggle').forEach(btn => btn.addEventListener('click', () => {
     const k = btn.dataset.group;
     discGroupOpen[k] = !discGroupOpen[k];
