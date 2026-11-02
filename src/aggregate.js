@@ -100,6 +100,8 @@ const DISCOUNT_GROUPS = [
     'DISCOUNT-I1KYC', 'DISCOUNT-Y40T0', 'DISCOUNT-MM7ME', 'DISCOUNT-OBWY5'] },
   { key: 'gifts', label: 'GIFTS & SAMPLES', tags: ['DISCOUNT-FT9ZL', 'DISCOUNT-OA5WN', 'DISCOUNT-QAQAN', 'DISCOUNT-FREE_SAMPLE', 'DISCOUNT-FREE_MAKEUP_BAG'] },
   { key: 'segments', label: 'SEGMENTS', tags: ['DISCOUNT-PRO-ARTIST', 'DISCOUNT-BA_DISCOUNT'] },
+  // Built from the Attentive codes themselves (attentiveKindOf), like YOTPO.
+  { key: 'attentive', label: 'ATTENTIVE' },
 ];
 const TAG_GROUP = {};
 DISCOUNT_GROUPS.forEach((g) => (g.tags || []).forEach((t) => { TAG_GROUP[t] = g.key; }));
@@ -140,7 +142,21 @@ function yotpoKindOf(app) {
   return null;
 }
 // Returns Map(kindKey -> amount) for one order.
-function yotpoCodes(order) {
+// Attentive (2026-11-02, Tomer: complete the Discounts Breakdown): Attentive's
+// single-use SMS / email codes — 6 random letters/digits ("mETyTq", Shopify
+// title "attentive") or ND + 6 ("NDYns1cg", title "ATTENTIVE15OFF"), always
+// with a lowercase letter. Uppercase-only codes are Yotpo / affiliate codes.
+const ATTENTIVE_CODE_RE = /^(ND)?[A-Za-z0-9]{6}$/;
+const ATTENTIVE_KIND = { key: 'attentive' };
+function attentiveKindOf(app) {
+  const code = String(app.code || '');
+  return ATTENTIVE_CODE_RE.test(code) && /[a-z]/.test(code) ? ATTENTIVE_KIND : null;
+}
+function yotpoCodes(order) { return codeKindAmounts(order, yotpoKindOf); }
+function attentiveAmount(order) { return codeKindAmounts(order, attentiveKindOf).get('attentive') || 0; }
+// Returns Map(kindKey -> amount) of one order's discount codes of the kinds
+// kindOf recognises (what those codes took off the line items).
+function codeKindAmounts(order, kindOf) {
   const out = new Map();
   const apps = order.discountApplications && order.discountApplications.nodes;
   if (!Array.isArray(apps) || !apps.length) return out;
@@ -159,7 +175,7 @@ function yotpoCodes(order) {
   const presDisc = Number(tds.presentmentMoney && tds.presentmentMoney.amount || 0);
   apps.forEach((a, pos) => {
     if (!a || a.__typename !== 'DiscountCodeApplication') return;
-    const k = yotpoKindOf(a);
+    const k = kindOf(a);
     if (!k) return;
     const idx = a.index !== undefined ? a.index : pos;
     let x;
@@ -297,6 +313,11 @@ function aggregate(orders, { tagLabels = DEFAULT_TAG_LABELS } = {}) {
   // and only those programs' own discounts — not the store-wide figure, which
   // also holds TikTok Shop orders, free shipping and codes not in the table.
   const tableAcc = { value: 0, grossSales: 0, orders: 0, discGross: 0 };
+  // TikTok Shop orders synced into Shopify (sourceName 'tiktok'): their
+  // product discounts (TikTok vouchers, samples, seller discounts) are part of
+  // Shopify's store-wide Discounts but not a website program.
+  const tiktokAcc = { value: 0, grossSales: 0, orders: 0 };
+  let sawSourceName = false;
   let sawDiscountApps = false;
   // Program discounts by discount application (see the note above).
   const programTags = new Set([...Object.keys(tagLabels), ...FREE_SHIPPING_TAGS]);
@@ -363,6 +384,17 @@ function aggregate(orders, { tagLabels = DEFAULT_TAG_LABELS } = {}) {
       const g = groupAcc.get('yotpo');
       g.value += yTotal; g.grossSales += orderGross; g.orders += 1;
     }
+    const atAmt = attentiveAmount(order);
+    if (atAmt > 0.005) {
+      const g = groupAcc.get('attentive');
+      g.value += atAmt; g.grossSales += orderGross; g.orders += 1;
+    }
+    if (order.sourceName !== undefined) sawSourceName = true;
+    if (order.sourceName === 'tiktok') {
+      let ld = 0;
+      for (const e of order.lineItems.edges) for (const al of e.node.discountAllocations || []) ld += amt(al.allocatedAmountSet);
+      tiktokAcc.orders += 1; tiktokAcc.grossSales += orderGross; tiktokAcc.value += ld;
+    }
     {
       const orderTags = order.tags || [];
       const inGroups = new Set(orderTags.map((t) => TAG_GROUP[t]).filter(Boolean));
@@ -380,7 +412,7 @@ function aggregate(orders, { tagLabels = DEFAULT_TAG_LABELS } = {}) {
           g.value += orderDiscount;
         }
       });
-      if (yc.size || inGroups.size) {
+      if (yc.size || inGroups.size || atAmt > 0.005) {
         tableAcc.orders += 1; tableAcc.grossSales += orderGross;
         if (byApp) {
           // Group programs never take Yotpo / code discounts (programPart), so
@@ -388,11 +420,11 @@ function aggregate(orders, { tagLabels = DEFAULT_TAG_LABELS } = {}) {
           const apps = new Set(), lines = new Set();
           orderTags.filter((t) => TAG_GROUP[t]).forEach((t) => { const p = programPart(order, t); p.apps.forEach((i) => apps.add(i)); p.lines.forEach((l) => lines.add(l)); });
           appsOf.get(order).apps.forEach((a) => { if (apps.has(a.idx)) tableAcc.value += a.amount; });
-          tableAcc.value += yTotal;
+          tableAcc.value += yTotal + (atAmt > 0.005 ? atAmt : 0);
           // Discount % base: the discounted items, or the whole order when a
-          // Yotpo code (spread over the order) was used.
+          // Yotpo / Attentive code (spread over the order) was used.
           let dg = 0;
-          if (yc.size) dg = orderGross;
+          if (yc.size || atAmt > 0.005) dg = orderGross;
           else lines.forEach((l) => { dg += appsOf.get(order).lineGross[l] || 0; });
           tableAcc.discGross += dg;
         } else {
@@ -498,6 +530,20 @@ function aggregate(orders, { tagLabels = DEFAULT_TAG_LABELS } = {}) {
         pct_of_gross: grossSales ? y.value / grossSales : null,
       });
     });
+    {
+      const a = groupAcc.get('attentive');
+      if (a.orders) discounts.push({
+        tag: 'Attentive codes',
+        label: 'Attentive codes',
+        group: 'attentive',
+        gross_sales: a.grossSales,
+        discount_value: a.value,
+        discount_pct: a.grossSales ? a.value / a.grossSales : null,
+        orders: a.orders,
+        pct_of_total_discounts: discountsTotal ? a.value / discountsTotal : null,
+        pct_of_gross: grossSales ? a.value / grossSales : null,
+      });
+    }
     discountGroups = DISCOUNT_GROUPS.map((g) => {
       const v = groupAcc.get(g.key);
       return {
@@ -507,8 +553,8 @@ function aggregate(orders, { tagLabels = DEFAULT_TAG_LABELS } = {}) {
         discount_value: v.value,
         // Yotpo: codes spread over the whole order → ÷ the orders' gross. Other
         // groups (by discount application): ÷ the items their programs discounted.
-        discount_pct: (byApp && g.key !== 'yotpo') ? (v.discGross ? v.value / v.discGross : (v.value ? null : 0)) : (v.grossSales ? v.value / v.grossSales : null),
-        discounted_gross: (byApp && g.key !== 'yotpo') ? v.discGross : undefined,
+        discount_pct: (byApp && g.key !== 'yotpo' && g.key !== 'attentive') ? (v.discGross ? v.value / v.discGross : (v.value ? null : 0)) : (v.grossSales ? v.value / v.grossSales : null),
+        discounted_gross: (byApp && g.key !== 'yotpo' && g.key !== 'attentive') ? v.discGross : undefined,
         orders: v.orders,
         pct_of_total_discounts: discountsTotal ? v.value / discountsTotal : null,
         pct_of_gross: grossSales ? v.value / grossSales : null,
@@ -534,6 +580,7 @@ function aggregate(orders, { tagLabels = DEFAULT_TAG_LABELS } = {}) {
     discounts_total_abs: discountsTotal,
     discounts_total_orders: ordersCount,
     discount_groups: discountGroups,
+    discounts_tiktok: sawSourceName ? { gross_sales: tiktokAcc.grossSales, discount_value: tiktokAcc.value, orders: tiktokAcc.orders } : undefined,
     discounts_table_total: sawDiscountApps ? {
       gross_sales: tableAcc.grossSales,
       discount_value: tableAcc.value,
@@ -546,7 +593,8 @@ function aggregate(orders, { tagLabels = DEFAULT_TAG_LABELS } = {}) {
     // A period with no orders has nothing to re-pull (it used to stay at 1 and
     // be re-pulled on every view — 2026-10-29 review).
     // 5 (2026-11-02): discounts_table_total (the table's own Total row).
-    discounts_version: orders.length === 0 ? 5 : (sawDiscountApps ? (byApp ? 5 : 3) : 1),
+    // 6 (2026-11-02): ATTENTIVE group + discounts_tiktok (needs sourceName).
+    discounts_version: orders.length === 0 ? 6 : (sawDiscountApps ? (byApp && sawSourceName ? 6 : byApp ? 5 : 3) : 1),
     discounts_by_app: byApp,
   };
 }
