@@ -1348,12 +1348,20 @@ app.get('/api/tiktok-shop/seller-center', async (req, res) => {
     // cached) so today's orders keep coming in.
     let gap = null, fill = null;
     const p = out.payload || {};
-    if (Array.isArray(p.perf_days) && p.perf_from && !p.perf_error) {
+    let fillFrom = null;
+    if (Array.isArray(p.perf_days) || p.perf_error) {
       // 2026-10-28 (Tomer: "the GMV isn't up to date"): every day TikTok's
       // analytics have no figure for — the latest days, and any day Windsor
       // never returned (Oct 10 2026) — is filled from TikTok's order data in
       // Triple Whale on the same GMV formula, run by run.
-      fill = await gmvFill(p.perf_days, p.perf_from, String(end)).catch((err) => { console.error('seller-center fill failed:', err.message); return { error: err.message }; });
+      // 2026-11-02 (Tomer: "is all TikTok data year to date correct?"): the
+      // fill now starts at the PERIOD start, so the months before TikTok's
+      // analytics begin in Windsor (May 1 2026) — and any period with no
+      // analytics at all — come from the order data too. That formula
+      // (GMT-8 created_at, unpaid orders out) matches Seller Center to the
+      // cent day by day, so Year to Date / quarters are no longer an estimate.
+      fillFrom = String(start);
+      fill = await gmvFill(!p.perf_error && Array.isArray(p.perf_days) ? p.perf_days : [], fillFrom, String(end)).catch((err) => { console.error('seller-center fill failed:', err.message); return { error: err.message }; });
     } else {
       // Older cached copies (no perf_days): fill only the days after the last one.
       const gapStart = p.perf_through ? new Date(Date.parse(p.perf_through + 'T00:00:00Z') + 86400000).toISOString().slice(0, 10) : null;
@@ -1361,7 +1369,7 @@ app.get('/api/tiktok-shop/seller-center', async (req, res) => {
         gap = await fetchGmvEstimate('com', gapStart, String(end)).catch((err) => { console.error('seller-center gap fill failed:', err.message); return null; });
       }
     }
-    res.json({ ...p, gap, fill, cache: out.cache });
+    res.json({ ...p, gap, fill, fill_from: fillFrom, cache: out.cache });
   } catch (err) {
     console.error('seller-center failed:', err.message);
     res.status(err.status || 502).json({ error: err.message });
