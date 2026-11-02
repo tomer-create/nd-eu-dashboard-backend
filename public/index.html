@@ -2615,6 +2615,14 @@ function renderTikTokShop(monthData, opts = {}) {
   const discRatio = tt.gross_sales && hasProdDisc ? prodDisc / tt.gross_sales : null;
   const discRatioYoy = tt.yoy && hasProdDisc ? ratioChange(prodDisc, tt.gross_sales, tt.yoy.product_discounts, tt.yoy.gross_sales) : null;
   const discRatioMom = tt.mom && hasProdDisc ? ratioChange(prodDisc, tt.gross_sales, tt.mom.product_discounts, tt.mom.gross_sales) : null;
+  // Return Rate (2026-11-02, Tomer: "add to the TikTok section the return
+  // rate for the channel") — refunds ÷ gross sales, the same definition as
+  // Key Metrics' % Returns Ratio, both from TikTok's order data in Triple
+  // Whale (refunds by refund date, like the Refunds tile). Lower is better.
+  const hasRefunds = typeof tt.refunds === 'number' && tt.gross_sales > 0;
+  const returnRate = hasRefunds ? tt.refunds / tt.gross_sales : null;
+  const returnRateYoy = tt.yoy && hasRefunds ? ratioChange(tt.refunds, tt.gross_sales, tt.yoy.refunds, tt.yoy.gross_sales) : null;
+  const returnRateMom = tt.mom && hasRefunds ? ratioChange(tt.refunds, tt.gross_sales, tt.mom.refunds, tt.mom.gross_sales) : null;
   // TikTok Shop GMV (2026-10-14, Tomer: "Use from TikTok Shop analytics the
   // GMV = Price x Items sold + Shipping fees - Seller promotions - Platform
   // co-funding"). The figure is TikTok's own Shop Performance GMV (Seller
@@ -2706,6 +2714,9 @@ function renderTikTokShop(monthData, opts = {}) {
     tileV('AOV', fmtVal(aov, 'currency'), aovYoy, aovMom, true, 'Net Sales ÷ orders (after discounts and refunds)', 'Average order value: TikTok Shop Net Sales ÷ Orders (Key Metrics’ AOV is Shopify’s: (Gross Sales − Discounts) ÷ Orders)'),
     tile('Units Sold', tt.units, 'number', 'units', true, ''),
     tile('Refunds', tt.refunds, 'currency-full', 'refunds', false, gmvShown ? fmtVal(tt.refunds / gmvShown, 'percent') + ' of GMV' : ''),
+    tileV('Return Rate', fmtVal(returnRate, 'percent'), returnRateYoy, returnRateMom, false,
+      hasRefunds ? fmtVal(tt.refunds, 'currency-full') + ' refunds ÷ ' + fmtVal(tt.gross_sales, 'currency-full') + ' gross sales' : 'Refunds not loaded yet — click Sync',
+      'TikTok Shop return rate = refunds ÷ gross sales (before discounts) — the same definition as Key Metrics’ % Returns Ratio. TikTok order data via Triple Whale; refunds are counted on the day they were issued.'),
     tileV('Discount Ratio', fmtVal(discRatio, 'percent'), discRatioYoy, discRatioMom, false, hasProdDisc ? fmtVal(prodDisc, 'currency-full') + ' product discounts ÷ gross sales before discounts (excl. ' + fmtVal((tt.discounts || 0) - prodDisc, 'currency-full') + ' shipping discounts)' : 'Product discounts not loaded yet — click Sync', 'Product discounts ÷ Gross Sales TikTok (shipping discounts not included)'),
     tile('New-Customer Orders', tt.new_customer_orders, 'number', 'new_customer_orders', true, (tt.orders && typeof tt.new_customer_orders === 'number') ? fmtVal(tt.new_customer_orders / tt.orders, 'percent') + ' of orders' : ''),
   ];
