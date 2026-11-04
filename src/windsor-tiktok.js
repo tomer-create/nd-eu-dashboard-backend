@@ -843,6 +843,81 @@ async function getSellerCenter(start, end, { refresh } = {}) {
 const PAYOUT_TZ = 'America/New_York';
 const payoutDay = new Intl.DateTimeFormat('en-CA', { timeZone: PAYOUT_TZ, year: 'numeric', month: '2-digit', day: '2-digit' });
 const payoutCache = new Map(); // key -> { at, value }
+
+// Net sales by ORDER DATE (2026-11-04, Tomer: "the TikTok Shop net sales
+// should pull from net sales per order date"): every finance transaction of
+// the orders PLACED in the period, whenever it was settled — net sales
+// (revenue) = product subtotal − seller discounts − refunds + refunded seller
+// discounts, i.e. the statements' "Net sales" split back to each order.
+// Settled transactions come from the statements dated from the period start to
+// 90 days after its end (or today); orders not settled yet are counted at
+// TikTok's estimated revenue (unsettled transactions). De-duplicated by
+// transaction id only: a refund made after an order was paid out shows as a
+// separate, still-unsettled transaction of the same order and is counted too.
+// Order day = TikTok's fixed GMT-8 day (Seller Center), like the Orders tile.
+// Oct 2026 checked 4 Nov: 6,048 orders, $319,292.11 settled + $32,742.04 not
+// yet settled = $352,034.15. Windows of statements more than 3 days old don't
+// change, so they're kept in memory (YTD and the months share them).
+const SETTLED_NET_FIELDS = ['statement_transaction_id', 'statement_transaction_order_id', 'statement_transaction_order_create_datetime', 'statement_transaction_type', 'statement_transaction_revenue_amount'];
+const UNSETTLED_NET_FIELDS = ['unsettled_transaction_id', 'unsettled_transaction_order_id', 'unsettled_transaction_order_create_datetime', 'unsettled_transaction_type', 'unsettled_transaction_est_revenue_amount'];
+const settledWinCache = new Map(); // 'from|to' -> [[id, orderId, created, revenue]]
+async function orderDateNetSales(start, end, chunked) {
+  const today = todayISO();
+  const settledTo = addDays(end, 90) < today ? addDays(end, 90) : today;
+  // 7-day statement windows, aligned to a fixed Monday grid so different
+  // periods reuse the same cached windows.
+  const wins = [];
+  const anchor = new Date(start + 'T00:00:00Z');
+  let a = addDays(start, -((anchor.getUTCDay() + 6) % 7));
+  for (; a <= settledTo; a = addDays(a, 7)) wins.push([a, addDays(a, 6)]);
+  const settledRows = [];
+  const todo = [];
+  for (const [f, t] of wins) {
+    const hit = settledWinCache.get(f + '|' + t);
+    if (hit) settledRows.push(...hit); else todo.push([f, t]);
+  }
+  for (let i = 0; i < todo.length; i += 4) {
+    const part = await Promise.all(todo.slice(i, i + 4).map(([f, t]) => windsorQuery(SETTLED_NET_FIELDS, f, t)));
+    part.forEach((rs, j) => {
+      const [f, t] = todo[i + j];
+      const slim = rs.filter((r) => String(r.statement_transaction_type || 'ORDER') === 'ORDER')
+        .map((r) => [String(r.statement_transaction_id || ''), String(r.statement_transaction_order_id || ''), r.statement_transaction_order_create_datetime, num(r.statement_transaction_revenue_amount)]);
+      settledRows.push(...slim);
+      if (t < addDays(today, -3)) settledWinCache.set(f + '|' + t, slim);
+    });
+  }
+  if (settledWinCache.size > 120) settledWinCache.delete(settledWinCache.keys().next().value);
+  // Orders settle within ~90 days, so an older period has nothing unsettled.
+  let unsettledRows = [];
+  if (end > addDays(today, -120)) {
+    const uFrom = addDays(start, -7) > addDays(today, -120) ? addDays(start, -7) : addDays(today, -120);
+    unsettledRows = (await chunked(UNSETTLED_NET_FIELDS, uFrom, today))
+      .filter((r) => String(r.unsettled_transaction_type || 'ORDER') === 'ORDER')
+      .map((r) => [String(r.unsettled_transaction_id || ''), String(r.unsettled_transaction_order_id || ''), r.unsettled_transaction_order_create_datetime, num(r.unsettled_transaction_est_revenue_amount)]);
+  }
+  const seen = new Set();
+  const orders = new Set();
+  let settled = 0, unsettled = 0, settledN = 0;
+  const take = (rows, isSettled) => {
+    for (const [id, orderId, created, rev] of rows) {
+      if (id) { if (seen.has(id)) continue; seen.add(id); }
+      const d = orderDayPT(created);
+      if (!d || d < start || d >= end) continue;
+      if (isSettled) { settled += rev; settledN++; } else unsettled += rev;
+      if (orderId) orders.add(orderId);
+    }
+  };
+  take(settledRows, true);
+  take(unsettledRows, false);
+  return {
+    net_sales: settled + unsettled,
+    net_sales_settled: settled,
+    net_sales_unsettled: unsettled,
+    net_sales_orders: orders.size,
+    net_sales_transactions: settledN,
+    net_sales_basis: 'order date (GMT-8)',
+  };
+}
 async function fetchPayouts(start, end) {
   if (!process.env.WINDSOR_API_KEY) return null;
   if (!isoOk(start) || !isoOk(end) || end <= start) return null;
@@ -868,11 +943,12 @@ async function fetchPayouts(start, end) {
     }
     return out;
   };
-  const [rows, stRows] = await Promise.all([
+  const [rows, stRows, byOrder] = await Promise.all([
     chunked(['date', 'payment_id', 'payment_settlement_amount_value', 'payment_amount_value', 'payment_paid_datetime', 'payment_status'],
       addDays(start, -5), addDays(end, 5)),
     chunked(['date', 'statement_id', 'statement_statement_datetime', 'statement_net_sales_amount', 'statement_revenue_amount', 'statement_settlement_amount'],
       addDays(start, -3), addDays(end, 3)),
+    orderDateNetSales(start, end, chunked),
   ]);
   const stSeen = new Set();
   let netSales = 0, stSettlement = 0, stCount = 0;
@@ -905,7 +981,7 @@ async function fetchPayouts(start, end) {
     if (!first || day < first) first = day;
     if (!last || day > last) last = day;
   }
-  const value = { start, end, net_sales: netSales, statements: stCount, statement_settlement: stSettlement, payout, amount_before_reserve: gross, payouts: count, first_paid: first, last_paid: last, source: 'TikTok Shop statements and payments (Windsor)' };
+  const value = { start, end, ...byOrder, statement_net_sales: netSales, statements: stCount, statement_settlement: stSettlement, payout, amount_before_reserve: gross, payouts: count, first_paid: first, last_paid: last, source: 'TikTok Shop statements and payments (Windsor)' };
   payoutCache.set(key, { at: Date.now(), value });
   if (payoutCache.size > 200) payoutCache.delete(payoutCache.keys().next().value);
   return value;
