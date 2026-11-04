@@ -850,9 +850,33 @@ async function fetchPayouts(start, end) {
   const settled = end < addDays(todayISO(), -3);
   const hit = payoutCache.get(key);
   if (hit && Date.now() - hit.at < (settled ? 6 * 3600000 : 15 * 60000)) return hit.value;
-  const rows = await windsorQuery(
-    ['date', 'payment_id', 'payment_settlement_amount_value', 'payment_amount_value', 'payment_paid_datetime', 'payment_status'],
-    addDays(start, -5), addDays(end, 5));
+  // Total net sales (2026-11-04, Tomer: "for TikTok Shop Net Sales pull the
+  // Total net sales orders from TikTok Shop"): the Net sales of TikTok's
+  // daily statements (Seller Center → Finance → Statements), each counted on
+  // its statement date (statement_statement_datetime, a UTC midnight — Windsor
+  // labels it the day before). Oct 2026: 31 statements, $399,941.72.
+  const [rows, stRows] = await Promise.all([
+    windsorQuery(
+      ['date', 'payment_id', 'payment_settlement_amount_value', 'payment_amount_value', 'payment_paid_datetime', 'payment_status'],
+      addDays(start, -5), addDays(end, 5)),
+    windsorQuery(
+      ['date', 'statement_id', 'statement_statement_datetime', 'statement_net_sales_amount', 'statement_revenue_amount', 'statement_settlement_amount'],
+      addDays(start, -3), addDays(end, 3)),
+  ]);
+  const stSeen = new Set();
+  let netSales = 0, stSettlement = 0, stCount = 0;
+  for (const r of stRows) {
+    const id = String(r.statement_id || '');
+    if (!id || stSeen.has(id)) continue;
+    stSeen.add(id);
+    const t = new Date(r.statement_statement_datetime);
+    if (isNaN(t)) continue;
+    const day = t.toISOString().slice(0, 10);
+    if (day < start || day >= end) continue;
+    netSales += num(r.statement_net_sales_amount);
+    stSettlement += num(r.statement_settlement_amount);
+    stCount += 1;
+  }
   const seen = new Set();
   let payout = 0, gross = 0, count = 0, first = null, last = null;
   for (const r of rows) {
@@ -870,7 +894,7 @@ async function fetchPayouts(start, end) {
     if (!first || day < first) first = day;
     if (!last || day > last) last = day;
   }
-  const value = { start, end, payout, amount_before_reserve: gross, payouts: count, first_paid: first, last_paid: last, source: 'TikTok Shop payments (Windsor)' };
+  const value = { start, end, net_sales: netSales, statements: stCount, statement_settlement: stSettlement, payout, amount_before_reserve: gross, payouts: count, first_paid: first, last_paid: last, source: 'TikTok Shop statements and payments (Windsor)' };
   payoutCache.set(key, { at: Date.now(), value });
   if (payoutCache.size > 200) payoutCache.delete(payoutCache.keys().next().value);
   return value;
