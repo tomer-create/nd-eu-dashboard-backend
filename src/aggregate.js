@@ -399,11 +399,20 @@ function discountSplit(orders, owners, grossSales, discountTags) {
     const shopCur = order.totalDiscountsSet && order.totalDiscountsSet.shopMoney && order.totalDiscountsSet.shopMoney.currencyCode;
     const perItem = new Map(); // item -> { v, lines:Set }
     const ctx = { saleTags, bundleTags, saleList, orderTags: new Set(order.tags || []) };
+    // Prices that include VAT (ND.IL — taxesIncluded): line prices and their
+    // discounts carry the tax, while Shopify's Discounts / Gross Sales (Key
+    // Metrics) don't — so take the tax out, at the order's own rate
+    // (2026-11-04: IL Oct split ₪81,060 vs Key Metrics ₪71,742 = +18% VAT).
+    let netF = 1;
+    if (order.taxesIncluded) {
+      const sub = amt(order.subtotalPriceSet), tax = amt(order.totalTaxSet);
+      if (sub > 0 && tax > 0 && tax < sub) netF = (sub - tax) / sub;
+    }
     const lineGross = [];
     order.lineItems.edges.forEach((e, li) => {
-      lineGross[li] = amt(e.node.originalTotalSet);
+      lineGross[li] = amt(e.node.originalTotalSet) * netF;
       for (const al of e.node.discountAllocations || []) {
-        const v = amt(al.allocatedAmountSet);
+        const v = amt(al.allocatedAmountSet) * netF;
         if (!v) continue;
         const a = byIdx.get(al.discountApplication && al.discountApplication.index);
         const item = a ? splitItemOf(a, isTikTok, owners, shopCur, ctx) : (isTikTok ? 'tiktok_seller' : 'offers');
@@ -733,7 +742,8 @@ function aggregate(orders, { tagLabels = DEFAULT_TAG_LABELS, discountTags = null
     // 10 (2026-11-04): the $0.10 points check only in the store's currency.
     // 11 (2026-11-04): SALES box (sale programs from the Evergreen Discounts
     //                  Tags sheet), BA and Bundles & sets items in Regular.
-    discounts_version: orders.length === 0 ? 11 : (sawDiscountApps ? (byApp && sawSourceName ? 11 : byApp ? 5 : 3) : 1),
+    // 12 (2026-11-04): VAT taken out of the split for VAT-inclusive prices (IL).
+    discounts_version: orders.length === 0 ? 12 : (sawDiscountApps ? (byApp && sawSourceName ? 12 : byApp ? 5 : 3) : 1),
     discounts_by_app: byApp,
   };
 }
