@@ -855,12 +855,23 @@ async function fetchPayouts(start, end) {
   // daily statements (Seller Center → Finance → Statements), each counted on
   // its statement date (statement_statement_datetime, a UTC midnight — Windsor
   // labels it the day before). Oct 2026: 31 statements, $399,941.72.
+  // Read in 7-day windows (2026-11-04): a single month-wide Windsor query
+  // silently dropped the Oct 28 statement ($4,716.15) that a narrower query
+  // returns — rows are de-duplicated by id below, so overlaps are harmless.
+  const chunked = async (fields, from, to) => {
+    const wins = [];
+    for (let a = from; a <= to; a = addDays(a, 7)) wins.push([a, addDays(a, 6) < to ? addDays(a, 6) : to]);
+    const out = [];
+    for (let i = 0; i < wins.length; i += 4) {
+      const part = await Promise.all(wins.slice(i, i + 4).map(([a, b]) => windsorQuery(fields, a, b)));
+      part.forEach((rs) => out.push(...rs));
+    }
+    return out;
+  };
   const [rows, stRows] = await Promise.all([
-    windsorQuery(
-      ['date', 'payment_id', 'payment_settlement_amount_value', 'payment_amount_value', 'payment_paid_datetime', 'payment_status'],
+    chunked(['date', 'payment_id', 'payment_settlement_amount_value', 'payment_amount_value', 'payment_paid_datetime', 'payment_status'],
       addDays(start, -5), addDays(end, 5)),
-    windsorQuery(
-      ['date', 'statement_id', 'statement_statement_datetime', 'statement_net_sales_amount', 'statement_revenue_amount', 'statement_settlement_amount'],
+    chunked(['date', 'statement_id', 'statement_statement_datetime', 'statement_net_sales_amount', 'statement_revenue_amount', 'statement_settlement_amount'],
       addDays(start, -3), addDays(end, 3)),
   ]);
   const stSeen = new Set();
