@@ -1995,7 +1995,8 @@ function combineMonthDatas(entries, opts) {
   if (discEntries.length && discEntries.every(e => e.monthData.discount_split && Array.isArray(e.monthData.discount_split.buckets))) {
     discEntries.forEach(e => {
       const sp = e.monthData.discount_split;
-      if (!discSplit) discSplit = { total: { discount_value: 0, orders: 0, gross_sales: 0, discounted_gross: 0 }, sale_tags_source: sp.sale_tags_source, buckets: [] };
+      if (!discSplit) discSplit = { total: { discount_value: 0, order_value: 0, orders: 0, gross_sales: 0, discounted_gross: 0 }, sale_tags_source: sp.sale_tags_source, buckets: [] };
+      discSplit.total.order_value += (typeof sp.total.order_value === 'number' ? sp.total.order_value : (sp.total.discount_value || 0)) * e.fx;
       if (sp.sale_tags_source === 'built-in') discSplit.sale_tags_source = 'built-in';
       discSplit.total.discount_value += (sp.total.discount_value || 0) * e.fx;
       discSplit.total.discounted_gross += (sp.total.discounted_gross || 0) * e.fx;
@@ -5486,10 +5487,18 @@ function renderDiscountSplit(monthData) {
   // themselves, which differ from it by about 1% (orders voided before
   // payment, order edits, sale-date vs order-date timing) — that difference
   // is its own line so the column still adds up.
+  // 2026-11-04 (Tomer: "the discount value should be calculated from the
+  // retail price"): the buckets are valued at each product's retail price in
+  // Shopify (discount_value); order_value is the same discounts at the order's
+  // own prices — what Key Metrics counts. The adjustment line keeps the
+  // order-price figures tied to Key Metrics; the Total = Key Metrics + the
+  // retail value above the order prices.
   const splitSum = sp.total.discount_value || 0;
+  const splitOrder = typeof sp.total.order_value === 'number' ? sp.total.order_value : splitSum;
+  const uplift = splitSum - splitOrder;
   const km = typeof monthData.discounts_total_abs === 'number' ? Math.abs(monthData.discounts_total_abs) : null;
-  const tot = km !== null ? km : splitSum;
-  const adj = km !== null ? km - splitSum : 0;
+  const adj = km !== null ? km - splitOrder : 0;
+  const tot = splitSum + adj;
   const gross = monthData.discounts_total_gross || sp.total.gross_sales || 0;
   const pct = v => fmtVal(v, 'percent');
   const ofDisc = v => tot ? pct((v || 0) / tot) : '—';
@@ -5498,12 +5507,16 @@ function renderDiscountSplit(monthData) {
   // Discount Ratio (2026-11-04, Tomer): discount ÷ the gross of the items it
   // was taken off (Pro Artist → 30%, samples and gifts → 100%).
   const ratio = x => typeof x.discounted_gross === 'number' && x.discounted_gross > 0 ? pct((x.discount_value || 0) / x.discounted_gross) : '—';
+  // Gross Sales column (2026-11-04, Tomer chose "discounted items only"): the
+  // retail value of the items each discount was taken off.
+  const gs = x => typeof x.discounted_gross === 'number' ? fmtVal(x.discounted_gross, 'currency-full') : '—';
   let body = '';
   sp.buckets.forEach(b => {
     const open = !!splitOpen[b.key];
     const items = b.items.filter(i => Math.abs(i.discount_value || 0) >= 0.005);
     body += `<tr class="disc-group">
       <td><button type="button" class="us-toggle disc-toggle" data-group="${b.key}" aria-expanded="${open}"${items.length ? '' : ' disabled'}><span class="chev" aria-hidden="true">▶</span><strong>${escText(b.label)}</strong></button><div style="font-size:10px;color:var(--text-muted);font-weight:500;padding-left:16px">${items.length ? items.map(i => escText(i.label)).join(' · ') : 'None this period'}</div></td>
+      <td><strong>${gs(b)}</strong></td>
       <td><strong>${fmtVal(b.discount_value || 0, 'currency-full')}</strong></td>
       <td><strong>${ratio(b)}</strong></td>
       <td><strong>${ofDisc(b.discount_value)}</strong></td>
@@ -5511,6 +5524,7 @@ function renderDiscountSplit(monthData) {
       <td><strong>${ofGross(b.discount_value)}</strong></td>
     </tr>` + items.map(i => `<tr class="disc-prog" data-group="${b.key}"${open ? '' : ' hidden'}>
       <td style="padding-left:28px">${escText(i.label)}</td>
+      <td>${gs(i)}</td>
       <td>${fmtVal(i.discount_value || 0, 'currency-full')}</td>
       <td>${ratio(i)}</td>
       <td>${ofDisc(i.discount_value)}</td>
@@ -5520,6 +5534,7 @@ function renderDiscountSplit(monthData) {
   });
   const adjRow = Math.abs(adj) >= 0.5 ? `<tr class="disc-group">
       <td><strong>Shopify report adjustment</strong><div style="font-size:10px;color:var(--text-muted);font-weight:500;padding-left:0">Shopify’s sales report vs. the orders: orders voided before payment, order edits, sale-date timing</div></td>
+      <td>—</td>
       <td><strong>${fmtVal(adj, 'currency-full')}</strong></td>
       <td>—</td>
       <td><strong>${ofDisc(adj)}</strong></td>
@@ -5527,7 +5542,8 @@ function renderDiscountSplit(monthData) {
       <td><strong>${ofGross(adj)}</strong></td>
     </tr>` : '';
   const totalRow = adjRow + `<tr class="total-row">
-      <td>Total<div style="font-size:10px;color:var(--text-muted);font-weight:500">= Discounts in Key Metrics · each order once</div></td>
+      <td>Total<div style="font-size:10px;color:var(--text-muted);font-weight:500">${Math.abs(uplift) >= 0.5 && km !== null ? 'At retail prices = Discounts in Key Metrics ' + fmtVal(km, 'currency-full') + ' + ' + fmtVal(uplift, 'currency-full') + ' retail value above the order prices' : '= Discounts in Key Metrics'} · each order once</div></td>
+      <td>${gs(sp.total)}</td>
       <td>${fmtVal(tot, 'currency-full')}</td>
       <td>${ratio(sp.total)}</td>
       <td>${tot ? '100%' : '—'}</td>
@@ -5535,10 +5551,10 @@ function renderDiscountSplit(monthData) {
       <td>${ofGross(tot)}</td>
     </tr>`;
   el.innerHTML = `<table class="dtable">
-    <thead><tr><th style="text-align:left">Bucket</th><th>Discount $</th><th title="Discount $ ÷ the gross sales of the items it was taken off (Pro Artist → 30%, samples and gifts → 100%)">Discount Ratio</th><th>% of Discounts</th><th title="Orders that got a discount from this bucket / item">Orders</th><th title="Discount $ ÷ the period's store-wide Gross Sales">% of Gross Sales</th></tr></thead>
+    <thead><tr><th style="text-align:left">Bucket</th><th title="Retail value of the items the discount was taken off">Gross Sales</th><th title="At each product's retail price in Shopify (compare-at price when set, otherwise its price)">Discount $</th><th title="Discount $ ÷ the gross sales of the items it was taken off (Pro Artist → 30%, samples and gifts → 100%)">Discount Ratio</th><th>% of Discounts</th><th title="Orders that got a discount from this bucket / item">Orders</th><th title="Discount $ ÷ the period's store-wide Gross Sales">% of Gross Sales</th></tr></thead>
     <tbody>${body}${totalRow}</tbody>
   </table>
-  <div style="margin-top:10px;font-size:11px;color:var(--text-muted)">${monthData.discounts_note ? escText(monthData.discounts_note) + ' ' : ''}Every product discount in Shopify for the period (TikTok Shop orders included; shipping discounts aren't part of Shopify's Discounts), read discount by discount — each discount counts in exactly one item, so the items add up to their bucket and the buckets to the Total. Click a bucket to open its items. Discount Ratio = Discount $ ÷ the gross sales of the items it was taken off (Pro Artist → 30%, samples and gifts → 100%). Orders: an order with discounts from two buckets is in both; the Total counts it once. Samples: Free Sample on site orders. Gifts: GWP: free gifts and the free makeup bag. Gifts: TikTok creators: TikTok creator samples ("Free sample" on TikTok orders). Yotpo Loyalty: points redemptions (8-character upper-case fixed-amount codes in multiples of $0.10 — 10 points = $1), the Glow / Glam tier gifts, Birthday (any BDAY… code) and Refer a friend (REF…) codes. Sales: one line per sale in the "Evergreen Discounts Tags" sheet (the sale's discounts on orders carrying its tag)${sp.sale_tags_source === 'built-in' ? ' — the sheet couldn’t be read, so the sale list is the copy saved on 4 Nov 2026' : ''}; "Other % discounts" are percentage discounts on orders with no sale tag. Regular: TikTok seller discounts, Attentive's single-use codes, influencer / affiliate / campaign codes (incl. Collabs), Pro Artist, BA, bundles / sets, free shipping, manual discounts and other offers. Total = the Discounts figure in Key Metrics (Shopify's sales report); the buckets are read from the orders, and the small difference between the two is the "Shopify report adjustment" line.</div>`;
+  <div style="margin-top:10px;font-size:11px;color:var(--text-muted)">${monthData.discounts_note ? escText(monthData.discounts_note) + ' ' : ''}Every product discount in Shopify for the period (TikTok Shop orders included; shipping discounts aren't part of Shopify's Discounts), read discount by discount — each discount counts in exactly one item, so the items add up to their bucket and the buckets to the Total. Click a bucket to open its items. Discount Ratio = Discount $ ÷ the gross sales of the items it was taken off (Pro Artist → 30%, samples and gifts → 100%). Orders: an order with discounts from two buckets is in both; the Total counts it once. Samples: Free Sample on site orders. Gifts: GWP: free gifts and the free makeup bag. Gifts: TikTok creators: TikTok creator samples ("Free sample" on TikTok orders). Yotpo Loyalty: points redemptions (8-character upper-case fixed-amount codes in multiples of $0.10 — 10 points = $1), the Glow / Glam tier gifts, Birthday (any BDAY… code) and Refer a friend (REF…) codes. Sales: one line per sale in the "Evergreen Discounts Tags" sheet (the sale's discounts on orders carrying its tag)${sp.sale_tags_source === 'built-in' ? ' — the sheet couldn’t be read, so the sale list is the copy saved on 4 Nov 2026' : ''}; "Other % discounts" are percentage discounts on orders with no sale tag. Regular: TikTok seller discounts, Attentive's single-use codes, influencer / affiliate / campaign codes (incl. Collabs), Pro Artist, BA, bundles / sets, free shipping, manual discounts and other offers. Values are at each product's retail price in Shopify (its compare-at price when set, otherwise its price): when a discounted item came in below that on the order (e.g. a TikTok sample at $0), it's counted at retail. Gross Sales = the retail value of the items the discount was taken off. Total = Key Metrics' Discounts (Shopify's sales report, at order prices) + the retail value above the order prices; the small difference between Shopify's report and the orders is the "Shopify report adjustment" line.</div>`;
   el.querySelectorAll('.disc-toggle').forEach(btn => btn.addEventListener('click', () => {
     const k = btn.dataset.group;
     splitOpen[k] = !splitOpen[k];
