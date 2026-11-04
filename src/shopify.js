@@ -310,6 +310,7 @@ const ORDERS_QUERY = `
                 originalTotalSet { shopMoney { amount } }
                 discountAllocations { allocatedAmountSet { shopMoney { amount } } discountApplication { index } }
                 taxLines { rate priceSet { shopMoney { amount } } }
+                variant { price compareAtPrice }
               }
             }
           }
