@@ -390,7 +390,7 @@ function discountSplit(orders, owners, grossSales, discountTags) {
   // Sale items in sheet order, then the untagged % discounts.
   const saleKeys = saleList.map((x) => 'sale:' + x.tag).concat('sale:other');
   saleKeys.forEach((k) => { bucketOf.set(k, 'sales'); itemAcc.set(k, { value: 0, orderValue: 0, orders: 0, discGross: 0 }); });
-  let total = 0, totalOrders = 0, totalDiscGross = 0, totalOrderValue = 0;
+  let total = 0, totalOrders = 0, totalDiscGross = 0, totalOrderValue = 0, totalOrdersGross = 0;
   for (const order of orders) {
     const nodes = (order.discountApplications && order.discountApplications.nodes) || [];
     const byIdx = new Map();
@@ -452,30 +452,36 @@ function discountSplit(orders, owners, grossSales, discountTags) {
     });
     if (!perItem.size) continue;
     totalOrders += 1;
+    // Gross Sales of the whole order (2026-11-04, Tomer: "the gross sales and
+    // the discount … are the same, fix it" — for free items the discounted
+    // items' gross IS the discount): every line of the order, at retail.
+    let orderGross = 0;
+    lineGross.forEach((g) => { orderGross += g || 0; });
+    totalOrdersGross += orderGross;
     const bucketLines = new Map(), allLines = new Set();
     const sumLines = (set) => { let g = 0; set.forEach((li) => { g += lineGross[li] || 0; }); return g; };
     perItem.forEach((p, item) => {
-      const ia = itemAcc.get(item); ia.value += p.v; ia.orderValue += p.ov; ia.orders += 1; ia.discGross += sumLines(p.lines);
+      const ia = itemAcc.get(item); ia.value += p.v; ia.orderValue += p.ov; ia.orders += 1; ia.discGross += sumLines(p.lines); ia.ordersGross = (ia.ordersGross || 0) + orderGross;
       const b = bucketOf.get(item); bucketAcc.get(b).value += p.v; bucketAcc.get(b).orderValue += p.ov;
       totalOrderValue += p.ov;
       const bl = bucketLines.get(b) || new Set(); p.lines.forEach((li) => { bl.add(li); allLines.add(li); }); bucketLines.set(b, bl);
       total += p.v;
     });
-    bucketLines.forEach((set, b) => { const ba = bucketAcc.get(b); ba.orders += 1; ba.discGross += sumLines(set); });
+    bucketLines.forEach((set, b) => { const ba = bucketAcc.get(b); ba.orders += 1; ba.discGross += sumLines(set); ba.ordersGross = (ba.ordersGross || 0) + orderGross; });
     totalDiscGross += sumLines(allLines);
   }
   return {
     // discount_value / discounted_gross at retail; order_value = the same
     // discounts at the order's own prices (what Shopify / Key Metrics count).
-    total: { discount_value: total, order_value: totalOrderValue, orders: totalOrders, gross_sales: grossSales, discounted_gross: totalDiscGross },
+    total: { discount_value: total, order_value: totalOrderValue, orders: totalOrders, gross_sales: grossSales, discounted_gross: totalDiscGross, orders_gross: totalOrdersGross },
     valued_at: 'retail',
     sale_tags_source: discountTags ? discountTags.source : 'built-in',
     buckets: SPLIT_BUCKETS.map((b) => ({
       key: b.key, label: b.label,
-      discount_value: bucketAcc.get(b.key).value, order_value: bucketAcc.get(b.key).orderValue, orders: bucketAcc.get(b.key).orders, discounted_gross: bucketAcc.get(b.key).discGross,
+      discount_value: bucketAcc.get(b.key).value, order_value: bucketAcc.get(b.key).orderValue, orders: bucketAcc.get(b.key).orders, discounted_gross: bucketAcc.get(b.key).discGross, orders_gross: bucketAcc.get(b.key).ordersGross || 0,
       items: (b.key === 'sales'
         ? saleKeys.map((k) => [k, k === 'sale:other' ? SALE_OTHER_LABEL : saleLabel.get(k.slice(5)) || k.slice(5)])
-        : b.items).map(([k, label]) => ({ key: k, label, discount_value: itemAcc.get(k).value, order_value: itemAcc.get(k).orderValue, orders: itemAcc.get(k).orders, discounted_gross: itemAcc.get(k).discGross })),
+        : b.items).map(([k, label]) => ({ key: k, label, discount_value: itemAcc.get(k).value, order_value: itemAcc.get(k).orderValue, orders: itemAcc.get(k).orders, discounted_gross: itemAcc.get(k).discGross, orders_gross: itemAcc.get(k).ordersGross || 0 })),
     })),
   };
 }
@@ -781,7 +787,8 @@ function aggregate(orders, { tagLabels = DEFAULT_TAG_LABELS, discountTags = null
     // 14 (2026-11-04): VAT taken out line by line, as Shopify's report does.
     // 15 (2026-11-04): split valued at retail (variant compare-at / price) +
     //                  order_value at order prices.
-    discounts_version: orders.length === 0 ? 15 : (sawDiscountApps ? (byApp && sawSourceName ? 15 : byApp ? 5 : 3) : 1),
+    // 16 (2026-11-04): orders_gross (Gross Sales of the whole orders).
+    discounts_version: orders.length === 0 ? 16 : (sawDiscountApps ? (byApp && sawSourceName ? 16 : byApp ? 5 : 3) : 1),
     discounts_by_app: byApp,
   };
 }
