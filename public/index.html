@@ -1995,7 +1995,8 @@ function combineMonthDatas(entries, opts) {
   if (discEntries.length && discEntries.every(e => e.monthData.discount_split && Array.isArray(e.monthData.discount_split.buckets))) {
     discEntries.forEach(e => {
       const sp = e.monthData.discount_split;
-      if (!discSplit) discSplit = { total: { discount_value: 0, order_value: 0, orders: 0, gross_sales: 0, discounted_gross: 0 }, sale_tags_source: sp.sale_tags_source, buckets: [] };
+      if (!discSplit) discSplit = { total: { discount_value: 0, order_value: 0, orders: 0, gross_sales: 0, discounted_gross: 0, orders_gross: 0 }, sale_tags_source: sp.sale_tags_source, buckets: [] };
+      discSplit.total.orders_gross += (sp.total.orders_gross || 0) * e.fx;
       discSplit.total.order_value += (typeof sp.total.order_value === 'number' ? sp.total.order_value : (sp.total.discount_value || 0)) * e.fx;
       if (sp.sale_tags_source === 'built-in') discSplit.sale_tags_source = 'built-in';
       discSplit.total.discount_value += (sp.total.discount_value || 0) * e.fx;
@@ -2006,21 +2007,25 @@ function combineMonthDatas(entries, opts) {
       // sales per month / site (2026-11-04).
       sp.buckets.forEach(b => {
         let tb = discSplit.buckets.find(x => x.key === b.key);
-        if (!tb) { tb = { key: b.key, label: b.label, discount_value: 0, orders: 0, discounted_gross: 0, items: [] }; discSplit.buckets.push(tb); }
-        tb.discount_value += (b.discount_value || 0) * e.fx; tb.orders += b.orders || 0; tb.discounted_gross += (b.discounted_gross || 0) * e.fx;
+        if (!tb) { tb = { key: b.key, label: b.label, discount_value: 0, orders: 0, discounted_gross: 0, orders_gross: 0, items: [] }; discSplit.buckets.push(tb); }
+        tb.discount_value += (b.discount_value || 0) * e.fx; tb.orders += b.orders || 0; tb.discounted_gross += (b.discounted_gross || 0) * e.fx; tb.orders_gross += (b.orders_gross || 0) * e.fx;
         b.items.forEach(i => {
           // Sales are matched by name across stores (each store has its own
           // tag for the same sale, e.g. Fall Sale 2026).
           const mk = b.key === 'sales' ? 'name:' + String(i.label || '').trim().toLowerCase() : i.key;
           let ti = tb.items.find(x => x.mk === mk);
-          if (!ti) { ti = { key: i.key, mk, label: i.label, discount_value: 0, orders: 0, discounted_gross: 0 }; tb.items.push(ti); }
-          ti.discount_value += (i.discount_value || 0) * e.fx; ti.orders += i.orders || 0; ti.discounted_gross += (i.discounted_gross || 0) * e.fx;
+          if (!ti) { ti = { key: i.key, mk, label: i.label, discount_value: 0, orders: 0, discounted_gross: 0, orders_gross: 0 }; tb.items.push(ti); }
+          ti.discount_value += (i.discount_value || 0) * e.fx; ti.orders += i.orders || 0; ti.discounted_gross += (i.discounted_gross || 0) * e.fx; ti.orders_gross += (i.orders_gross || 0) * e.fx;
         });
       });
     });
   }
   // A month stored before the Discount Ratio (no discounted_gross) would make
   // the summed ratio wrong — show it as "—" until every part has it.
+  if (discSplit && !discEntries.every(e => typeof e.monthData.discount_split.total.orders_gross === 'number')) {
+    discSplit.total.orders_gross = null;
+    discSplit.buckets.forEach(b => { b.orders_gross = null; b.items.forEach(i => { i.orders_gross = null; }); });
+  }
   if (discSplit && !discEntries.every(e => typeof e.monthData.discount_split.total.discounted_gross === 'number')) {
     discSplit.total.discounted_gross = null;
     discSplit.buckets.forEach(b => { b.discounted_gross = null; b.items.forEach(i => { i.discounted_gross = null; }); });
@@ -2997,7 +3002,7 @@ function renderTikTokShop(monthData, opts = {}) {
     { label: 'TikTok Ads spend', v: tt.ads_spend, yoy: tt.yoy ? tt.yoy.ads_spend : null, mom: tt.mom ? tt.mom.ads_spend : null, py: null, pm: null },
     { label: 'Affiliate commission', v: commission, yoy: commChg.yoy, mom: commChg.mom, pm: commChg.mom === null && sheetPrev ? sheetPrev.commission : null },
     { label: 'Samples (TikTok Gifting)', v: samples, yoy: giftChg.yoy, mom: giftChg.mom, pm: !giftCur && giftChg.mom === null && sheetPrev ? sheetPrev.gifting : null,
-      sub: giftCur ? (giftCur.cost_pct ? `20% of the ${fmtVal(giftCur.retail_value || 0, 'currency-full')} price of the ${fmtVal(giftCur.units || 0, 'number')} products in ${fmtVal(giftCur.orders, 'number')} $0 TikTok orders${giftCur.units_no_price ? ` · ${fmtVal(giftCur.units_no_price, 'number')} without a price` : ''}` : `product cost of ${fmtVal(giftCur.orders, 'number')} $0 TikTok orders`) : giftFromSheet ? 'P&L sheet — $0-order figure unavailable' : '' },
+      sub: giftCur ? (giftCur.cost_pct === 1 ? `Retail price of the ${fmtVal(giftCur.units || 0, 'number')} products in ${fmtVal(giftCur.orders, 'number')} $0 TikTok orders${giftCur.units_no_price ? ` · ${fmtVal(giftCur.units_no_price, 'number')} without a price` : ''}` : giftCur.cost_pct ? `${Math.round(giftCur.cost_pct * 100)}% of the ${fmtVal(giftCur.retail_value || 0, 'currency-full')} price of the ${fmtVal(giftCur.units || 0, 'number')} products in ${fmtVal(giftCur.orders, 'number')} $0 TikTok orders${giftCur.units_no_price ? ` · ${fmtVal(giftCur.units_no_price, 'number')} without a price` : ''}` : `product cost of ${fmtVal(giftCur.orders, 'number')} $0 TikTok orders`) : giftFromSheet ? 'P&L sheet — $0-order figure unavailable' : '' },
     { label: 'Sample shipping cost', v: sampleShip, py: shipY, pm: shipM, sub: giftCur ? `${fmtVal(giftCur.orders,'number')} creators = ${fmtVal(giftCur.orders,'number')} $0 TikTok orders × $${SHIP_PER}` : '' },
     { label: 'TikTok Shop transaction fee', v: txCur ? txCur.v : null, py: txY ? txY.v : null, pm: txM ? txM.v : null, sub: txCur ? txCur.sub : '' },
   ];
@@ -3054,7 +3059,7 @@ function renderTikTokShop(monthData, opts = {}) {
         <tr class="total-row"><td>Total TikTok costs</td><td>${fmtVal(totalCost,'currency-full')}</td><td>${gmvShown ? fmtVal(totalCost/gmvShown,'percent') : '—'}</td><td>${cCell(totalYoy)}</td><td>${cCell(totalMom)}</td></tr>
       </tbody>
     </table>
-    <div class="tt-note">TikTok ROAS (tile above) = TikTok Shop GMV ÷ Total TikTok costs; “% of GMV” is on the same GMV. Product cost (COGS ${fmtVal(tt.cogs,'currency-full')}) isn't included. Sources: TikTok Ads spend — Triple Whale; Affiliate commission — P&amp;L sheet, with its YoY / ${mLabel} from TikTok's own data for the same days (TikTok's affiliate commission on the period's orders), since the sheet only has 2026 and no figure yet for a month in progress; Samples (TikTok Gifting) — product cost of everything inside the $0 orders from the TikTok sales channel (the creator samples): each product's price × quantity × 20% (the dashboard's product-cost rule), added up; YoY / ${mLabel} on the same formula; TikTok Shop transaction fee — TikTok's referral fee (its commission on each sale), plus any transaction fee / platform commission and the refund administration fee, from TikTok's settlement statements, by statement date; Sample shipping — one shipment per $0 order from the TikTok sales channel (the same orders as Samples / TikTok Gifting) × $11.</div>`;
+    <div class="tt-note">TikTok ROAS (tile above) = TikTok Shop GMV ÷ Total TikTok costs; “% of GMV” is on the same GMV. Product cost (COGS ${fmtVal(tt.cogs,'currency-full')}) isn't included. Sources: TikTok Ads spend — Triple Whale; Affiliate commission — P&amp;L sheet, with its YoY / ${mLabel} from TikTok's own data for the same days (TikTok's affiliate commission on the period's orders), since the sheet only has 2026 and no figure yet for a month in progress; Samples (TikTok Gifting) — product cost of everything inside the $0 orders from the TikTok sales channel (the creator samples): each product's retail price × quantity, added up (2026-11-04: at retail, no longer 20% of it); YoY / ${mLabel} on the same formula; TikTok Shop transaction fee — TikTok's referral fee (its commission on each sale), plus any transaction fee / platform commission and the refund administration fee, from TikTok's settlement statements, by statement date; Sample shipping — one shipment per $0 order from the TikTok sales channel (the same orders as Samples / TikTok Gifting) × $11.</div>`;
 
   // Revenue & costs by source (2026-10-20, Tomer: "add Revenue by source and
   // TikTok costs on the same chart, when the cost of the affiliate should be
@@ -5507,9 +5512,11 @@ function renderDiscountSplit(monthData) {
   // Discount Ratio (2026-11-04, Tomer): discount ÷ the gross of the items it
   // was taken off (Pro Artist → 30%, samples and gifts → 100%).
   const ratio = x => typeof x.discounted_gross === 'number' && x.discounted_gross > 0 ? pct((x.discount_value || 0) / x.discounted_gross) : '—';
-  // Gross Sales column (2026-11-04, Tomer chose "discounted items only"): the
-  // retail value of the items each discount was taken off.
-  const gs = x => typeof x.discounted_gross === 'number' ? fmtVal(x.discounted_gross, 'currency-full') : '—';
+  // Gross Sales column (2026-11-04): the gross sales of the whole orders that
+  // got a discount from the bucket / item (Tomer: "the gross sales and the
+  // discount are the same, fix it" — the discounted items alone equal the
+  // discount for free samples / gifts). Months stored before it show "—".
+  const gs = x => typeof x.orders_gross === 'number' ? fmtVal(x.orders_gross, 'currency-full') : '—';
   let body = '';
   sp.buckets.forEach(b => {
     const open = !!splitOpen[b.key];
@@ -5551,10 +5558,10 @@ function renderDiscountSplit(monthData) {
       <td>${ofGross(tot)}</td>
     </tr>`;
   el.innerHTML = `<table class="dtable">
-    <thead><tr><th style="text-align:left">Bucket</th><th title="Retail value of the items the discount was taken off">Gross Sales</th><th title="At each product's retail price in Shopify (compare-at price when set, otherwise its price)">Discount $</th><th title="Discount $ ÷ the gross sales of the items it was taken off (Pro Artist → 30%, samples and gifts → 100%)">Discount Ratio</th><th>% of Discounts</th><th title="Orders that got a discount from this bucket / item">Orders</th><th title="Discount $ ÷ the period's store-wide Gross Sales">% of Gross Sales</th></tr></thead>
+    <thead><tr><th style="text-align:left">Bucket</th><th title="Gross sales of the whole orders that got a discount from this bucket / item">Gross Sales</th><th title="At each product's retail price in Shopify (compare-at price when set, otherwise its price)">Discount $</th><th title="Discount $ ÷ the gross sales of the items it was taken off (Pro Artist → 30%, samples and gifts → 100%)">Discount Ratio</th><th>% of Discounts</th><th title="Orders that got a discount from this bucket / item">Orders</th><th title="Discount $ ÷ the period's store-wide Gross Sales">% of Gross Sales</th></tr></thead>
     <tbody>${body}${totalRow}</tbody>
   </table>
-  <div style="margin-top:10px;font-size:11px;color:var(--text-muted)">${monthData.discounts_note ? escText(monthData.discounts_note) + ' ' : ''}Every product discount in Shopify for the period (TikTok Shop orders included; shipping discounts aren't part of Shopify's Discounts), read discount by discount — each discount counts in exactly one item, so the items add up to their bucket and the buckets to the Total. Click a bucket to open its items. Discount Ratio = Discount $ ÷ the gross sales of the items it was taken off (Pro Artist → 30%, samples and gifts → 100%). Orders: an order with discounts from two buckets is in both; the Total counts it once. Samples: Free Sample on site orders. Gifts: GWP: free gifts and the free makeup bag. Gifts: TikTok creators: TikTok creator samples ("Free sample" on TikTok orders). Yotpo Loyalty: points redemptions (8-character upper-case fixed-amount codes in multiples of $0.10 — 10 points = $1), the Glow / Glam tier gifts, Birthday (any BDAY… code) and Refer a friend (REF…) codes. Sales: one line per sale in the "Evergreen Discounts Tags" sheet (the sale's discounts on orders carrying its tag)${sp.sale_tags_source === 'built-in' ? ' — the sheet couldn’t be read, so the sale list is the copy saved on 4 Nov 2026' : ''}; "Other % discounts" are percentage discounts on orders with no sale tag. Regular: TikTok seller discounts, Attentive's single-use codes, influencer / affiliate / campaign codes (incl. Collabs), Pro Artist, BA, bundles / sets, free shipping, manual discounts and other offers. Values are at each product's retail price in Shopify (its compare-at price when set, otherwise its price): when a discounted item came in below that on the order (e.g. a TikTok sample at $0), it's counted at retail. Gross Sales = the retail value of the items the discount was taken off. Total = Key Metrics' Discounts (Shopify's sales report, at order prices) + the retail value above the order prices; the small difference between Shopify's report and the orders is the "Shopify report adjustment" line.</div>`;
+  <div style="margin-top:10px;font-size:11px;color:var(--text-muted)">${monthData.discounts_note ? escText(monthData.discounts_note) + ' ' : ''}Every product discount in Shopify for the period (TikTok Shop orders included; shipping discounts aren't part of Shopify's Discounts), read discount by discount — each discount counts in exactly one item, so the items add up to their bucket and the buckets to the Total. Click a bucket to open its items. Discount Ratio = Discount $ ÷ the gross sales of the items it was taken off (Pro Artist → 30%, samples and gifts → 100%). Orders: an order with discounts from two buckets is in both; the Total counts it once. Samples: Free Sample on site orders. Gifts: GWP: free gifts and the free makeup bag. Gifts: TikTok creators: TikTok creator samples ("Free sample" on TikTok orders). Yotpo Loyalty: points redemptions (8-character upper-case fixed-amount codes in multiples of $0.10 — 10 points = $1), the Glow / Glam tier gifts, Birthday (any BDAY… code) and Refer a friend (REF…) codes. Sales: one line per sale in the "Evergreen Discounts Tags" sheet (the sale's discounts on orders carrying its tag)${sp.sale_tags_source === 'built-in' ? ' — the sheet couldn’t be read, so the sale list is the copy saved on 4 Nov 2026' : ''}; "Other % discounts" are percentage discounts on orders with no sale tag. Regular: TikTok seller discounts, Attentive's single-use codes, influencer / affiliate / campaign codes (incl. Collabs), Pro Artist, BA, bundles / sets, free shipping, manual discounts and other offers. Values are at each product's retail price in Shopify (its compare-at price when set, otherwise its price): when a discounted item came in below that on the order (e.g. a TikTok sample at $0), it's counted at retail. Gross Sales = the gross sales of the whole orders that got a discount from the bucket / item (an order in two buckets is in both; the Total counts it once). Discount Ratio = Discount $ ÷ the gross of the discounted items only. Total = Key Metrics' Discounts (Shopify's sales report, at order prices) + the retail value above the order prices; the small difference between Shopify's report and the orders is the "Shopify report adjustment" line.</div>`;
   el.querySelectorAll('.disc-toggle').forEach(btn => btn.addEventListener('click', () => {
     const k = btn.dataset.group;
     splitOpen[k] = !splitOpen[k];
