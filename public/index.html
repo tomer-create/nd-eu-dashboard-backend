@@ -2780,14 +2780,17 @@ function renderTikTokShop(monthData, opts = {}) {
   const payPr = payCur ? ttPriorRanges() : {};
   const payY = payCur && payPr.yoy ? payOk(ttEnsurePayouts(payPr.yoy)) : null;
   const payM = payCur && payPr.mom ? payOk(ttEnsurePayouts(payPr.mom)) : null;
-  const payChg = (prev) => prev && prev.statements > 0 && prev.net_sales > 0 ? (payCur.net_sales - prev.net_sales) / prev.net_sales : null;
+  // 2026-11-04 (Tomer: "the TikTok Shop net sales should pull from net
+  // sales per order date"): net_sales is now TikTok's net sales of the orders
+  // PLACED in the period (GMT-8 day), settled + not yet settled (estimated).
+  const payChg = (prev) => prev && prev.net_sales_orders > 0 && prev.net_sales > 0 ? (payCur.net_sales - prev.net_sales) / prev.net_sales : null;
   const netTile = payCur
     ? tileV('Net Sales', fmtVal(payCur.net_sales, 'currency-full'), payChg(payY), payChg(payM), true,
-        `TikTok Shop statements: total net sales (${fmtVal(payCur.statements, 'number')} statement${payCur.statements === 1 ? '' : 's'}) · paid out ${fmtVal(payCur.payout, 'currency-full')}`,
-        'TikTok Shop Net Sales = the Total net sales of TikTok’s statements in the period (Seller Center → Finance → Statements), each on its statement date. “Paid out” = the payouts TikTok paid to the bank in the period, after its fees, affiliate commissions and reserves.')
+        `TikTok Shop net sales by order date · ${fmtVal(payCur.net_sales_orders || 0, 'number')} orders${payCur.net_sales_unsettled ? ' (' + fmtVal(payCur.net_sales_unsettled, 'currency-full') + ' not settled yet)' : ''} · paid out ${fmtVal(payCur.payout, 'currency-full')}`,
+        'TikTok Shop Net Sales = TikTok’s net sales (product price − seller discounts − refunds) of the orders placed in the period, by order date (TikTok’s GMT-8 day), from Seller Center finance: settled orders at their statement amounts, orders not settled yet at TikTok’s estimate. Refunds count against the order’s date. “Paid out” = the payouts TikTok paid to the bank in the period, after its fees, affiliate commissions and reserves.')
     : (payE && payE.status === 'loading'
-      ? tileV('Net Sales', '…', null, null, true, 'Loading TikTok payouts…')
-      : tile('Net Sales', tt.net_sales, 'currency-full', 'net_sales', true, payE && payE.status === 'error' ? 'TikTok payouts couldn’t be loaded — showing gross sales − discounts − refunds' : 'Gross sales − discounts − refunds'));
+      ? tileV('Net Sales', '…', null, null, true, 'Loading TikTok Shop net sales…')
+      : tile('Net Sales', tt.net_sales, 'currency-full', 'net_sales', true, payE && payE.status === 'error' ? 'TikTok Shop net sales couldn’t be loaded — showing gross sales − discounts − refunds' : 'Gross sales − discounts − refunds'));
   const tileList = [
     // What GMV includes (2026-10-26, Tomer asked for it inside the tile).
     tileV('TikTok Shop GMV', gmvShown === null ? '—' : fmtVal(gmvShown, 'currency-full'), proxyChange('yoy'), proxyChange('mom'), true,
