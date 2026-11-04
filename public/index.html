@@ -1035,6 +1035,7 @@ function mergeLiveIntoMonthData(monthData, live, site) {
     merged.discounts_total_abs = live.discounts_total_abs;
     merged.discounts_total_orders = live.discounts_total_orders;
     merged.discounts_programs_total = live.discounts_programs_total;
+    merged.discount_split = live.discount_split;
     merged.discounts_note = 'Pulled live from the sync backend by order tag.';
   }
 
@@ -1986,6 +1987,24 @@ function combineMonthDatas(entries, opts) {
   const discTotalGross = entries.reduce((s, e) => s + ((e.monthData.discounts_total_gross || 0) * e.fx), 0);
   const discTotalAbs = entries.reduce((s, e) => s + ((e.monthData.discounts_total_abs || 0) * e.fx), 0);
   const discTotalOrders = entries.reduce((s, e) => s + (e.monthData.discounts_total_orders || 0), 0);
+  // Discounts split (2026-11-04): summed bucket by bucket, item by item —
+  // only when every month / site has it (otherwise the older table shows).
+  let discSplit;
+  if (discEntries.length && discEntries.every(e => e.monthData.discount_split && Array.isArray(e.monthData.discount_split.buckets))) {
+    discEntries.forEach(e => {
+      const sp = e.monthData.discount_split;
+      if (!discSplit) discSplit = { total: { discount_value: 0, orders: 0, gross_sales: 0 }, buckets: sp.buckets.map(b => ({ key: b.key, label: b.label, discount_value: 0, orders: 0, items: b.items.map(i => ({ key: i.key, label: i.label, discount_value: 0, orders: 0 })) })) };
+      discSplit.total.discount_value += (sp.total.discount_value || 0) * e.fx;
+      discSplit.total.gross_sales += (sp.total.gross_sales || 0) * e.fx;
+      discSplit.total.orders += sp.total.orders || 0;
+      sp.buckets.forEach(b => {
+        const tb = discSplit.buckets.find(x => x.key === b.key);
+        if (!tb) return;
+        tb.discount_value += (b.discount_value || 0) * e.fx; tb.orders += b.orders || 0;
+        b.items.forEach(i => { const ti = tb.items.find(x => x.key === i.key); if (ti) { ti.discount_value += (i.discount_value || 0) * e.fx; ti.orders += i.orders || 0; } });
+      });
+    });
+  }
   // The table's own Total row (2026-11-02): summed only when every part has it.
   let discTableTotal;
   if (discEntries.length && discEntries.every(e => e.monthData.discounts_programs_total)) {
@@ -2017,7 +2036,7 @@ function combineMonthDatas(entries, opts) {
     top_returns_note: tr.list ? ('Combined for ' + label + '.' + combinedTail + (tr.partial ? ' Only ' + tr.sourcesCount + ' of ' + tr.totalSources + ' site/period combination(s) had return-level data to merge.' : '')) : undefined,
     by_country: cc.list,
     by_country_note: cc.list ? ('Combined for ' + label + '.' + combinedTail + (cc.partial ? ' Only ' + cc.sourcesCount + ' of ' + cc.totalSources + ' site/period combination(s) had country-level data to merge; Return Rate is an orders-weighted average where available.' : ' Return Rate is an orders-weighted average across the combined periods.')) : undefined,
-    discounts: dd.list, discount_groups: discGroups, discounts_yotpo_cover: discYotpoCover, discounts_total_gross: discTotalGross, discounts_total_abs: discTotalAbs, discounts_total_orders: discTotalOrders, discounts_programs_total: discTableTotal,
+    discounts: dd.list, discount_groups: discGroups, discounts_yotpo_cover: discYotpoCover, discounts_total_gross: discTotalGross, discounts_total_abs: discTotalAbs, discounts_total_orders: discTotalOrders, discounts_programs_total: discTableTotal, discount_split: discSplit,
     discounts_note: dd.list ? ('Combined for ' + label + '.' + combinedTail + (dd.partial ? ' Only ' + dd.sourcesCount + ' of ' + dd.totalSources + ' site/period combination(s) had discount-level data to merge.' : '')) : undefined,
     tiktok_shop: ttCombined,
     combined_label: label,
@@ -5422,7 +5441,61 @@ function discountGroupOf(d) {
   return 'other';
 }
 const discGroupOpen = {};
+// Discounts split (2026-11-04, Tomer's file "Discounts split / Yotpo Loyalty
+// rules"): EVERY discount of the period in five buckets — Samples, Gifts: GWP
+// to customers, Gifts: TikTok creators, Yotpo Loyalty, Regular — each
+// discount in exactly one item (backend discount_split, src/aggregate.js).
+// Months stored before it show the older program table until they refresh.
+const splitOpen = {};
+function renderDiscountSplit(monthData) {
+  const sp = monthData.discount_split;
+  const el = document.getElementById('section-6');
+  const tot = sp.total.discount_value || 0;
+  const gross = monthData.discounts_total_gross || sp.total.gross_sales || 0;
+  const pct = v => fmtVal(v, 'percent');
+  const ofDisc = v => tot ? pct((v || 0) / tot) : '—';
+  const ofGross = v => gross ? pct((v || 0) / gross) : '—';
+  const n = v => (v || 0).toLocaleString('en-US');
+  let body = '';
+  sp.buckets.forEach(b => {
+    const open = !!splitOpen[b.key];
+    const items = b.items.filter(i => Math.abs(i.discount_value || 0) >= 0.005);
+    body += `<tr class="disc-group">
+      <td><button type="button" class="us-toggle disc-toggle" data-group="${b.key}" aria-expanded="${open}"${items.length ? '' : ' disabled'}><span class="chev" aria-hidden="true">▶</span><strong>${escText(b.label)}</strong></button><div style="font-size:10px;color:var(--text-muted);font-weight:500;padding-left:16px">${items.length ? items.map(i => escText(i.label)).join(' · ') : 'None this period'}</div></td>
+      <td><strong>${fmtVal(b.discount_value || 0, 'currency-full')}</strong></td>
+      <td><strong>${ofDisc(b.discount_value)}</strong></td>
+      <td><strong>${n(b.orders)}</strong></td>
+      <td><strong>${ofGross(b.discount_value)}</strong></td>
+    </tr>` + items.map(i => `<tr class="disc-prog" data-group="${b.key}"${open ? '' : ' hidden'}>
+      <td style="padding-left:28px">${escText(i.label)}</td>
+      <td>${fmtVal(i.discount_value || 0, 'currency-full')}</td>
+      <td>${ofDisc(i.discount_value)}</td>
+      <td>${n(i.orders)}</td>
+      <td>${ofGross(i.discount_value)}</td>
+    </tr>`).join('');
+  });
+  const totalRow = `<tr class="total-row">
+      <td>Total<div style="font-size:10px;color:var(--text-muted);font-weight:500">Every discount · each order once</div></td>
+      <td>${fmtVal(tot, 'currency-full')}</td>
+      <td>${tot ? '100%' : '—'}</td>
+      <td>${n(sp.total.orders)}</td>
+      <td>${ofGross(tot)}</td>
+    </tr>`;
+  el.innerHTML = `<table class="dtable">
+    <thead><tr><th style="text-align:left">Bucket</th><th>Discount $</th><th>% of Discounts</th><th title="Orders that got a discount from this bucket / item">Orders</th><th title="Discount $ ÷ the period's store-wide Gross Sales">% of Gross Sales</th></tr></thead>
+    <tbody>${body}${totalRow}</tbody>
+  </table>
+  <div style="margin-top:10px;font-size:11px;color:var(--text-muted)">${monthData.discounts_note ? escText(monthData.discounts_note) + ' ' : ''}Every product discount in Shopify for the period (TikTok Shop orders included; shipping discounts aren't part of Shopify's Discounts), read discount by discount — each discount counts in exactly one item, so the items add up to their bucket and the buckets to the Total. Click a bucket to open its items. Orders: an order with discounts from two buckets is in both; the Total counts it once. Samples: Free Sample on site orders. Gifts: GWP: free gifts and the free makeup bag. Gifts: TikTok creators: TikTok creator samples ("Free sample" on TikTok orders). Yotpo Loyalty: points redemptions (8-character upper-case fixed-amount codes in multiples of $0.10 — 10 points = $1), the Glow / Glam tier gifts, Birthday (BDAY…) and Refer a friend (REF…) codes. Regular: TikTok seller discounts, sales (−15% … −40%, incl. bundles / sets), Attentive's single-use codes, influencer / affiliate / campaign codes (incl. Collabs), Pro Artist, free shipping, manual discounts and other offers.</div>`;
+  el.querySelectorAll('.disc-toggle').forEach(btn => btn.addEventListener('click', () => {
+    const k = btn.dataset.group;
+    splitOpen[k] = !splitOpen[k];
+    btn.setAttribute('aria-expanded', String(!!splitOpen[k]));
+    el.querySelectorAll(`tr.disc-prog[data-group="${k}"]`).forEach(tr => { tr.hidden = !splitOpen[k]; });
+  }));
+  if (typeof applyMobileTableLabels === 'function') applyMobileTableLabels(el);
+}
 function renderDiscounts(monthData) {
+  if (monthData.discount_split && Array.isArray(monthData.discount_split.buckets)) { renderDiscountSplit(monthData); return; }
   if (!monthData.discounts) { renderPlaceholder('section-6'); return; }
   const pctCell = v => (v !== undefined && v !== null) ? fmtVal(v, 'percent') : '—';
   const cur = v => (v !== undefined && v !== null) ? fmtVal(v, 'currency-full') : '—';
