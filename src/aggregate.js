@@ -399,20 +399,25 @@ function discountSplit(orders, owners, grossSales, discountTags) {
     const shopCur = order.totalDiscountsSet && order.totalDiscountsSet.shopMoney && order.totalDiscountsSet.shopMoney.currencyCode;
     const perItem = new Map(); // item -> { v, lines:Set }
     const ctx = { saleTags, bundleTags, saleList, orderTags: new Set(order.tags || []) };
-    // Prices that include VAT (ND.IL — taxesIncluded): line prices and their
-    // discounts carry the tax, while Shopify's Discounts / Gross Sales (Key
-    // Metrics) don't — so take the tax out, at the order's own rate
-    // (2026-11-04: IL Oct split ₪81,060 vs Key Metrics ₪71,742 = +18% VAT).
-    let netF = 1;
-    if (order.taxesIncluded) {
-      const sub = amt(order.subtotalPriceSet), tax = amt(order.totalTaxSet);
-      if (sub > 0 && tax > 0 && tax < sub) netF = (sub - tax) / sub;
-    }
+    // Prices that include VAT (taxesIncluded — ND.IL, ND.EU early 2026):
+    // Shopify's Discounts / Gross Sales (Key Metrics) take the VAT out line
+    // by line — a line that was taxed counts ÷ (1 + its rate), a line taxed
+    // 0 (a 100%-off gift or sample) counts in full. Checked against Shopify's
+    // sales report on ND.EU orders 210347 (€7.32 → €6.10), 210358 (€21.78
+    // free bag stays €21.78) and 210360 (€57.01 exactly), 2026-11-04.
+    const lineF = (node) => {
+      if (!order.taxesIncluded) return 1;
+      const tl = node.taxLines || [];
+      const rate = tl.reduce((x, t) => x + (Number(t.rate) || 0), 0);
+      const tax = tl.reduce((x, t) => x + amt(t.priceSet), 0);
+      return tax > 0 && rate > 0 ? 1 / (1 + rate) : 1;
+    };
     const lineGross = [];
     order.lineItems.edges.forEach((e, li) => {
-      lineGross[li] = amt(e.node.originalTotalSet) * netF;
+      const f = lineF(e.node);
+      lineGross[li] = amt(e.node.originalTotalSet) * f;
       for (const al of e.node.discountAllocations || []) {
-        const v = amt(al.allocatedAmountSet) * netF;
+        const v = amt(al.allocatedAmountSet) * f;
         if (!v) continue;
         const a = byIdx.get(al.discountApplication && al.discountApplication.index);
         const item = a ? splitItemOf(a, isTikTok, owners, shopCur, ctx) : (isTikTok ? 'tiktok_seller' : 'offers');
@@ -745,7 +750,8 @@ function aggregate(orders, { tagLabels = DEFAULT_TAG_LABELS, discountTags = null
     //                  Tags sheet), BA and Bundles & sets items in Regular.
     // 12 (2026-11-04): VAT taken out of the split for VAT-inclusive prices (IL).
     // 13 (2026-11-04): voided orders' discounts in the split (Shopify's report counts them).
-    discounts_version: orders.length === 0 ? 13 : (sawDiscountApps ? (byApp && sawSourceName ? 13 : byApp ? 5 : 3) : 1),
+    // 14 (2026-11-04): VAT taken out line by line, as Shopify's report does.
+    discounts_version: orders.length === 0 ? 14 : (sawDiscountApps ? (byApp && sawSourceName ? 14 : byApp ? 5 : 3) : 1),
     discounts_by_app: byApp,
   };
 }
