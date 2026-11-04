@@ -156,7 +156,8 @@ async function getWithMonthCache({ site, start, end, compare, refresh }, build) 
       // 8 (2026-11-04): discount_split (five buckets).
       // 9 (2026-11-04): Discount Ratio in the split; BDAY codes in any case.
       // 10 (2026-11-04): $0.10 points check only in the store's currency.
-      const outdated = !(row.payload && row.payload.discounts_version >= 10) || partial;
+      // 11 (2026-11-04): SALES box from the Evergreen Discounts Tags sheet.
+      const outdated = !(row.payload && row.payload.discounts_version >= 11) || partial;
       if (recentlyClosed && ageHours > STALE_AFTER_HOURS) {
         pullAndStore(key, args, build).catch((err) => console.error('month-cache: background refresh failed:', err.message));
         return { payload: row.payload, cache: 'stale', fetchedAt: row.fetched_at };
