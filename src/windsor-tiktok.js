@@ -833,4 +833,47 @@ async function getSellerCenter(start, end, { refresh } = {}) {
   return { payload, cache: refresh ? 'refresh' : 'miss' };
 }
 
-module.exports = { getSellerCenter, pullSellerCenter };
+// ---- TikTok payouts (2026-11-04, Tomer: "for TikTok Shop Net Sales pull the
+// payout amounts from TikTok seller") ------------------------------------
+// The money TikTok paid out to the bank: Seller Center → Finance → Payouts.
+// Windsor's TikTok Shop payments (one per daily statement): settlement amount
+// = what was paid after TikTok's fees, commissions and reserves. A payout
+// counts in the period it was PAID (payment_paid_datetime, New York day, like
+// the rest of the dashboard); payouts not paid yet aren't counted.
+const PAYOUT_TZ = 'America/New_York';
+const payoutDay = new Intl.DateTimeFormat('en-CA', { timeZone: PAYOUT_TZ, year: 'numeric', month: '2-digit', day: '2-digit' });
+const payoutCache = new Map(); // key -> { at, value }
+async function fetchPayouts(start, end) {
+  if (!process.env.WINDSOR_API_KEY) return null;
+  if (!isoOk(start) || !isoOk(end) || end <= start) return null;
+  const key = `${start}|${end}`;
+  const settled = end < addDays(todayISO(), -3);
+  const hit = payoutCache.get(key);
+  if (hit && Date.now() - hit.at < (settled ? 6 * 3600000 : 15 * 60000)) return hit.value;
+  const rows = await windsorQuery(
+    ['date', 'payment_id', 'payment_settlement_amount_value', 'payment_amount_value', 'payment_paid_datetime', 'payment_status'],
+    addDays(start, -5), addDays(end, 5));
+  const seen = new Set();
+  let payout = 0, gross = 0, count = 0, first = null, last = null;
+  for (const r of rows) {
+    const id = String(r.payment_id || '');
+    if (!id || seen.has(id)) continue;
+    seen.add(id);
+    if (!r.payment_paid_datetime) continue;
+    const t = new Date(r.payment_paid_datetime);
+    if (isNaN(t)) continue;
+    const day = payoutDay.format(t);
+    if (day < start || day >= end) continue;
+    payout += num(r.payment_settlement_amount_value);
+    gross += num(r.payment_amount_value);
+    count += 1;
+    if (!first || day < first) first = day;
+    if (!last || day > last) last = day;
+  }
+  const value = { start, end, payout, amount_before_reserve: gross, payouts: count, first_paid: first, last_paid: last, source: 'TikTok Shop payments (Windsor)' };
+  payoutCache.set(key, { at: Date.now(), value });
+  if (payoutCache.size > 200) payoutCache.delete(payoutCache.keys().next().value);
+  return value;
+}
+
+module.exports = { getSellerCenter, pullSellerCenter, fetchPayouts };
