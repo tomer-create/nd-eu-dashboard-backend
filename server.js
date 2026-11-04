@@ -4,6 +4,7 @@ const express = require('express');
 const cors = require('cors');
 const { fetchOrders, fetchOrdersLight, fetchOrdersForTierRevenue, fetchSalesReversals, fetchCostOfGoodsSold, fetchTopReturnsByProduct, fetchCountryBreakdown, fetchUsStateBreakdown, fetchSalesSummary, fetchCustomerAcquisition, fetchProductRetailPrices, fetchCollabsCodeSales, fetchTopProductsAnalytics, getAuthorizeUrl, exchangeCodeForToken } = require('./src/shopify');
 const { aggregate } = require('./src/aggregate');
+const { fetchDiscountTags } = require('./src/discount-tags');
 const { fetchChannelPerformance, fetchAttentiveSplit, attentiveRevenueKeys, ATTENTIVE_LABEL_KEYS } = require('./src/triplewhale');
 const { fetchTikTokShop, fetchGmvEstimate, fetchGifting } = require('./src/tiktokshop');
 const { getSellerCenter } = require('./src/windsor-tiktok');
@@ -536,7 +537,11 @@ async function buildDataResponse({ site, start, end, compare }) {
   const yoyCountry = yoyCountryResult ? yoyCountryResult.rows : null;
   const momCountry = momCountryResult ? momCountryResult.rows : null;
 
-  const current = applySalesReversals(applySalesSummary(aggregate(orders), currentSalesSummary), currentReversals);
+  // Sale programs / bundle tags for the Discounts Breakdown's SALES box, from
+  // the "Evergreen Discounts Tags" sheet (cached an hour; built-in copy when
+  // the sheet can't be read) — src/discount-tags.js.
+  const discountTags = await fetchDiscountTags(site).catch((err) => { console.error('fetchDiscountTags threw:', err.message); return null; });
+  const current = applySalesReversals(applySalesSummary(aggregate(orders, { discountTags }), currentSalesSummary), currentReversals);
   current.kpis.cogs = resolveCogs(site, current.top_products, retailPrices, currentCogs);
   // New vs. returning customers (added 2026-09-06) — see fetchCustomerAcquisition
   // in src/shopify.js. Attached the same way COGS is above: a plain field on
