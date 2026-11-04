@@ -7,7 +7,7 @@ const { aggregate } = require('./src/aggregate');
 const { fetchDiscountTags } = require('./src/discount-tags');
 const { fetchChannelPerformance, fetchAttentiveSplit, attentiveRevenueKeys, ATTENTIVE_LABEL_KEYS } = require('./src/triplewhale');
 const { fetchTikTokShop, fetchGmvEstimate, fetchGifting } = require('./src/tiktokshop');
-const { getSellerCenter } = require('./src/windsor-tiktok');
+const { getSellerCenter, fetchPayouts } = require('./src/windsor-tiktok');
 const tiktokApi = require('./src/tiktok-api');
 const { fetchPnlSheetChannels, fetchPnlSheetOtherCosts, fetchPnlSheetTotalCost, fetchPnlSheetMarketingSpend, fetchPnlSheetShopPpc, fetchPnlSheetRtbHouseSpend, fetchPnlSheetGoals } = require('./src/googlesheets');
 const { VALID_SITES: YOTPO_VALID_SITES, ensureYotpoSchema, recordYotpoEvent, getYotpoSummary, getYotpoCustomerTierMap, getPool: getYotpoPool } = require('./src/yotpo');
@@ -1447,6 +1447,21 @@ app.get('/api/tiktok-shop/creator-gmv/diag', async (req, res) => {
   }
 });
 
+// GET /api/tiktok-shop/payouts?start=2026-10-01&end=2026-11-01 (ND.COM) —
+// TikTok Shop payouts paid in the period (2026-11-04, Tomer: TikTok Shop Net
+// Sales = the payout amounts from TikTok Seller Center).
+app.get('/api/tiktok-shop/payouts', async (req, res) => {
+  try {
+    const start = String(req.query.start || ''), end = String(req.query.end || '');
+    if (!US_STATES_DATE.test(start) || !US_STATES_DATE.test(end) || end <= start) return res.status(400).json({ error: 'start and end (YYYY-MM-DD) are required' });
+    const out = await fetchPayouts(start, end);
+    if (!out) return res.status(503).json({ error: 'Windsor isn\'t configured' });
+    res.json(out);
+  } catch (err) {
+    console.error('tiktok payouts failed:', err.message);
+    res.status(502).json({ error: err.message });
+  }
+});
 app.get('/api/tiktok-shop/gifting', async (req, res) => {
   try {
     const start = String(req.query.start || ''), end = String(req.query.end || '');
