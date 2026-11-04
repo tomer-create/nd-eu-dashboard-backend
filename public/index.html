@@ -1993,17 +1993,24 @@ function combineMonthDatas(entries, opts) {
   if (discEntries.length && discEntries.every(e => e.monthData.discount_split && Array.isArray(e.monthData.discount_split.buckets))) {
     discEntries.forEach(e => {
       const sp = e.monthData.discount_split;
-      if (!discSplit) discSplit = { total: { discount_value: 0, orders: 0, gross_sales: 0 }, buckets: sp.buckets.map(b => ({ key: b.key, label: b.label, discount_value: 0, orders: 0, items: b.items.map(i => ({ key: i.key, label: i.label, discount_value: 0, orders: 0 })) })) };
+      if (!discSplit) discSplit = { total: { discount_value: 0, orders: 0, gross_sales: 0, discounted_gross: 0 }, buckets: sp.buckets.map(b => ({ key: b.key, label: b.label, discount_value: 0, orders: 0, discounted_gross: 0, items: b.items.map(i => ({ key: i.key, label: i.label, discount_value: 0, orders: 0, discounted_gross: 0 })) })) };
       discSplit.total.discount_value += (sp.total.discount_value || 0) * e.fx;
+      discSplit.total.discounted_gross += (sp.total.discounted_gross || 0) * e.fx;
       discSplit.total.gross_sales += (sp.total.gross_sales || 0) * e.fx;
       discSplit.total.orders += sp.total.orders || 0;
       sp.buckets.forEach(b => {
         const tb = discSplit.buckets.find(x => x.key === b.key);
         if (!tb) return;
-        tb.discount_value += (b.discount_value || 0) * e.fx; tb.orders += b.orders || 0;
-        b.items.forEach(i => { const ti = tb.items.find(x => x.key === i.key); if (ti) { ti.discount_value += (i.discount_value || 0) * e.fx; ti.orders += i.orders || 0; } });
+        tb.discount_value += (b.discount_value || 0) * e.fx; tb.orders += b.orders || 0; tb.discounted_gross += (b.discounted_gross || 0) * e.fx;
+        b.items.forEach(i => { const ti = tb.items.find(x => x.key === i.key); if (ti) { ti.discount_value += (i.discount_value || 0) * e.fx; ti.orders += i.orders || 0; ti.discounted_gross += (i.discounted_gross || 0) * e.fx; } });
       });
     });
+  }
+  // A month stored before the Discount Ratio (no discounted_gross) would make
+  // the summed ratio wrong — show it as "—" until every part has it.
+  if (discSplit && !discEntries.every(e => typeof e.monthData.discount_split.total.discounted_gross === 'number')) {
+    discSplit.total.discounted_gross = null;
+    discSplit.buckets.forEach(b => { b.discounted_gross = null; b.items.forEach(i => { i.discounted_gross = null; }); });
   }
   // The table's own Total row (2026-11-02): summed only when every part has it.
   let discTableTotal;
@@ -5456,6 +5463,9 @@ function renderDiscountSplit(monthData) {
   const ofDisc = v => tot ? pct((v || 0) / tot) : '—';
   const ofGross = v => gross ? pct((v || 0) / gross) : '—';
   const n = v => (v || 0).toLocaleString('en-US');
+  // Discount Ratio (2026-11-04, Tomer): discount ÷ the gross of the items it
+  // was taken off (Pro Artist → 30%, samples and gifts → 100%).
+  const ratio = x => typeof x.discounted_gross === 'number' && x.discounted_gross > 0 ? pct((x.discount_value || 0) / x.discounted_gross) : '—';
   let body = '';
   sp.buckets.forEach(b => {
     const open = !!splitOpen[b.key];
@@ -5463,12 +5473,14 @@ function renderDiscountSplit(monthData) {
     body += `<tr class="disc-group">
       <td><button type="button" class="us-toggle disc-toggle" data-group="${b.key}" aria-expanded="${open}"${items.length ? '' : ' disabled'}><span class="chev" aria-hidden="true">▶</span><strong>${escText(b.label)}</strong></button><div style="font-size:10px;color:var(--text-muted);font-weight:500;padding-left:16px">${items.length ? items.map(i => escText(i.label)).join(' · ') : 'None this period'}</div></td>
       <td><strong>${fmtVal(b.discount_value || 0, 'currency-full')}</strong></td>
+      <td><strong>${ratio(b)}</strong></td>
       <td><strong>${ofDisc(b.discount_value)}</strong></td>
       <td><strong>${n(b.orders)}</strong></td>
       <td><strong>${ofGross(b.discount_value)}</strong></td>
     </tr>` + items.map(i => `<tr class="disc-prog" data-group="${b.key}"${open ? '' : ' hidden'}>
       <td style="padding-left:28px">${escText(i.label)}</td>
       <td>${fmtVal(i.discount_value || 0, 'currency-full')}</td>
+      <td>${ratio(i)}</td>
       <td>${ofDisc(i.discount_value)}</td>
       <td>${n(i.orders)}</td>
       <td>${ofGross(i.discount_value)}</td>
@@ -5477,15 +5489,16 @@ function renderDiscountSplit(monthData) {
   const totalRow = `<tr class="total-row">
       <td>Total<div style="font-size:10px;color:var(--text-muted);font-weight:500">Every discount · each order once</div></td>
       <td>${fmtVal(tot, 'currency-full')}</td>
+      <td>${ratio(sp.total)}</td>
       <td>${tot ? '100%' : '—'}</td>
       <td>${n(sp.total.orders)}</td>
       <td>${ofGross(tot)}</td>
     </tr>`;
   el.innerHTML = `<table class="dtable">
-    <thead><tr><th style="text-align:left">Bucket</th><th>Discount $</th><th>% of Discounts</th><th title="Orders that got a discount from this bucket / item">Orders</th><th title="Discount $ ÷ the period's store-wide Gross Sales">% of Gross Sales</th></tr></thead>
+    <thead><tr><th style="text-align:left">Bucket</th><th>Discount $</th><th title="Discount $ ÷ the gross sales of the items it was taken off (Pro Artist → 30%, samples and gifts → 100%)">Discount Ratio</th><th>% of Discounts</th><th title="Orders that got a discount from this bucket / item">Orders</th><th title="Discount $ ÷ the period's store-wide Gross Sales">% of Gross Sales</th></tr></thead>
     <tbody>${body}${totalRow}</tbody>
   </table>
-  <div style="margin-top:10px;font-size:11px;color:var(--text-muted)">${monthData.discounts_note ? escText(monthData.discounts_note) + ' ' : ''}Every product discount in Shopify for the period (TikTok Shop orders included; shipping discounts aren't part of Shopify's Discounts), read discount by discount — each discount counts in exactly one item, so the items add up to their bucket and the buckets to the Total. Click a bucket to open its items. Orders: an order with discounts from two buckets is in both; the Total counts it once. Samples: Free Sample on site orders. Gifts: GWP: free gifts and the free makeup bag. Gifts: TikTok creators: TikTok creator samples ("Free sample" on TikTok orders). Yotpo Loyalty: points redemptions (8-character upper-case fixed-amount codes in multiples of $0.10 — 10 points = $1), the Glow / Glam tier gifts, Birthday (BDAY…) and Refer a friend (REF…) codes. Regular: TikTok seller discounts, sales (−15% … −40%, incl. bundles / sets), Attentive's single-use codes, influencer / affiliate / campaign codes (incl. Collabs), Pro Artist, free shipping, manual discounts and other offers.</div>`;
+  <div style="margin-top:10px;font-size:11px;color:var(--text-muted)">${monthData.discounts_note ? escText(monthData.discounts_note) + ' ' : ''}Every product discount in Shopify for the period (TikTok Shop orders included; shipping discounts aren't part of Shopify's Discounts), read discount by discount — each discount counts in exactly one item, so the items add up to their bucket and the buckets to the Total. Click a bucket to open its items. Discount Ratio = Discount $ ÷ the gross sales of the items it was taken off (Pro Artist → 30%, samples and gifts → 100%). Orders: an order with discounts from two buckets is in both; the Total counts it once. Samples: Free Sample on site orders. Gifts: GWP: free gifts and the free makeup bag. Gifts: TikTok creators: TikTok creator samples ("Free sample" on TikTok orders). Yotpo Loyalty: points redemptions (8-character upper-case fixed-amount codes in multiples of $0.10 — 10 points = $1), the Glow / Glam tier gifts, Birthday (any BDAY… code) and Refer a friend (REF…) codes. Regular: TikTok seller discounts, sales (−15% … −40%, incl. bundles / sets), Attentive's single-use codes, influencer / affiliate / campaign codes (incl. Collabs), Pro Artist, free shipping, manual discounts and other offers.</div>`;
   el.querySelectorAll('.disc-toggle').forEach(btn => btn.addEventListener('click', () => {
     const k = btn.dataset.group;
     splitOpen[k] = !splitOpen[k];
