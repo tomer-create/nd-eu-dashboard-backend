@@ -280,6 +280,8 @@ const ORDERS_QUERY = `
           createdAt
           tags
           sourceName
+          taxesIncluded
+          totalTaxSet { shopMoney { amount } }
           presentmentCurrencyCode
           currentSubtotalPriceSet { shopMoney { amount } }
           subtotalPriceSet { shopMoney { amount } }
