@@ -2,7 +2,7 @@ require('dotenv').config();
 const path = require('path');
 const express = require('express');
 const cors = require('cors');
-const { fetchOrders, fetchOrdersLight, fetchOrdersForTierRevenue, fetchSalesReversals, fetchCostOfGoodsSold, fetchTopReturnsByProduct, fetchCountryBreakdown, fetchUsStateBreakdown, fetchSalesSummary, fetchCustomerAcquisition, fetchProductRetailPrices, fetchCollabsCodeSales, fetchTopProductsAnalytics, getAuthorizeUrl, exchangeCodeForToken } = require('./src/shopify');
+const { fetchOrders, fetchVoidedOrders, fetchOrdersLight, fetchOrdersForTierRevenue, fetchSalesReversals, fetchCostOfGoodsSold, fetchTopReturnsByProduct, fetchCountryBreakdown, fetchUsStateBreakdown, fetchSalesSummary, fetchCustomerAcquisition, fetchProductRetailPrices, fetchCollabsCodeSales, fetchTopProductsAnalytics, getAuthorizeUrl, exchangeCodeForToken } = require('./src/shopify');
 const { aggregate } = require('./src/aggregate');
 const { fetchDiscountTags } = require('./src/discount-tags');
 const { fetchChannelPerformance, fetchAttentiveSplit, attentiveRevenueKeys, ATTENTIVE_LABEL_KEYS } = require('./src/triplewhale');
@@ -386,6 +386,10 @@ async function buildDataResponse({ site, start, end, compare }) {
   //
   // All 21 calls run in one Promise.all so none of this adds extra
   // wall-clock time on top of the orders fetches.
+  // Orders voided before payment (2026-11-04): Shopify's sales report — and
+  // so Key Metrics' Discounts — still counts their discounts, so the
+  // Discounts Breakdown's split reads them too (nothing else does).
+  const voidedOrdersP = fetchVoidedOrders(site, start, end).catch((err) => { console.error(`fetchVoidedOrders failed for site=${site}:`, err.message); return null; });
   const [
     orders,
     yoyOrders,
@@ -541,7 +545,8 @@ async function buildDataResponse({ site, start, end, compare }) {
   // the "Evergreen Discounts Tags" sheet (cached an hour; built-in copy when
   // the sheet can't be read) — src/discount-tags.js.
   const discountTags = await fetchDiscountTags(site).catch((err) => { console.error('fetchDiscountTags threw:', err.message); return null; });
-  const current = applySalesReversals(applySalesSummary(aggregate(orders, { discountTags }), currentSalesSummary), currentReversals);
+  const voidedOrders = await voidedOrdersP;
+  const current = applySalesReversals(applySalesSummary(aggregate(orders, { discountTags, splitExtraOrders: voidedOrders }), currentSalesSummary), currentReversals);
   current.kpis.cogs = resolveCogs(site, current.top_products, retailPrices, currentCogs);
   // New vs. returning customers (added 2026-09-06) — see fetchCustomerAcquisition
   // in src/shopify.js. Attached the same way COGS is above: a plain field on
