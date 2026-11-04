@@ -2249,9 +2249,20 @@ function monthNeedsPull(month) {
     return month === DATA.meta.current_month && (Date.now() - new Date(c.fetchedAt).getTime()) > AUTO_SYNC_FRESH_MS;
   });
 }
+// 2026-11-04 (Tomer: "make sure you pull all the data retroactive"): Year to
+// Date and quarters now pull EVERY month in them, not only the current one —
+// the closed months come from the backend's month cache (instant, already
+// recalculated), so sections built from live data only (the Discounts
+// Breakdown's five buckets) cover the whole period instead of falling back
+// to the snapshot baked into this page. The current month is pulled first.
+function autoTargetMonths() {
+  const ms = periodMonths(state.month);
+  const cur = DATA.meta.current_month;
+  return ms.includes(cur) ? [cur].concat(ms.filter(m => m !== cur)) : ms;
+}
 function autoSyncForPeriod() {
   if (syncInProgress) { autoSyncPending = true; return; }
-  const months = syncTargetMonths().filter(monthNeedsPull);
+  const months = autoTargetMonths().filter(monthNeedsPull);
   if (!months.length) return;
   performSync({ auto: true, months });
 }
