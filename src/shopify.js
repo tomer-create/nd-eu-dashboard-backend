@@ -231,21 +231,22 @@ function splitDateRange(startISO, endISO) {
 // alone is 633). So [start, end) is written as >= start and <= the day
 // before end. This also fixes the old single query, which picked up the
 // whole `end` day too (e.g. September's figures included Oct 1's orders).
-function orderSearchQuery(startISO, endISO) {
+function orderSearchQuery(startISO, endISO, voided = false) {
   const re = /^\d{4}-\d{2}-\d{2}$/;
-  if (!re.test(endISO)) return `created_at:>=${startISO} created_at:<${endISO} -financial_status:voided`;
+  const st = voided ? 'financial_status:voided' : '-financial_status:voided';
+  if (!re.test(endISO)) return `created_at:>=${startISO} created_at:<${endISO} ${st}`;
   const last = new Date(Date.parse(endISO + 'T00:00:00Z') - 86400000).toISOString().slice(0, 10);
-  return `created_at:>=${startISO} created_at:<=${last} -financial_status:voided`;
+  return `created_at:>=${startISO} created_at:<=${last} ${st}`;
 }
 // Every order created in [startISO, endISO) (voided orders excluded), for
 // the given orders query.
-async function fetchOrdersChunked(site, query, startISO, endISO, label) {
+async function fetchOrdersChunked(site, query, startISO, endISO, label, { voided = false } = {}) {
   const t0 = Date.now();
   const thr0 = ordersStats.throttled;
   let pages = 0;
   const chunks = splitDateRange(startISO, endISO);
   const lists = await Promise.all(chunks.map(async ([a, b]) => {
-    const searchQuery = orderSearchQuery(a, b);
+    const searchQuery = orderSearchQuery(a, b, voided);
     const orders = [];
     let cursor = null;
     let hasNextPage = true;
@@ -375,6 +376,14 @@ const ORDERS_QUERY = `
 // since both use the same aggregate() gross_sales calculation.
 async function fetchOrders(site, startISO, endISO) {
   return fetchOrdersChunked(site, ORDERS_QUERY, startISO, endISO, 'full');
+}
+// Only the voided orders of [startISO, endISO) — same full query. Used for the
+// Discounts Breakdown's split only (2026-11-04): Shopify's sales report counts
+// a voided order's discounts (then reverses the sale), so Key Metrics'
+// Discounts includes them (ND.EU May 2026: report 1,137 orders = 1,118 + 19
+// voided).
+async function fetchVoidedOrders(site, startISO, endISO) {
+  return fetchOrdersChunked(site, ORDERS_QUERY, startISO, endISO, 'voided', { voided: true });
 }
 
 // Minimal per-order query for Section 8's Net Sales-by-tier column (added
@@ -1258,6 +1267,7 @@ async function fetchCollabsCodeSales(site, startISO, endISOExclusive) {
 }
 
 module.exports = {
+  fetchVoidedOrders,
   fetchTopProductsAnalytics,
   getSiteConfig,
   fetchUsStateBreakdown,
