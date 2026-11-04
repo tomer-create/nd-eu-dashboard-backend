@@ -135,6 +135,10 @@ function yotpoKindOf(app) {
   for (const k of YOTPO_KINDS) {
     if (!k.re.test(code)) continue;
     if (k.fixedOnly && !(app.value && app.value.__typename === 'MoneyV2')) continue;
+    // Rules sheet (2026-11-04, Tomer's "Discounts split / Yotpo Loyalty
+    // rules"): a points redemption is always a multiple of $0.10 (10 points =
+    // $1) — an 8-character fixed-amount code of $8.55 isn't points.
+    if (k.fixedOnly && app.value.amount != null && Math.abs(Math.round(Number(app.value.amount) * 100)) % 10 !== 0) continue;
     return k;
   }
   return null;
@@ -280,6 +284,106 @@ function learnOwners(orders, tags, appsOf) {
     if (best && bestP >= 0.9) owner.set(k, best);
   });
   return owner;
+}
+
+// ---- Discounts split (2026-11-04, Tomer's file "Discounts split / Yotpo
+// Loyalty rules") ----------------------------------------------------------
+// EVERY product discount of the period (Shopify's Discounts — shipping-line
+// discounts aren't in it), each discount application in exactly one item, in
+// five buckets. Classified per discount application by its title / code, with
+// the program tags learned above (owners) for automatic discounts whose title
+// is reused (e.g. "Free gift" is the Glow tier gift in some months, a GWP in
+// others):
+//   SAMPLES             Free Sample (site orders)
+//   GIFTS: GWP          Free gift, Free makeup bag
+//   GIFTS: TIKTOK       TikTok creator samples ("Free sample" on TikTok orders)
+//   YOTPO LOYALTY       Points redemptions, Glow tier gift, Glam tier gift,
+//                       Birthday (BDAY), Referral (REF)
+//   REGULAR             TikTok seller discounts, Sales (−15% … −40%),
+//                       Attentive, Influencer & campaign codes, Pro Artist,
+//                       Free shipping, Other manual discounts, Other order offers
+const SPLIT_BUCKETS = [
+  { key: 'samples', label: 'Samples', items: [['free_sample', 'Free Sample']] },
+  { key: 'gwp', label: 'Gifts: GWP to customers', items: [['free_gift', 'Free gift'], ['makeup_bag', 'Free makeup bag']] },
+  { key: 'tiktok_creators', label: 'Gifts: TikTok creators', items: [['tiktok_samples', 'TikTok creator samples']] },
+  { key: 'yotpo', label: 'Yotpo Loyalty', items: [['points', 'Points redemptions'], ['glow_gift', 'Glow tier gift'], ['glam_gift', 'Glam tier gift'], ['bday', 'Birthday (BDAY)'], ['ref', 'Refer a friend (REF)']] },
+  { key: 'regular', label: 'Regular', items: [['tiktok_seller', 'TikTok seller discounts'], ['sales', 'Sales (−15% … −40%)'], ['attentive', 'Attentive'], ['codes', 'Influencer & campaign codes'], ['pro_artist', 'Pro Artist'], ['free_shipping', 'Free shipping'], ['manual', 'Other manual discounts'], ['offers', 'Other order offers']] },
+];
+const SPLIT_TAG_ITEM = {
+  'DISCOUNT-FREE_SAMPLE': 'free_sample',
+  'DISCOUNT-FREE_MAKEUP_BAG': 'makeup_bag',
+  'DISCOUNT-OA5WN': 'glow_gift',
+  'DISCOUNT-FT9ZL': 'glam_gift', 'DISCOUNT-QAQAN': 'glam_gift',
+  'DISCOUNT-PRO-ARTIST': 'pro_artist',
+  'DISCOUNT-8B2DX': 'free_shipping', 'DISCOUNT-ZWKHZ': 'free_shipping', 'Free shipping': 'free_shipping',
+};
+// Attentive's single-use codes: 6 random letters/digits ("mETyTq", Shopify
+// title "attentive") or ND + 6 ("NDYns1cg", "ATTENTIVE15OFF"), always with a
+// lowercase letter (uppercase-only codes are Yotpo / affiliate codes).
+const isAttentiveCode = (code) => /^(ND)?[A-Za-z0-9]{6}$/.test(code) && /[a-z]/.test(code);
+function splitItemOf(a, isTikTok, owners) {
+  const title = String(a.title || '').trim();
+  if (isTikTok) return /free\s*sample/i.test(title) ? 'tiktok_samples' : 'tiktok_seller';
+  if (a.__typename === 'DiscountCodeApplication') {
+    const k = yotpoKindOf(a);
+    if (k) return k.key === 'loyalty' ? 'points' : k.key;
+    if (isAttentiveCode(String(a.code || ''))) return 'attentive';
+    return 'codes';
+  }
+  const owner = owners.get(appKey(a));
+  if (owner && SPLIT_TAG_ITEM[owner]) return SPLIT_TAG_ITEM[owner];
+  if (owner && TAG_GROUP[owner] === 'sales') return 'sales';
+  if (/free\s*sample/i.test(title)) return 'free_sample';
+  if (/makeup\s*bag/i.test(title)) return 'makeup_bag';
+  if (/glow/i.test(title) && /gift/i.test(title)) return 'glow_gift';
+  if (/glam/i.test(title) && /gift/i.test(title)) return 'glam_gift';
+  if (/free\s*gift|gift\s*with\s*purchase|gwp/i.test(title)) return 'free_gift';
+  if (KNOWN_PROGRAM_TITLES[0].re.test(title)) return 'pro_artist';
+  if (/free\s*ship/i.test(title)) return 'free_shipping';
+  if (GENERIC_TITLE_RE.test(title) || /sale|bundle|\bsets?\b/i.test(title)) return 'sales';
+  if (isCodeApp(a)) return 'codes'; // a manual discount titled like a code
+  if (a.__typename === 'ManualDiscountApplication') return 'manual';
+  return 'offers';
+}
+function discountSplit(orders, owners, grossSales) {
+  const itemAcc = new Map(); // item -> { value, orders }
+  const bucketAcc = new Map(SPLIT_BUCKETS.map((b) => [b.key, { value: 0, orders: 0 }]));
+  const bucketOf = new Map();
+  SPLIT_BUCKETS.forEach((b) => b.items.forEach(([k]) => { bucketOf.set(k, b.key); itemAcc.set(k, { value: 0, orders: 0 }); }));
+  let total = 0, totalOrders = 0;
+  for (const order of orders) {
+    const nodes = (order.discountApplications && order.discountApplications.nodes) || [];
+    const byIdx = new Map();
+    nodes.forEach((a, pos) => { if (a) byIdx.set(a.index !== undefined ? a.index : pos, a); });
+    const isTikTok = order.sourceName === 'tiktok';
+    const perItem = new Map();
+    for (const e of order.lineItems.edges) {
+      for (const al of e.node.discountAllocations || []) {
+        const v = amt(al.allocatedAmountSet);
+        if (!v) continue;
+        const a = byIdx.get(al.discountApplication && al.discountApplication.index);
+        const item = a ? splitItemOf(a, isTikTok, owners) : (isTikTok ? 'tiktok_seller' : 'offers');
+        perItem.set(item, (perItem.get(item) || 0) + v);
+      }
+    }
+    if (!perItem.size) continue;
+    totalOrders += 1;
+    const buckets = new Set();
+    perItem.forEach((v, item) => {
+      const ia = itemAcc.get(item); ia.value += v; ia.orders += 1;
+      const b = bucketOf.get(item); bucketAcc.get(b).value += v; buckets.add(b);
+      total += v;
+    });
+    buckets.forEach((b) => { bucketAcc.get(b).orders += 1; });
+  }
+  return {
+    total: { discount_value: total, orders: totalOrders, gross_sales: grossSales },
+    buckets: SPLIT_BUCKETS.map((b) => ({
+      key: b.key, label: b.label,
+      discount_value: bucketAcc.get(b.key).value, orders: bucketAcc.get(b.key).orders,
+      items: b.items.map(([k, label]) => ({ key: k, label, discount_value: itemAcc.get(k).value, orders: itemAcc.get(k).orders })),
+    })),
+  };
 }
 
 function aggregate(orders, { tagLabels = DEFAULT_TAG_LABELS } = {}) {
@@ -553,6 +657,9 @@ function aggregate(orders, { tagLabels = DEFAULT_TAG_LABELS } = {}) {
     // the table again — Tomer) so payloads that still counted Attentive in
     // their total are never shown; the page adds up the groups (≈) for them
     // until they're re-pulled.
+    // The five-bucket split of every discount (2026-11-04). Needs discount
+    // titles / allocations (byApp) and each order's channel (sourceName).
+    discount_split: byApp && sawSourceName ? discountSplit(orders, owners, grossSales) : undefined,
     discounts_programs_total: sawDiscountApps ? {
       gross_sales: tableAcc.grossSales,
       discount_value: tableAcc.value,
@@ -567,7 +674,9 @@ function aggregate(orders, { tagLabels = DEFAULT_TAG_LABELS } = {}) {
     // 5 (2026-11-02): discounts_table_total (the table's own Total row).
     // 6 (2026-11-02): ATTENTIVE group + discounts_tiktok (needs sourceName).
     // 7 (2026-11-02): ATTENTIVE removed again; discounts_programs_total.
-    discounts_version: orders.length === 0 ? 7 : (sawDiscountApps ? (byApp && sawSourceName ? 7 : byApp ? 5 : 3) : 1),
+    // 8 (2026-11-04): discount_split (five buckets, every discount) and the
+    //                 $0.10 rule for Yotpo points codes.
+    discounts_version: orders.length === 0 ? 8 : (sawDiscountApps ? (byApp && sawSourceName ? 8 : byApp ? 5 : 3) : 1),
     discounts_by_app: byApp,
   };
 }
