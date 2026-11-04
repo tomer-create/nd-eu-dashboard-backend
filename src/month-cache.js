@@ -158,7 +158,8 @@ async function getWithMonthCache({ site, start, end, compare, refresh }, build) 
       // 10 (2026-11-04): $0.10 points check only in the store's currency.
       // 11 (2026-11-04): SALES box from the Evergreen Discounts Tags sheet.
       // 12 (2026-11-04): VAT out of the split for VAT-inclusive stores (IL).
-      const outdated = !(row.payload && row.payload.discounts_version >= 12) || partial;
+      // 13 (2026-11-04): voided orders' discounts in the split.
+      const outdated = !(row.payload && row.payload.discounts_version >= 13) || partial;
       if (recentlyClosed && ageHours > STALE_AFTER_HOURS) {
         pullAndStore(key, args, build).catch((err) => console.error('month-cache: background refresh failed:', err.message));
         return { payload: row.payload, cache: 'stale', fetchedAt: row.fetched_at };
