@@ -1523,6 +1523,8 @@ function syncTargetMonths() {
   return [state.month];
 }
 function syncTail(months) {
+  // Year to Date / quarters auto-pull every month now (2026-11-04).
+  if (months.length > 1 && (state.month === 'YTD' || isQuarter(state.month))) return ' for ' + (state.month === 'YTD' ? 'Year to Date' : state.month) + ' (' + months.length + ' months)';
   if (state.month === 'YTD') return ' for ' + DATA.meta.month_full_names[months[0]] + ' (the current month in this Year-to-Date total)';
   if (isQuarter(state.month)) {
     return isQuarterInProgress(state.month)
