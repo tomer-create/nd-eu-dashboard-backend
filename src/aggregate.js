@@ -130,7 +130,7 @@ const YOTPO_KINDS = [
   { key: 'bday', tag: 'Yotpo BDAY codes', label: 'Bday', re: /^BDAY[A-Z0-9]{8}$/ },
   { key: 'ref', tag: 'Yotpo REF codes', label: 'Ref', re: /^REF[A-Z0-9]{8}$/ },
 ];
-function yotpoKindOf(app) {
+function yotpoKindOf(app, shopCur) {
   const code = String(app.code || '');
   for (const k of YOTPO_KINDS) {
     if (!k.re.test(code)) continue;
@@ -138,7 +138,11 @@ function yotpoKindOf(app) {
     // Rules sheet (2026-11-04, Tomer's "Discounts split / Yotpo Loyalty
     // rules"): a points redemption is always a multiple of $0.10 (10 points =
     // $1) — an 8-character fixed-amount code of $8.55 isn't points.
-    if (k.fixedOnly && app.value.amount != null && Math.abs(Math.round(Number(app.value.amount) * 100)) % 10 !== 0) continue;
+    // Only in the store's own currency: on an order paid in another currency
+    // (CAD, GBP …) the code's value is the converted amount, which isn't a
+    // round $0.10 even when the code is (code review 2026-11-04).
+    const inShopCur = !shopCur || !app.value.currencyCode || app.value.currencyCode === shopCur;
+    if (k.fixedOnly && inShopCur && app.value.amount != null && Math.abs(Math.round(Number(app.value.amount) * 100)) % 10 !== 0) continue;
     return k;
   }
   return null;
@@ -166,7 +170,7 @@ function codeKindAmounts(order, kindOf) {
   const presDisc = Number(tds.presentmentMoney && tds.presentmentMoney.amount || 0);
   apps.forEach((a, pos) => {
     if (!a || a.__typename !== 'DiscountCodeApplication') return;
-    const k = kindOf(a);
+    const k = kindOf(a, shopCur);
     if (!k) return;
     const idx = a.index !== undefined ? a.index : pos;
     let x;
@@ -236,10 +240,11 @@ function orderApps(order) {
   const hasTitles = nodes.some((a) => a && ('title' in a || 'targetType' in a));
   if (nodes.length && !hasTitles) return null;
   const apps = new Map(); // index -> app
+  const shopCur = order.totalDiscountsSet && order.totalDiscountsSet.shopMoney && order.totalDiscountsSet.shopMoney.currencyCode;
   nodes.forEach((a, pos) => {
     if (!a) return;
     const idx = a.index !== undefined ? a.index : pos;
-    apps.set(idx, { idx, key: appKey(a), code: isCodeApp(a), yotpo: !!yotpoKindOf(a), amount: 0, lines: new Set(), shipping: a.targetType === 'SHIPPING_LINE' });
+    apps.set(idx, { idx, key: appKey(a), code: isCodeApp(a), yotpo: !!yotpoKindOf(a, shopCur), amount: 0, lines: new Set(), shipping: a.targetType === 'SHIPPING_LINE' });
   });
   const lineGross = [];
   ((order.lineItems && order.lineItems.edges) || []).forEach((e, li) => {
@@ -321,14 +326,14 @@ const SPLIT_TAG_ITEM = {
 // title "attentive") or ND + 6 ("NDYns1cg", "ATTENTIVE15OFF"), always with a
 // lowercase letter (uppercase-only codes are Yotpo / affiliate codes).
 const isAttentiveCode = (code) => /^(ND)?[A-Za-z0-9]{6}$/.test(code) && /[a-z]/.test(code);
-function splitItemOf(a, isTikTok, owners) {
+function splitItemOf(a, isTikTok, owners, shopCur) {
   const title = String(a.title || '').trim();
   if (isTikTok) return /free\s*sample/i.test(title) ? 'tiktok_samples' : 'tiktok_seller';
   if (a.__typename === 'DiscountCodeApplication') {
     // Birthday codes in any case (EU has mixed-case ones like BDAYcJPFk5 —
     // Tomer's file counts them as Birthday, 2026-11-04).
     if (/^BDAY[A-Za-z0-9]{4,}$/i.test(String(a.code || ''))) return 'bday';
-    const k = yotpoKindOf(a);
+    const k = yotpoKindOf(a, shopCur);
     if (k) return k.key === 'loyalty' ? 'points' : k.key;
     if (isAttentiveCode(String(a.code || ''))) return 'attentive';
     return 'codes';
@@ -362,6 +367,7 @@ function discountSplit(orders, owners, grossSales) {
     const byIdx = new Map();
     nodes.forEach((a, pos) => { if (a) byIdx.set(a.index !== undefined ? a.index : pos, a); });
     const isTikTok = order.sourceName === 'tiktok';
+    const shopCur = order.totalDiscountsSet && order.totalDiscountsSet.shopMoney && order.totalDiscountsSet.shopMoney.currencyCode;
     const perItem = new Map(); // item -> { v, lines:Set }
     const lineGross = [];
     order.lineItems.edges.forEach((e, li) => {
@@ -370,7 +376,7 @@ function discountSplit(orders, owners, grossSales) {
         const v = amt(al.allocatedAmountSet);
         if (!v) continue;
         const a = byIdx.get(al.discountApplication && al.discountApplication.index);
-        const item = a ? splitItemOf(a, isTikTok, owners) : (isTikTok ? 'tiktok_seller' : 'offers');
+        const item = a ? splitItemOf(a, isTikTok, owners, shopCur) : (isTikTok ? 'tiktok_seller' : 'offers');
         const p = perItem.get(item) || { v: 0, lines: new Set() };
         p.v += v; p.lines.add(li);
         perItem.set(item, p);
@@ -691,7 +697,8 @@ function aggregate(orders, { tagLabels = DEFAULT_TAG_LABELS } = {}) {
     //                 $0.10 rule for Yotpo points codes.
     // 9 (2026-11-04): Discount Ratio (discounted_gross) in the split; BDAY
     //                 codes in any case count as Birthday.
-    discounts_version: orders.length === 0 ? 9 : (sawDiscountApps ? (byApp && sawSourceName ? 9 : byApp ? 5 : 3) : 1),
+    // 10 (2026-11-04): the $0.10 points check only in the store's currency.
+    discounts_version: orders.length === 0 ? 10 : (sawDiscountApps ? (byApp && sawSourceName ? 10 : byApp ? 5 : 3) : 1),
     discounts_by_app: byApp,
   };
 }
