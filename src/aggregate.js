@@ -325,6 +325,9 @@ function splitItemOf(a, isTikTok, owners) {
   const title = String(a.title || '').trim();
   if (isTikTok) return /free\s*sample/i.test(title) ? 'tiktok_samples' : 'tiktok_seller';
   if (a.__typename === 'DiscountCodeApplication') {
+    // Birthday codes in any case (EU has mixed-case ones like BDAYcJPFk5 —
+    // Tomer's file counts them as Birthday, 2026-11-04).
+    if (/^BDAY[A-Za-z0-9]{4,}$/i.test(String(a.code || ''))) return 'bday';
     const k = yotpoKindOf(a);
     if (k) return k.key === 'loyalty' ? 'points' : k.key;
     if (isAttentiveCode(String(a.code || ''))) return 'attentive';
@@ -346,42 +349,52 @@ function splitItemOf(a, isTikTok, owners) {
   return 'offers';
 }
 function discountSplit(orders, owners, grossSales) {
-  const itemAcc = new Map(); // item -> { value, orders }
-  const bucketAcc = new Map(SPLIT_BUCKETS.map((b) => [b.key, { value: 0, orders: 0 }]));
+  // discGross (2026-11-04, Tomer: "add another column with discount ratio"):
+  // the gross of the line items each item / bucket / the total discounted —
+  // Discount Ratio = discount ÷ that (Pro Artist → 30%, samples → 100%).
+  const itemAcc = new Map(); // item -> { value, orders, discGross }
+  const bucketAcc = new Map(SPLIT_BUCKETS.map((b) => [b.key, { value: 0, orders: 0, discGross: 0 }]));
   const bucketOf = new Map();
-  SPLIT_BUCKETS.forEach((b) => b.items.forEach(([k]) => { bucketOf.set(k, b.key); itemAcc.set(k, { value: 0, orders: 0 }); }));
-  let total = 0, totalOrders = 0;
+  SPLIT_BUCKETS.forEach((b) => b.items.forEach(([k]) => { bucketOf.set(k, b.key); itemAcc.set(k, { value: 0, orders: 0, discGross: 0 }); }));
+  let total = 0, totalOrders = 0, totalDiscGross = 0;
   for (const order of orders) {
     const nodes = (order.discountApplications && order.discountApplications.nodes) || [];
     const byIdx = new Map();
     nodes.forEach((a, pos) => { if (a) byIdx.set(a.index !== undefined ? a.index : pos, a); });
     const isTikTok = order.sourceName === 'tiktok';
-    const perItem = new Map();
-    for (const e of order.lineItems.edges) {
+    const perItem = new Map(); // item -> { v, lines:Set }
+    const lineGross = [];
+    order.lineItems.edges.forEach((e, li) => {
+      lineGross[li] = amt(e.node.originalTotalSet);
       for (const al of e.node.discountAllocations || []) {
         const v = amt(al.allocatedAmountSet);
         if (!v) continue;
         const a = byIdx.get(al.discountApplication && al.discountApplication.index);
         const item = a ? splitItemOf(a, isTikTok, owners) : (isTikTok ? 'tiktok_seller' : 'offers');
-        perItem.set(item, (perItem.get(item) || 0) + v);
+        const p = perItem.get(item) || { v: 0, lines: new Set() };
+        p.v += v; p.lines.add(li);
+        perItem.set(item, p);
       }
-    }
+    });
     if (!perItem.size) continue;
     totalOrders += 1;
-    const buckets = new Set();
-    perItem.forEach((v, item) => {
-      const ia = itemAcc.get(item); ia.value += v; ia.orders += 1;
-      const b = bucketOf.get(item); bucketAcc.get(b).value += v; buckets.add(b);
-      total += v;
+    const bucketLines = new Map(), allLines = new Set();
+    const sumLines = (set) => { let g = 0; set.forEach((li) => { g += lineGross[li] || 0; }); return g; };
+    perItem.forEach((p, item) => {
+      const ia = itemAcc.get(item); ia.value += p.v; ia.orders += 1; ia.discGross += sumLines(p.lines);
+      const b = bucketOf.get(item); bucketAcc.get(b).value += p.v;
+      const bl = bucketLines.get(b) || new Set(); p.lines.forEach((li) => { bl.add(li); allLines.add(li); }); bucketLines.set(b, bl);
+      total += p.v;
     });
-    buckets.forEach((b) => { bucketAcc.get(b).orders += 1; });
+    bucketLines.forEach((set, b) => { const ba = bucketAcc.get(b); ba.orders += 1; ba.discGross += sumLines(set); });
+    totalDiscGross += sumLines(allLines);
   }
   return {
-    total: { discount_value: total, orders: totalOrders, gross_sales: grossSales },
+    total: { discount_value: total, orders: totalOrders, gross_sales: grossSales, discounted_gross: totalDiscGross },
     buckets: SPLIT_BUCKETS.map((b) => ({
       key: b.key, label: b.label,
-      discount_value: bucketAcc.get(b.key).value, orders: bucketAcc.get(b.key).orders,
-      items: b.items.map(([k, label]) => ({ key: k, label, discount_value: itemAcc.get(k).value, orders: itemAcc.get(k).orders })),
+      discount_value: bucketAcc.get(b.key).value, orders: bucketAcc.get(b.key).orders, discounted_gross: bucketAcc.get(b.key).discGross,
+      items: b.items.map(([k, label]) => ({ key: k, label, discount_value: itemAcc.get(k).value, orders: itemAcc.get(k).orders, discounted_gross: itemAcc.get(k).discGross })),
     })),
   };
 }
@@ -676,7 +689,9 @@ function aggregate(orders, { tagLabels = DEFAULT_TAG_LABELS } = {}) {
     // 7 (2026-11-02): ATTENTIVE removed again; discounts_programs_total.
     // 8 (2026-11-04): discount_split (five buckets, every discount) and the
     //                 $0.10 rule for Yotpo points codes.
-    discounts_version: orders.length === 0 ? 8 : (sawDiscountApps ? (byApp && sawSourceName ? 8 : byApp ? 5 : 3) : 1),
+    // 9 (2026-11-04): Discount Ratio (discounted_gross) in the split; BDAY
+    //                 codes in any case count as Birthday.
+    discounts_version: orders.length === 0 ? 9 : (sawDiscountApps ? (byApp && sawSourceName ? 9 : byApp ? 5 : 3) : 1),
     discounts_by_app: byApp,
   };
 }
