@@ -271,7 +271,10 @@ async function fetchGmvEstimate(site, start, end) {
 // $0 (6 variants in Oct, e.g. HY-GLAM FOUNDATION) takes that variant's price
 // from its other lines, or else from Shopify. Oct 1–28: 303 orders, 731
 // units, $28,439 at retail on the priced lines → ≈ $5,700.
-const GIFT_COST_PCT = 0.2;
+// 2026-11-04 (Tomer: "the Samples (TikTok Gifting) should be calculating
+// from the retail price and not from the cost"): Samples now count at 100% of
+// the products' price (retail), not 20% of it.
+const GIFT_COST_PCT = 1;
 async function shopifyVariantPrices(variantIds) {
   const { graphql } = require('./shopify');
   const out = new Map();
@@ -295,7 +298,7 @@ async function fetchGifting(site, start, end) {
   if (!SITES_WITH_TIKTOK_SHOP.includes(site) || !process.env.TRIPLEWHALE_API_KEY) return null;
   if (!isoOk(start) || !isoOk(end) || end <= start) return null;
   const shopId = TW_SHOP_ID[site];
-  return cachedPast(`gift3|${shopId}|${start}|${end}`, end, async () => {
+  return cachedPast(`gift4|${shopId}|${start}|${end}`, end, async () => {
     const where = `event_date >= '${start}' AND event_date < '${end}'
         AND platform = 'shopify' AND source_name = 'tiktok'
         AND gross_product_sales - discount_amount_for_product <= 0.005`;
@@ -336,7 +339,7 @@ async function fetchGifting(site, start, end) {
     return {
       start, end,
       cost: retail * GIFT_COST_PCT,
-      cost_rule: '20% of price',
+      cost_rule: GIFT_COST_PCT === 1 ? 'retail price' : `${Math.round(GIFT_COST_PCT * 100)}% of price`,
       cost_pct: GIFT_COST_PCT,
       retail_value: retail,
       orders: num(r.orders), units: num(r.units),
