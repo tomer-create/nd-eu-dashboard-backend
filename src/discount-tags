@@ -1,0 +1,115 @@
+// Discount names and order tags per store, read live from the "Evergreen
+// Discounts Tags" Google Sheet (2026-11-04, Tomer: "all the sales and the
+// tags on the sales pull from this sheet"). One tab per store, two columns:
+// "Discount Name" | "Tag". The Discounts Breakdown uses it for its SALES box
+// (each sale program = the discounts on orders carrying that sale's tag) and
+// for bundles / sets.
+//
+// The backend reads the tab's CSV export, which only works while the sheet is
+// shared as "Anyone with the link — Viewer". Until then (or if Google is
+// down) it falls back to the copy below, taken from the sheet on 2026-11-04,
+// so the section never breaks — it just won't pick up new rows.
+
+const { parseCsv } = require('./googlesheets');
+
+const SPREADSHEET_ID = process.env.DISCOUNT_TAGS_SPREADSHEET_ID || '1rCDG64QDVqvxefWMKyg7Cxsm0AkAuFvi_YL1DkVgZtQ';
+const TAB_GID = { com: '0', eu: '2061326453', il: '1472954868' };
+const CACHE_MS = 60 * 60 * 1000; // re-read once an hour
+
+const FALLBACK = {
+  com: [
+    ['HY-GLAM Collection Bundle', 'DISCOUNT-36SLV'],
+    ["NATASHA'S RECOMMENDED SETS", 'DISCOUNT-KB24C'],
+    ['Collection Bundles', 'DISCOUNT-COLLECTIONBUNDLES'],
+    ['Free Sample', 'DISCOUNT-FREE_SAMPLE'],
+    ['Glam Tier Free Gift', 'DISCOUNT-FT9ZL'],
+    ['Free Shipping Glam Tier', 'DISCOUNT-8B2DX'],
+    ['Discount Shipping For Glow Tier', 'DISCOUNT-ZWKHZ'],
+    ['Pro-Artist', 'DISCOUNT-PRO-ARTIST'],
+    ['BA Discount', 'DISCOUNT-BA_DISCOUNT'],
+    ['Glow Tier Free Gift', 'DISCOUNT-OA5WN'],
+    ['Collabs Affiliate', 'Collabs_Affiliate'],
+    ['Bi-Annual Reward Sale Bronze', 'DISCOUNT-1TL82'],
+    ['Bi-Annual Reward Sale Glow', 'DISCOUNT-EJ75N'],
+    ['Bi-Annual Reward Sale Glam', 'DISCOUNT-JBD6Q'],
+    ["Natasha's Birthday", 'DISCOUNT-YAMQU'],
+    ['Fall Sale 2026', 'DISCOUNT-LZ5AG'],
+  ],
+  eu: [
+    ['HY-GLAM Collection Bundle', 'DISCOUNT-JUM8U'],
+    ["NATASHA'S RECOMMENDED SETS", 'DISCOUNT-KB24C'],
+    ['Collection Bundles', 'DISCOUNT-COLLECTIONBUNDLES'],
+    ['Free Sample', 'DISCOUNT-FREE_SAMPLE'],
+    ['Glam Tier Free Gift', 'DISCOUNT-FT9ZL'],
+    ['Free Shipping Glam Tier', 'DISCOUNT-8B2DX'],
+    ['Discount Shipping For Glow Tier', 'DISCOUNT-ZWKHZ'],
+    ['Pro-Artist', 'DISCOUNT-PRO-ARTIST'],
+    ['Glow Tier Free Gift', 'DISCOUNT-OA5WN'],
+    ['Bi-Annual Reward Sale Bronze', 'DISCOUNT-TQZF5'],
+    ['Bi-Annual Reward Sale Glow', 'DISCOUNT-UG8ID'],
+    ['Bi-Annual Reward Sale Glam', 'DISCOUNT-DS71A'],
+    ["Natasha's Birthday", 'DISCOUNT-XU5AJ'],
+    ['Fall Sale 2026', 'DISCOUNT-1Y9YV'],
+    ['Free Makeup Bag', 'DISCOUNT-FREE_MAKEUP_BAG'],
+  ],
+  il: [
+    ['HY-GLAM Collection Bundle', 'DISCOUNT-VPXK0'],
+    ['Bundles - סטים', 'DISCOUNT-UHGUH'],
+    ['Free Sample', 'DISCOUNT-FREE_SAMPLE'],
+    ['Glam Tier Free Gift', 'DISCOUNT-QAQAN'],
+    ['Pro-Artist', 'DISCOUNT-PRO-ARTIST'],
+    ['Collabs', 'Collabs_Affiliate'],
+    ['Annual Reward Sale Bronze', 'DISCOUNT-I1KYC'],
+    ['Annual Reward Sale Glam', 'DISCOUNT-Y40T0'],
+    ['Rosh HaShana Sale', 'DISCOUNT-MM7ME'],
+    ['Free Shipping', 'Free shipping'],
+    ['Elaction Sale 15%', 'DISCOUNT-OBWY5'],
+    ['Shopping IL', 'DISCOUNT-KQEWI'],
+  ],
+};
+
+// Which rows are sales: the name says sale, or it's Natasha's Birthday (a
+// store-wide birthday sale) or Shopping IL (Israel's shopping-festival sale).
+const SALE_NAME_RE = /\bsale\b|birthday|shopping\s*il/i;
+const BUNDLE_NAME_RE = /bundle|\bsets?\b|סטים/i;
+
+function classify(rows, source) {
+  const sales = [], bundles = [], all = [];
+  for (const [rawName, rawTag] of rows) {
+    const name = String(rawName || '').trim(), tag = String(rawTag || '').trim();
+    if (!name || !tag || /^discount name$/i.test(name)) continue;
+    all.push({ name, tag });
+    if (SALE_NAME_RE.test(name)) sales.push({ name, tag });
+    else if (BUNDLE_NAME_RE.test(name)) bundles.push({ name, tag });
+  }
+  return { sales, bundles, all, source };
+}
+
+const cache = new Map(); // site -> { at, value }
+async function fetchDiscountTags(site) {
+  if (!TAB_GID[site]) return null;
+  const hit = cache.get(site);
+  if (hit && Date.now() - hit.at < CACHE_MS) return hit.value;
+  let value = null;
+  try {
+    const url = `https://docs.google.com/spreadsheets/d/${SPREADSHEET_ID}/export?format=csv&gid=${TAB_GID[site]}`;
+    const res = await fetch(url, { signal: AbortSignal.timeout(30000) });
+    const text = res.ok ? await res.text() : '';
+    const head = text.slice(0, 200).trimStart().toLowerCase();
+    if (res.ok && text && !head.startsWith('<!doctype') && !head.startsWith('<html')) {
+      const rows = parseCsv(text).map((r) => [r[0], r[1]]);
+      const v = classify(rows, 'sheet');
+      if (v.all.length) value = v;
+    } else {
+      console.error(`discount-tags: sheet not readable for site=${site} (${res.status}) — share "Evergreen Discounts Tags" as "Anyone with the link — Viewer"; using the built-in copy`);
+    }
+  } catch (err) {
+    console.error(`discount-tags: fetch failed for site=${site}: ${err.message} — using the built-in copy`);
+  }
+  if (!value) value = classify(FALLBACK[site], 'built-in');
+  // Cache a fallback for 10 minutes only, so sharing the sheet takes effect soon.
+  cache.set(site, { at: value.source === 'sheet' ? Date.now() : Date.now() - CACHE_MS + 10 * 60 * 1000, value });
+  return value;
+}
+
+module.exports = { fetchDiscountTags, classify, FALLBACK };
