@@ -2764,11 +2764,32 @@ function renderTikTokShop(monthData, opts = {}) {
   const gmvShown = gmvInfo.value;
   const ttOrdersShown = gmvInfo.tiktok && typeof gmvInfo.orders === 'number' ? gmvInfo.orders : tt.orders;
   const gmvTip = 'TikTok Shop GMV = price × items sold + shipping fees − seller promotions − platform co-funding (TikTok Shop analytics). TikTok’s analytics run about two days behind, so the latest days — and any day TikTok’s analytics are missing — are filled from TikTok’s order data (Triple Whale) on the same formula to keep it month to date. YoY / ' + mLabel + ': same formula on TikTok’s order data, same days.';
+  // Net Sales = TikTok payouts (2026-11-04, Tomer: "for TikTok Shop Net Sales
+  // pull the payout amounts from TikTok seller"): what TikTok paid out to the
+  // bank in the period (Seller Center → Finance → Payouts, via Windsor —
+  // /api/tiktok-shop/payouts), after TikTok's fees, commissions and reserves.
+  // Triple Whale's net sales (gross − discounts − refunds) only show while the
+  // payouts load or if they can't be read; AOV stays on that basis.
+  const payRange = ttPeriodRange();
+  const payE = payRange ? ttEnsurePayouts(payRange) : null;
+  const payOk = e => e && e.status === 'ok' && e.data && typeof e.data.payout === 'number' ? e.data : null;
+  const payCur = payOk(payE);
+  const payPr = payCur ? ttPriorRanges() : {};
+  const payY = payCur && payPr.yoy ? payOk(ttEnsurePayouts(payPr.yoy)) : null;
+  const payM = payCur && payPr.mom ? payOk(ttEnsurePayouts(payPr.mom)) : null;
+  const payChg = (prev) => prev && prev.payouts > 0 && prev.payout > 0 ? (payCur.payout - prev.payout) / prev.payout : null;
+  const netTile = payCur
+    ? tileV('Net Sales', fmtVal(payCur.payout, 'currency-full'), payChg(payY), payChg(payM), true,
+        `TikTok payouts: ${fmtVal(payCur.payouts, 'number')} payout${payCur.payouts === 1 ? '' : 's'} paid in the period`,
+        'TikTok Shop Net Sales = the payouts TikTok paid to the bank in the period (Seller Center → Finance → Payouts): after TikTok’s fees, affiliate commissions and reserves, including TikTok-funded discounts. Each payout counts on the day it was paid.')
+    : (payE && payE.status === 'loading'
+      ? tileV('Net Sales', '…', null, null, true, 'Loading TikTok payouts…')
+      : tile('Net Sales', tt.net_sales, 'currency-full', 'net_sales', true, payE && payE.status === 'error' ? 'TikTok payouts couldn’t be loaded — showing gross sales − discounts − refunds' : 'Gross sales − discounts − refunds'));
   const tileList = [
     // What GMV includes (2026-10-26, Tomer asked for it inside the tile).
     tileV('TikTok Shop GMV', gmvShown === null ? '—' : fmtVal(gmvShown, 'currency-full'), proxyChange('yoy'), proxyChange('mom'), true,
       '<span class="tt-gmv-incl">All TikTok Shop orders — TikTok Ads + Affiliate + Organic (TikTok Ads isn’t added on top).</span>' + gmvInfo.note, gmvTip),
-    tile('Net Sales', tt.net_sales, 'currency-full', 'net_sales', true, 'Gross sales − discounts − refunds'),
+    netTile,
     // 2026-11-02 (Tomer: "Seller Center shows 6077 orders for October"): the
     // Orders tile counts the same orders as the GMV tile — TikTok Shop
     // analytics' order count (+ the filled days on the GMV formula: GMT-8 days,
@@ -2777,7 +2798,7 @@ function renderTikTokShop(monthData, opts = {}) {
     tile('Orders', ttOrdersShown, 'number', 'orders', true, ttOrdersShown && tt.units ? (tt.units / ttOrdersShown).toFixed(1) + ' units per order' : ''),
     // 2026-10-26 (Tomer: "keep the real AOV"): the "GMV per order" line under
     // it is removed — only Net Sales ÷ Orders is shown.
-    tileV('AOV', fmtVal(aov, 'currency'), aovYoy, aovMom, true, 'Net Sales ÷ orders (after discounts and refunds)', 'Average order value: TikTok Shop Net Sales ÷ Orders (Key Metrics’ AOV is Shopify’s: (Gross Sales − Discounts) ÷ Orders)'),
+    tileV('AOV', fmtVal(aov, 'currency'), aovYoy, aovMom, true, '(Gross sales − discounts − refunds) ÷ orders', 'Average order value: TikTok Shop (gross sales − discounts − refunds, Triple Whale) ÷ Orders — not the payouts (Key Metrics’ AOV is Shopify’s: (Gross Sales − Discounts) ÷ Orders)'),
     tile('Units Sold', tt.units, 'number', 'units', true, ''),
     tile('Refunds', tt.refunds, 'currency-full', 'refunds', false, gmvShown ? fmtVal(tt.refunds / gmvShown, 'percent') + ' of GMV' : ''),
     tileV('Return Rate', fmtVal(returnRate, 'percent'), returnRateYoy, returnRateMom, false,
@@ -3388,6 +3409,33 @@ function ttEnsureCreatorApi(range) {
   return creatorApiCache[key];
 }
 const giftingCache = {};
+// TikTok payouts per period (2026-11-04) — /api/tiktok-shop/payouts.
+const payoutsCache = {};
+function ttEnsurePayouts(range) {
+  const key = range.start + '|' + range.end;
+  const prev = payoutsCache[key];
+  if (!prev || (prev.status === 'error' && Date.now() - (prev.at || 0) > 60000)) {
+    payoutsCache[key] = { status: 'loading' };
+    (async () => {
+      let lastErr = null;
+      for (let attempt = 0; attempt < 3; attempt++) {
+        if (attempt) await new Promise(r => setTimeout(r, 5000 * attempt));
+        try {
+          const res = await fetch(`${BACKEND_URL}/api/tiktok-shop/payouts?start=${range.start}&end=${range.end}`);
+          const body = await res.json().catch(() => null);
+          if (res.ok && body && typeof body.payout === 'number') return body;
+          lastErr = new Error((body && body.error) || ('Backend returned ' + res.status));
+          if (res.status === 400 || res.status === 503) break;
+        } catch (e) { lastErr = e; }
+      }
+      throw lastErr || new Error('Couldn’t load');
+    })()
+      .then(d => { payoutsCache[key] = { status: 'ok', data: d }; })
+      .catch(err => { payoutsCache[key] = { status: 'error', error: err.message, at: Date.now() }; })
+      .finally(() => { if (state.site === 'com') renderTikTokShop(getMonthData()); });
+  }
+  return payoutsCache[key];
+}
 function ttEnsureGifting(range) {
   const key = range.start + '|' + range.end;
   // 2026-10-28: retried on ANY failure (network, Triple Whale 429/5xx, deploy
