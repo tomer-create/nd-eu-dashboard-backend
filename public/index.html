@@ -2772,16 +2772,19 @@ function renderTikTokShop(monthData, opts = {}) {
   // payouts load or if they can't be read; AOV stays on that basis.
   const payRange = ttPeriodRange();
   const payE = payRange ? ttEnsurePayouts(payRange) : null;
-  const payOk = e => e && e.status === 'ok' && e.data && typeof e.data.payout === 'number' ? e.data : null;
+  // 2026-11-04 (later, Tomer: "pull the Total net sales orders from TikTok
+  // Shop"): the tile shows TikTok's Total net sales from its statements; the
+  // payouts stay in the subtitle.
+  const payOk = e => e && e.status === 'ok' && e.data && typeof e.data.net_sales === 'number' ? e.data : null;
   const payCur = payOk(payE);
   const payPr = payCur ? ttPriorRanges() : {};
   const payY = payCur && payPr.yoy ? payOk(ttEnsurePayouts(payPr.yoy)) : null;
   const payM = payCur && payPr.mom ? payOk(ttEnsurePayouts(payPr.mom)) : null;
-  const payChg = (prev) => prev && prev.payouts > 0 && prev.payout > 0 ? (payCur.payout - prev.payout) / prev.payout : null;
+  const payChg = (prev) => prev && prev.statements > 0 && prev.net_sales > 0 ? (payCur.net_sales - prev.net_sales) / prev.net_sales : null;
   const netTile = payCur
-    ? tileV('Net Sales', fmtVal(payCur.payout, 'currency-full'), payChg(payY), payChg(payM), true,
-        `TikTok payouts: ${fmtVal(payCur.payouts, 'number')} payout${payCur.payouts === 1 ? '' : 's'} paid in the period`,
-        'TikTok Shop Net Sales = the payouts TikTok paid to the bank in the period (Seller Center → Finance → Payouts): after TikTok’s fees, affiliate commissions and reserves, including TikTok-funded discounts. Each payout counts on the day it was paid.')
+    ? tileV('Net Sales', fmtVal(payCur.net_sales, 'currency-full'), payChg(payY), payChg(payM), true,
+        `TikTok Shop statements: total net sales (${fmtVal(payCur.statements, 'number')} statement${payCur.statements === 1 ? '' : 's'}) · paid out ${fmtVal(payCur.payout, 'currency-full')}`,
+        'TikTok Shop Net Sales = the Total net sales of TikTok’s statements in the period (Seller Center → Finance → Statements), each on its statement date. “Paid out” = the payouts TikTok paid to the bank in the period, after its fees, affiliate commissions and reserves.')
     : (payE && payE.status === 'loading'
       ? tileV('Net Sales', '…', null, null, true, 'Loading TikTok payouts…')
       : tile('Net Sales', tt.net_sales, 'currency-full', 'net_sales', true, payE && payE.status === 'error' ? 'TikTok payouts couldn’t be loaded — showing gross sales − discounts − refunds' : 'Gross sales − discounts − refunds'));
@@ -3423,7 +3426,7 @@ function ttEnsurePayouts(range) {
         try {
           const res = await fetch(`${BACKEND_URL}/api/tiktok-shop/payouts?start=${range.start}&end=${range.end}`);
           const body = await res.json().catch(() => null);
-          if (res.ok && body && typeof body.payout === 'number') return body;
+          if (res.ok && body && typeof body.net_sales === 'number') return body;
           lastErr = new Error((body && body.error) || ('Backend returned ' + res.status));
           if (res.status === 400 || res.status === 503) break;
         } catch (e) { lastErr = e; }
