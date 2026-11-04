@@ -447,7 +447,7 @@ function discountSplit(orders, owners, grossSales, discountTags) {
   };
 }
 
-function aggregate(orders, { tagLabels = DEFAULT_TAG_LABELS, discountTags = null } = {}) {
+function aggregate(orders, { tagLabels = DEFAULT_TAG_LABELS, discountTags = null, splitExtraOrders = null } = {}) {
   let grossSales = 0;
   let discountsTotal = 0;
   let unitsSold = 0;
@@ -720,7 +720,8 @@ function aggregate(orders, { tagLabels = DEFAULT_TAG_LABELS, discountTags = null
     // until they're re-pulled.
     // The five-bucket split of every discount (2026-11-04). Needs discount
     // titles / allocations (byApp) and each order's channel (sourceName).
-    discount_split: byApp && sawSourceName ? discountSplit(orders, owners, grossSales, discountTags) : undefined,
+    // splitExtraOrders: the period's voided orders — in the split only.
+    discount_split: byApp && sawSourceName ? discountSplit(Array.isArray(splitExtraOrders) && splitExtraOrders.length ? orders.concat(splitExtraOrders.filter((o) => orderApps(o))) : orders, owners, grossSales, discountTags) : undefined,
     discounts_programs_total: sawDiscountApps ? {
       gross_sales: tableAcc.grossSales,
       discount_value: tableAcc.value,
@@ -743,7 +744,8 @@ function aggregate(orders, { tagLabels = DEFAULT_TAG_LABELS, discountTags = null
     // 11 (2026-11-04): SALES box (sale programs from the Evergreen Discounts
     //                  Tags sheet), BA and Bundles & sets items in Regular.
     // 12 (2026-11-04): VAT taken out of the split for VAT-inclusive prices (IL).
-    discounts_version: orders.length === 0 ? 12 : (sawDiscountApps ? (byApp && sawSourceName ? 12 : byApp ? 5 : 3) : 1),
+    // 13 (2026-11-04): voided orders' discounts in the split (Shopify's report counts them).
+    discounts_version: orders.length === 0 ? 13 : (sawDiscountApps ? (byApp && sawSourceName ? 13 : byApp ? 5 : 3) : 1),
     discounts_by_app: byApp,
   };
 }
