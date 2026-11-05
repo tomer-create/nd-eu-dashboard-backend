@@ -623,6 +623,15 @@ const liveCache = {};
 // fetch is in flight/failed, so renderYotpoLoyalty can tell those states
 // apart from "not fetched yet".
 const yotpoCache = {};
+// When each Yotpo key failed — a failed key is fetched again after a minute
+// (2026-11-05 code check: it used to stay on the error until a page reload).
+const yotpoErrorAt = {};
+function yotpoMarkError(k) { yotpoCache[k] = 'error'; yotpoErrorAt[k] = Date.now(); }
+function yotpoExpireErrors() {
+  Object.keys(yotpoErrorAt).forEach((k) => {
+    if (Date.now() - yotpoErrorAt[k] > 60000) { if (yotpoCache[k] === 'error') delete yotpoCache[k]; delete yotpoErrorAt[k]; }
+  });
+}
 // Section 5 (Sales by Country) "show more" expand state, keyed the same way
 // as liveCache ('site|month') so expanding ND.EU's long country list doesn't
 // leak into a different site/month view that has few enough countries to
@@ -2449,8 +2458,12 @@ function renderKPIs(monthData) {
 
   monthData.kpis.forEach(k => {
     const tile = document.createElement('div');
-    tile.className = 'kpi-tile' + (k.no_data ? ' no-data' : '');
-    if (k.no_data) {
+    // The snapshot's not-yet-synced months carry actual 0 with YoY −100%
+    // (2026-11-05 code check: they showed "$0.00 · YoY −100%" until the sync
+    // landed) — shown as awaiting data instead.
+    const awaiting = k.no_data || (k.actual === 0 && k.yoy === -1);
+    tile.className = 'kpi-tile' + (awaiting ? ' no-data' : '');
+    if (awaiting) {
       tile.innerHTML = `<div class="kpi-top"><span class="kpi-label">${k.label}</span></div>
         <div class="kpi-value" style="font-size:13px;color:var(--text-muted);font-weight:500">Awaiting Shopify data</div>`;
       grid.appendChild(tile);
@@ -2786,7 +2799,7 @@ function renderTikTokShop(monthData, opts = {}) {
   const payChg = (prev) => prev && prev.net_sales_orders > 0 && prev.net_sales > 0 ? (payCur.net_sales - prev.net_sales) / prev.net_sales : null;
   const netTile = payCur
     ? tileV('Net Sales', fmtVal(payCur.net_sales, 'currency-full'), payChg(payY), payChg(payM), true,
-        `TikTok Shop net sales by order date · ${fmtVal(payCur.net_sales_orders || 0, 'number')} orders${payCur.net_sales_unsettled ? ' (' + fmtVal(payCur.net_sales_unsettled, 'currency-full') + ' not settled yet)' : ''} · paid out ${fmtVal(payCur.payout, 'currency-full')}${payCur.net_sales_unchecked_statements ? ` · ⚠ ${payCur.net_sales_unchecked_statements} TikTok statement${payCur.net_sales_unchecked_statements === 1 ? '' : 's'} not fully read (${fmtVal(payCur.net_sales_unchecked_gap || 0, 'currency-full')})` : ''}`,
+        `TikTok Shop net sales by order date · ${fmtVal(payCur.net_sales_orders || 0, 'number')} orders${payCur.net_sales_unsettled ? ' (' + fmtVal(payCur.net_sales_unsettled, 'currency-full') + ' not settled yet)' : ''}${typeof payCur.payout === 'number' ? ' · paid out ' + fmtVal(payCur.payout, 'currency-full') : ''}${payCur.net_sales_unchecked_statements ? ` · ⚠ ${payCur.net_sales_unchecked_statements} TikTok statement${payCur.net_sales_unchecked_statements === 1 ? '' : 's'} not fully read (${fmtVal(payCur.net_sales_unchecked_gap || 0, 'currency-full')})` : ''}`,
         'TikTok Shop Net Sales = TikTok’s net sales (product price − seller discounts − refunds) of the orders placed in the period, by order date (TikTok’s GMT-8 day), from Seller Center finance: settled orders at their statement amounts, orders not settled yet at TikTok’s estimate. Refunds count against the order’s date. “Paid out” = the payouts TikTok paid to the bank in the period, after its fees, affiliate commissions and reserves.')
     : (payE && payE.status === 'loading'
       ? tileV('Net Sales', '…', null, null, true, 'Loading TikTok Shop net sales…')
@@ -3488,6 +3501,9 @@ function shiftRangeClamped(startISO, endISO, years, months) {
     return new Date(Date.UTC(ty, tm, Math.min(d, last)));
   };
   const fmt = (d) => d.toISOString().slice(0, 10);
+  // An end on the 1st (a whole month / quarter) shifts like the start: Feb's
+  // MoM is all of January, not Jan 1–29 (2026-11-05 code check).
+  if (endISO.slice(8) === '01') return { start: fmt(shiftDay(startISO)), end: fmt(shiftDay(endISO)) };
   const end = shiftDay(new Date(Date.parse(endISO + 'T00:00:00Z') - 86400000).toISOString().slice(0, 10));
   end.setUTCDate(end.getUTCDate() + 1);
   return { start: fmt(shiftDay(startISO)), end: fmt(end) };
@@ -4621,6 +4637,7 @@ function combineYotpoSummaries(perSite) {
 }
 
 async function renderYotpoLoyalty() {
+  yotpoExpireErrors();
   const el = document.getElementById('section-8');
 
   if (state.site === 'all') {
@@ -4653,7 +4670,7 @@ async function renderYotpoLoyalty() {
         yotpoCache[key] = await fetchYotpoSummaryForSite(s, range.start, range.end, 0, includeRevenue);
       } catch (err) {
         console.error('yotpo summary fetch failed for', s, err);
-        yotpoCache[key] = 'error';
+        yotpoMarkError(key);
       }
     }));
     const paintAll = () => renderYotpoSection(
@@ -4713,13 +4730,13 @@ async function renderYotpoLoyalty() {
   await Promise.all([
     fetchYotpoSummaryForSite(state.site, start, end, 0, true)
       .then((d) => { yotpoCache[key] = d; })
-      .catch((err) => { console.error('yotpo summary fetch failed:', err); yotpoCache[key] = 'error'; }),
+      .catch((err) => { console.error('yotpo summary fetch failed:', err); yotpoMarkError(key); }),
     fetchYotpoSummaryForSite(state.site, yoyRange.start, yoyRange.end)
       .then((d) => { yotpoCache[yoyKey] = d; })
-      .catch((err) => { console.error('yotpo YoY summary fetch failed:', err); yotpoCache[yoyKey] = 'error'; }),
+      .catch((err) => { console.error('yotpo YoY summary fetch failed:', err); yotpoMarkError(yoyKey); }),
     fetchYotpoSummaryForSite(state.site, momRange.start, momRange.end)
       .then((d) => { yotpoCache[momKey] = d; })
-      .catch((err) => { console.error('yotpo MoM summary fetch failed:', err); yotpoCache[momKey] = 'error'; }),
+      .catch((err) => { console.error('yotpo MoM summary fetch failed:', err); yotpoMarkError(momKey); }),
   ]);
   if (state.site === requestedSite && state.month === requestedMonth) {
     renderYotpoSection(
@@ -4943,7 +4960,10 @@ function topProductsPeriodData() {
   const r = usStatesRanges();
   const sites = state.site === 'all' ? Object.keys(DATA.sites) : [state.site];
   const ck = [state.site, r.cur.start, r.cur.end, r.prev ? r.prev.start : ''].join('|');
-  const entry = topProductsPeriodCache[ck];
+  let entry = topProductsPeriodCache[ck];
+  // A failed load is tried again after a minute (2026-11-05 code check — it
+  // used to stick until the next Sync).
+  if (entry && entry.error && Date.now() - (entry.at || 0) > 60000) { delete topProductsPeriodCache[ck]; entry = null; }
   if (entry && entry !== 'loading') return entry;
   if (!entry) {
     topProductsPeriodCache[ck] = 'loading';
@@ -4981,7 +5001,7 @@ function topProductsPeriodData() {
       topProductsPeriodCache[ck] = { list };
     }).catch(err => {
       console.error('top-products fetch failed:', err);
-      topProductsPeriodCache[ck] = { error: String(err.message || err) };
+      topProductsPeriodCache[ck] = { error: String(err.message || err), at: Date.now() };
     }).finally(() => { if (state.site + '|' + state.month === view) renderTopProducts(getMonthData()); });
   }
   return 'loading';
@@ -5646,7 +5666,7 @@ function renderDiscounts(monthData) {
   const progRow = (d, gk) => {
     const sub = d.points ? `${fmtVal(d.points, 'number')} points spent (10 points = ${state.site === 'all' ? '1 unit of each store’s currency' : sym() + '1'})` : (gk === 'yotpo' ? 'Yotpo ' + d.label + ' codes' : d.tag);
     return `<tr class="disc-prog" data-group="${gk}"${discGroupOpen[gk] ? '' : ' hidden'}>
-      <td style="padding-left:28px">${d.label}<div style="font-size:10px;color:var(--text-muted);font-weight:500">${sub}</div></td>
+      <td style="padding-left:28px">${escText(d.label)}<div style="font-size:10px;color:var(--text-muted);font-weight:500">${escText(sub)}</div></td>
       <td>${cur(d.gross_sales)}</td>
       <td>${fmtVal(d.discount_value || 0, 'currency-full')}</td>
       <td>${pctCell(d.discount_pct)}</td>
