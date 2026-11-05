@@ -2799,8 +2799,8 @@ function renderTikTokShop(monthData, opts = {}) {
   const payChg = (prev) => prev && prev.net_sales_orders > 0 && prev.net_sales > 0 ? (payCur.net_sales - prev.net_sales) / prev.net_sales : null;
   const netTile = payCur
     ? tileV('Net Sales', fmtVal(payCur.net_sales, 'currency-full'), payChg(payY), payChg(payM), true,
-        `TikTok Shop net sales by order date · ${fmtVal(payCur.net_sales_orders || 0, 'number')} orders${payCur.net_sales_unsettled ? ' (' + fmtVal(payCur.net_sales_unsettled, 'currency-full') + ' not settled yet)' : ''}${typeof payCur.payout === 'number' ? ' · paid out ' + fmtVal(payCur.payout, 'currency-full') : ''}${payCur.net_sales_unchecked_statements ? ` · ⚠ ${payCur.net_sales_unchecked_statements} TikTok statement${payCur.net_sales_unchecked_statements === 1 ? '' : 's'} not fully read (${fmtVal(payCur.net_sales_unchecked_gap || 0, 'currency-full')})` : ''}`,
-        'TikTok Shop Net Sales = TikTok’s net sales (product price − seller discounts − refunds) of the orders placed in the period, by order date (TikTok’s GMT-8 day), from Seller Center finance: settled orders at their statement amounts, orders not settled yet at TikTok’s estimate. Refunds count against the order’s date. “Paid out” = the payouts TikTok paid to the bank in the period, after its fees, affiliate commissions and reserves.')
+        `TikTok Shop net sales by order date · ${fmtVal(payCur.net_sales_orders || 0, 'number')} orders${payCur.net_sales_unsettled ? ' (' + fmtVal(payCur.net_sales_unsettled, 'currency-full') + ' not settled yet)' : ''}${typeof payCur.payout === 'number' ? ' · paid out ' + fmtVal(payCur.payout, 'currency-full') : ''}${payCur.net_sales_unchecked_statements ? ` · ⚠ ${payCur.net_sales_unchecked_statements} TikTok statement${payCur.net_sales_unchecked_statements === 1 ? '' : 's'} not fully read (${fmtVal(payCur.net_sales_unchecked_gap || 0, 'currency-full')})` : ''}${ttMissingDays(payCur) ? ` · ⚠ ${ttMissingDays(payCur)} day${ttMissingDays(payCur) === 1 ? '' : 's'} of TikTok statements missing from Windsor` : ''}`,
+        'TikTok Shop Net Sales = TikTok’s net sales (product price − seller discounts − refunds) of the orders placed in the period, by order date (TikTok’s GMT-8 day), from Seller Center finance: settled orders at their statement amounts (read from TikTok’s Finance API when it’s connected, otherwise through Windsor), orders not settled yet at TikTok’s estimate. Refunds count against the order’s date. “Paid out” = the payouts TikTok paid to the bank in the period, after its fees, affiliate commissions and reserves.')
     : (payE && payE.status === 'loading'
       ? tileV('Net Sales', '…', null, null, true, 'Loading TikTok Shop net sales…')
       : tile('Net Sales', tt.net_sales, 'currency-full', 'net_sales', true, payE && payE.status === 'error' ? 'TikTok Shop net sales couldn’t be loaded — showing gross sales − discounts − refunds' : 'Gross sales − discounts − refunds'));
@@ -3428,6 +3428,13 @@ function ttEnsureCreatorApi(range) {
   return creatorApiCache[key];
 }
 const giftingCache = {};
+// Statement days Windsor couldn't supply, up to the day before yesterday
+// (yesterday's statement may not be out yet). None when the numbers come
+// from TikTok's Finance API (2026-11-05).
+function ttMissingDays(p) {
+  const cutoff = new Date(Date.now() - 2 * 86400000).toISOString().slice(0, 10);
+  return (p && Array.isArray(p.statement_days_missing) ? p.statement_days_missing.filter(d => d < cutoff) : []).length;
+}
 // TikTok payouts per period (2026-11-04) — /api/tiktok-shop/payouts.
 const payoutsCache = {};
 function ttEnsurePayouts(range) {
