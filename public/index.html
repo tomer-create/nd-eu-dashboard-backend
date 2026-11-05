@@ -2679,6 +2679,14 @@ function renderTikTokShop(monthData, opts = {}) {
   };
   // Change in a ratio num/den from the % changes of its parts (same method as
   // Section 1's % Discount Ratio): prior ratio = (num/(1+Δnum)) / (den/(1+Δden)).
+  // AOV change on one basis (2026-11-05): TikTok net sales ÷ Triple Whale
+  // orders for both periods; tt.yoy / tt.mom hold the orders' % change, so
+  // the prior count is orders ÷ (1 + change).
+  const ttAovChange = (cur, prev, orders, ordersChg) => {
+    if (!cur || !prev || !(prev.net_sales_orders > 0) || !(prev.net_sales > 0) || !orders || ordersChg === null || ordersChg === undefined || (1 + ordersChg) <= 0) return null;
+    const prevAov = prev.net_sales / (orders / (1 + ordersChg));
+    return prevAov ? (cur.net_sales / orders - prevAov) / prevAov : null;
+  };
   const ratioChange = (num, den, chNum, chDen) => {
     if (chNum === null || chNum === undefined || chDen === null || chDen === undefined || !den || (1 + chNum) === 0 || (1 + chDen) === 0) return null;
     const prior = (num / (1 + chNum)) / (den / (1 + chDen));
@@ -2802,8 +2810,12 @@ function renderTikTokShop(monthData, opts = {}) {
   const payChg = (prev) => prev && prev.net_sales_orders > 0 && prev.net_sales > 0 ? (payCur.net_sales - prev.net_sales) / prev.net_sales : null;
   const netTile = payCur
     ? tileV('Net Sales', fmtVal(payCur.net_sales, 'currency-full'), payChg(payY), payChg(payM), true,
-        `TikTok Shop net sales by order date · ${fmtVal(payCur.net_sales_orders || 0, 'number')} orders${payCur.net_sales_unsettled ? ' (' + fmtVal(payCur.net_sales_unsettled, 'currency-full') + ' not settled yet)' : ''}${typeof payCur.payout === 'number' ? ' · paid out ' + fmtVal(payCur.payout, 'currency-full') : ''}${payCur.net_sales_unchecked_statements ? ` · ⚠ ${payCur.net_sales_unchecked_statements} TikTok statement${payCur.net_sales_unchecked_statements === 1 ? '' : 's'} not fully read (${fmtVal(payCur.net_sales_unchecked_gap || 0, 'currency-full')})` : ''}${ttMissingDays(payCur) ? ` · ⚠ ${ttMissingDays(payCur)} day${ttMissingDays(payCur) === 1 ? '' : 's'} of TikTok statements missing from Windsor` : ''}`,
-        'TikTok Shop Net Sales = TikTok’s net sales (product price − seller discounts − refunds) of the orders placed in the period, by order date (TikTok’s GMT-8 day), from Seller Center finance: settled orders at their statement amounts (read from TikTok’s Finance API when it’s connected, otherwise through Windsor), orders not settled yet at TikTok’s estimate. Refunds count against the order’s date. “Paid out” = the payouts TikTok paid to the bank in the period, after its fees, affiliate commissions and reserves.')
+        // 2026-11-05 (Tomer: "for net sales include the not settled yet
+        // payments and statement not fully read"): the tile = settled + not
+        // settled yet + the estimated in-period part of statements not fully
+        // read; the subtitle shows the three parts.
+        `Settled ${fmtVal(payCur.net_sales_settled || 0, 'currency-full')} + not settled yet ${fmtVal(payCur.net_sales_unsettled || 0, 'currency-full')}${payCur.net_sales_unread_estimate ? ' + ≈' + fmtVal(payCur.net_sales_unread_estimate, 'currency-full') + ` for ${payCur.net_sales_unchecked_statements} statement${payCur.net_sales_unchecked_statements === 1 ? '' : 's'} not fully read` : ''} · by order date · ${fmtVal(payCur.net_sales_orders || 0, 'number')} orders${typeof payCur.payout === 'number' ? ' · paid out ' + fmtVal(payCur.payout, 'currency-full') : ''}${ttMissingDays(payCur) ? ` · ⚠ ${ttMissingDays(payCur)} day${ttMissingDays(payCur) === 1 ? '' : 's'} of TikTok statements missing from Windsor` : ''}`,
+        'TikTok Shop Net Sales = TikTok’s net sales (product price − seller discounts − refunds) of the orders placed in the period, by order date (TikTok’s GMT-8 day), from Seller Center finance: settled orders at their statement amounts (read from TikTok’s Finance API when it’s connected, otherwise through Windsor), orders not settled yet at TikTok’s estimate, plus — when Windsor didn’t hand back all of a statement’s transactions — an estimate of the missing part placed in the period by order date (from the statement’s transactions that were read, or else from how long orders take to settle). Refunds count against the order’s date. “Paid out” = the payouts TikTok paid to the bank in the period, after its fees, affiliate commissions and reserves.')
     : (payE && payE.status === 'loading'
       ? tileV('Net Sales', '…', null, null, true, 'Loading TikTok Shop net sales…')
       : tile('Net Sales', tt.net_sales, 'currency-full', 'net_sales', true, payE && payE.status === 'error' ? 'TikTok Shop net sales couldn’t be loaded — showing gross sales − discounts − refunds' : 'Gross sales − discounts − refunds'));
@@ -2820,7 +2832,17 @@ function renderTikTokShop(monthData, opts = {}) {
     tile('Orders', ttOrdersShown, 'number', 'orders', true, ttOrdersShown && tt.units ? (tt.units / ttOrdersShown).toFixed(1) + ' units per order' : ''),
     // 2026-10-26 (Tomer: "keep the real AOV"): the "GMV per order" line under
     // it is removed — only Net Sales ÷ Orders is shown.
-    tileV('AOV', fmtVal(aov, 'currency'), aovYoy, aovMom, true, '(Gross sales − discounts − refunds) ÷ orders', 'Average order value: TikTok Shop (gross sales − discounts − refunds, Triple Whale) ÷ Orders — not the payouts (Key Metrics’ AOV is Shopify’s: (Gross Sales − Discounts) ÷ Orders)'),
+    // 2026-11-05 (Tomer: "for the AOV in TikTok set (net sales/Orders)"):
+    // AOV = the Net Sales tile ÷ the Orders tile. YoY / MoM compare the same
+    // ratio with the prior period's TikTok net sales over Triple Whale's order
+    // counts for both periods (one basis). While TikTok's net sales load or
+    // if they fail, Triple Whale's net sales are used.
+    payCur
+      ? tileV('AOV', ttOrdersShown ? fmtVal(payCur.net_sales / ttOrdersShown, 'currency') : '—',
+          ttAovChange(payCur, payY, tt.orders, tt.yoy && tt.yoy.orders),
+          ttAovChange(payCur, payM, tt.orders, tt.mom && tt.mom.orders),
+          true, 'Net Sales ÷ Orders', 'Average order value: the Net Sales tile (TikTok Shop net sales by order date) ÷ the Orders tile.')
+      : tileV('AOV', fmtVal(aov, 'currency'), aovYoy, aovMom, true, 'Net sales ÷ orders' + (payE && payE.status === 'loading' ? ' · loading TikTok net sales…' : ''), 'Average order value: net sales ÷ orders (Triple Whale’s net sales until TikTok’s load).'),
     tile('Units Sold', tt.units, 'number', 'units', true, ''),
     tile('Refunds', tt.refunds, 'currency-full', 'refunds', false, gmvShown ? fmtVal(tt.refunds / gmvShown, 'percent') + ' of GMV' : ''),
     tileV('Return Rate', fmtVal(returnRate, 'percent'), returnRateYoy, returnRateMom, false,
