@@ -11,7 +11,8 @@
 //
 // Setup (Tomer, once — secrets never go through chat):
 //   1. TikTok Shop Partner Center → create a custom app for the ND US shop
-//      with the "Read Seller Affiliate Collaboration" scope; set its redirect
+//      with the "Read Seller Affiliate Collaboration" scope (and, since
+//      2026-11-05, "Finance Information" for TikTok Shop Net Sales); set its redirect
 //      URL to https://nd-dashboard-backend.onrender.com/tiktok-shop/callback
 //   2. Render env vars: TIKTOK_APP_KEY, TIKTOK_APP_SECRET, TIKTOK_SERVICE_ID
 //   3. Open /admin/tiktok/connect?token=<ADMIN_SETUP_TOKEN> and approve.
@@ -428,4 +429,156 @@ async function status() {
   };
 }
 
-module.exports = { configured, authorizeUrl, checkState, exchangeCode, getCreatorGmv, diagRows, status, _sign: sign, _ptMidnight: ptMidnight };
+// ---- Finance: statements + their transactions (added 2026-11-05) ------------
+// Why: Windsor's copy of TikTok's finance data drops WHOLE daily statements
+// (Oct 2026: Oct 8, 14, 19, 21, 24 were missing however it was asked), so
+// TikTok Shop Net Sales by order date came out ~$15–27K short. TikTok's own
+// Finance API is what Seller Center → Finance → Statements shows:
+//   GET /finance/202309/statements                                  (list)
+//   GET /finance/202501/statements/{id}/statement_transactions      (rows)
+// Scope: Finance Information (seller.finance.info) — Tomer adds it to the
+// app in Partner Center, then re-connects once at /admin/tiktok/connect.
+// Each statement's transactions are checked against its own Net sales and
+// stored in Postgres once the statement is more than 3 days old (a settled
+// statement doesn't change), so a YTD view reads TikTok only for new days.
+// Rows are returned in the same shape as Windsor's statement_transaction_*
+// fields, so the dashboard's maths doesn't change.
+const isoDayOf = (sec) => new Date(sec * 1000).toISOString().slice(0, 10);
+let financeSchema = null;
+function ensureFinanceSchema() {
+  const p = getPool();
+  if (!p) return Promise.resolve(false);
+  if (!financeSchema) {
+    financeSchema = ensureSchema().then((ok) => ok && p.query(`
+      CREATE TABLE IF NOT EXISTS tiktok_finance_statements (
+        id TEXT PRIMARY KEY,
+        day DATE NOT NULL,
+        net NUMERIC NOT NULL,
+        rows JSONB NOT NULL,
+        fetched_at TIMESTAMPTZ NOT NULL DEFAULT now()
+      );
+      CREATE INDEX IF NOT EXISTS tiktok_finance_statements_day ON tiktok_finance_statements (day);`).then(() => true))
+      .catch((err) => { console.error('tiktok-api: finance schema failed:', err.message); financeSchema = null; return false; });
+  }
+  return financeSchema;
+}
+// Is the Finance API usable? A real call decides (the stored scope list can
+// be empty or named differently); remembered 6 h when it works, 10 min when
+// it doesn't.
+let financeProbe = null; // { ok, reason, at }
+async function financeStatus() {
+  if (!configured()) return { ok: false, reason: 'not_configured' };
+  const auth = await loadAuth().catch(() => null);
+  if (!auth || !auth.access_token) return { ok: false, reason: 'not_connected' };
+  if (financeProbe && Date.now() - financeProbe.at < (financeProbe.ok ? 6 * 3600000 : 10 * 60000)) return financeProbe;
+  try {
+    const now = Math.floor(Date.now() / 1000);
+    await apiCall('GET', '/finance/202309/statements', { query: { statement_time_ge: String(now - 3 * 86400), statement_time_lt: String(now), page_size: '1', sort_field: 'statement_time' } });
+    financeProbe = { ok: true, reason: 'ready', at: Date.now() };
+  } catch (err) {
+    financeProbe = { ok: false, reason: /scope|permission|unauthori|access denied|105005|36009004/i.test(err.message) ? 'no_scope' : 'error', message: err.message, at: Date.now() };
+  }
+  return financeProbe;
+}
+// Statements dated fromDay..toDay (inclusive, UTC days — statements are
+// generated at 00:00 UTC).
+async function financeStatements(fromDay, toDay) {
+  const ge = Date.parse(fromDay + 'T00:00:00Z') / 1000;
+  const lt = Date.parse(plusDays(toDay, 1) + 'T00:00:00Z') / 1000;
+  const out = [];
+  let pageToken = '';
+  for (let page = 0; page < 100; page++) {
+    const query = { statement_time_ge: String(ge), statement_time_lt: String(lt), page_size: '100', sort_field: 'statement_time', sort_order: 'ASC' };
+    if (pageToken) query.page_token = pageToken;
+    const data = await apiCall('GET', '/finance/202309/statements', { query });
+    (data.statements || []).forEach((st) => out.push({ id: String(st.id), day: isoDayOf(num(st.statement_time)), net: num(st.net_sales_amount), revenue: num(st.revenue_amount), payment_status: st.payment_status || null }));
+    pageToken = data.next_page_token || '';
+    if (!pageToken) break;
+  }
+  return out;
+}
+function financeRow(statementId, t) {
+  const rb = t.revenue_breakdown || {};
+  const fee = (t.fee_tax_breakdown && t.fee_tax_breakdown.fee) || {};
+  return {
+    statement_id: statementId,
+    statement_transaction_id: String(t.id || ''),
+    statement_transaction_order_id: t.order_id ? String(t.order_id) : (t.adjustment_order_id ? String(t.adjustment_order_id) : null),
+    statement_transaction_order_create_datetime: num(t.order_create_time) ? new Date(num(t.order_create_time) * 1000).toISOString() : null,
+    statement_transaction_type: t.type || null,
+    statement_transaction_revenue_amount: num(t.revenue_amount),
+    statement_transaction_revenue_subtotal_before_discount_amount: num(rb.subtotal_before_discount_amount),
+    statement_transaction_revenue_seller_discount_amount: num(rb.seller_discount_amount),
+    statement_transaction_fee_affiliate_commission_amount: num(fee.affiliate_commission_amount),
+    statement_transaction_fee_affiliate_partner_commission_amount: num(fee.affiliate_partner_commission_amount),
+    statement_transaction_fee_affiliate_ads_commission_amount: num(fee.affiliate_ads_commission_amount),
+  };
+}
+async function statementTransactions(statementId) {
+  const rows = [];
+  let pageToken = '';
+  for (let page = 0; page < 200; page++) {
+    const query = { page_size: '100', sort_field: 'order_create_time', sort_order: 'ASC' };
+    if (pageToken) query.page_token = pageToken;
+    const data = await apiCall('GET', `/finance/202501/statements/${encodeURIComponent(statementId)}/statement_transactions`, { query });
+    (data.transactions || []).forEach((t) => rows.push(financeRow(statementId, t)));
+    pageToken = data.next_page_token || '';
+    if (!pageToken) break;
+  }
+  // Same transaction twice across pages is kept once.
+  const seen = new Set();
+  return rows.filter((r) => { if (!r.statement_transaction_id) return true; if (seen.has(r.statement_transaction_id)) return false; seen.add(r.statement_transaction_id); return true; });
+}
+async function readStoredStatements(ids) {
+  const p = getPool();
+  if (!ids.length || !p || !(await ensureFinanceSchema())) return new Map();
+  const { rows } = await p.query(`SELECT id, rows FROM tiktok_finance_statements WHERE id = ANY($1)`, [ids]);
+  return new Map(rows.map((r) => [r.id, r.rows]));
+}
+async function storeStatement(st, rows) {
+  const p = getPool();
+  if (!p || !(await ensureFinanceSchema())) return;
+  await p.query(`INSERT INTO tiktok_finance_statements (id, day, net, rows, fetched_at) VALUES ($1, $2, $3, $4, now())
+    ON CONFLICT (id) DO UPDATE SET day = EXCLUDED.day, net = EXCLUDED.net, rows = EXCLUDED.rows, fetched_at = now()`, [st.id, st.day, st.net, JSON.stringify(rows)]);
+}
+// Every settled transaction of the statements dated fromDay..toDay, checked.
+// Returns { statements: Map(id -> { day, net }), rows, checked, unchecked_days, gap }.
+const memStatements = new Map(); // id -> rows (checked, older than 3 days)
+async function getFinanceSettled(fromDay, toDay) {
+  const today = new Date().toISOString().slice(0, 10);
+  const list = await financeStatements(fromDay, toDay);
+  const stored = await readStoredStatements(list.filter((st) => !memStatements.has(st.id)).map((st) => st.id)).catch(() => new Map());
+  const sum = (rows) => rows.reduce((a, r) => a + num(r.statement_transaction_revenue_amount), 0);
+  const rowsById = new Map();
+  const todo = [];
+  list.forEach((st) => {
+    const cached = memStatements.get(st.id) || stored.get(st.id);
+    if (cached && Math.abs(sum(cached) - st.net) <= 0.05) rowsById.set(st.id, cached); else todo.push(st);
+  });
+  for (let i = 0; i < todo.length; i += 4) {
+    await Promise.all(todo.slice(i, i + 4).map(async (st) => {
+      let rows = await statementTransactions(st.id);
+      if (Math.abs(sum(rows) - st.net) > 0.05) rows = await statementTransactions(st.id); // one more try
+      rowsById.set(st.id, rows);
+      if (Math.abs(sum(rows) - st.net) <= 0.05 && st.day < plusDays(today, -3)) {
+        memStatements.set(st.id, rows);
+        await storeStatement(st, rows).catch((err) => console.error('tiktok-api: storing statement failed:', err.message));
+      }
+    }));
+  }
+  while (memStatements.size > 150) memStatements.delete(memStatements.keys().next().value);
+  const statements = new Map();
+  const rows = [];
+  const unchecked = [];
+  let gap = 0;
+  list.forEach((st) => {
+    statements.set(st.id, { day: st.day, net: st.net });
+    const r = rowsById.get(st.id) || [];
+    rows.push(...r);
+    const d = st.net - sum(r);
+    if (Math.abs(d) > 0.05) { unchecked.push(st.day); gap += d; }
+  });
+  return { statements, rows, checked: list.length - unchecked.length, unchecked_days: unchecked, gap };
+}
+
+module.exports = { configured, authorizeUrl, checkState, exchangeCode, getCreatorGmv, diagRows, status, financeStatus, getFinanceSettled, _sign: sign, _ptMidnight: ptMidnight, _financeRow: financeRow };
