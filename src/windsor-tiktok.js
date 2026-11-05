@@ -1021,9 +1021,10 @@ async function readSettledTransactions(fields, from, to, statements) {
     }
   }
   const unchecked = [];
+  const uncheckedList = [];
   let gap = 0;
   wanted.forEach(([id, s]) => {
-    if (off(id)) { unchecked.push(s.day); gap += s.net - sumOf(byStatement.get(id)); return; }
+    if (off(id)) { const g = s.net - sumOf(byStatement.get(id)); unchecked.push(s.day); uncheckedList.push({ id, day: s.day, gap: g }); gap += g; return; }
     if (s.day < addDays(today, -3)) checked.set(id, byStatement.get(id));
   });
   while (checked.size > 1500) checked.delete(checked.keys().next().value);
@@ -1031,7 +1032,7 @@ async function readSettledTransactions(fields, from, to, statements) {
   const seen = new Set();
   const rows = [];
   byStatement.forEach((m) => m.forEach((r, tx) => { if (!seen.has(tx)) { seen.add(tx); rows.push(r); } }));
-  return { rows, statements_checked: wanted.length - unchecked.length, unchecked_days: unchecked.sort(), unchecked_gap: gap };
+  return { rows, statements_checked: wanted.length - unchecked.length, unchecked_days: unchecked.sort(), unchecked_gap: gap, unchecked_list: uncheckedList };
 }
 
 // Settled transactions of the statements dated from..to: from TikTok's own
@@ -1042,7 +1043,7 @@ async function settledSource(fields, from, to) {
   if (fin.ok) {
     try {
       const r = await tiktokApi.getFinanceSettled(from, minDay(to, todayISO()));
-      return { source: 'tiktok_api', finance_api: fin.reason, list: r.statements, missingDays: [], rows: r.rows, statements_checked: r.checked, unchecked_days: r.unchecked_days, unchecked_gap: r.gap };
+      return { source: 'tiktok_api', finance_api: fin.reason, list: r.statements, missingDays: [], rows: r.rows, statements_checked: r.checked, unchecked_days: r.unchecked_days, unchecked_gap: r.gap, unchecked_list: r.unchecked_list || [] };
     } catch (err) {
       console.error('windsor-tiktok: TikTok Finance API failed, using Windsor:', err.message);
       fin.reason = 'error';
@@ -1097,10 +1098,47 @@ async function orderDateNetSales(start, end, settledRead) {
   };
   settledRead.rows.forEach((r) => take(String(r.statement_transaction_id || ''), String(r.statement_transaction_order_id || ''), r.statement_transaction_order_create_datetime, num(r.statement_transaction_revenue_amount), true));
   unsettledRows.forEach((r) => take(String(r.unsettled_transaction_id || ''), String(r.unsettled_transaction_order_id || ''), r.unsettled_transaction_order_create_datetime, num(r.unsettled_transaction_est_revenue_amount), false));
+  // Statements not fully read (2026-11-05, Tomer: "for net sales include the
+  // not settled yet payments and statement not fully read"): the part of a
+  // statement's Net sales whose transactions Windsor didn't hand back is
+  // added as an estimate, split to the period by order date:
+  //  - from the statement's own transactions that were read, when there are
+  //    some (their share placed in the period), else
+  //  - from how long orders take to settle (statement day − order day,
+  //    weighted by revenue, over every transaction that was read).
+  // TikTok's Finance API reads every statement in full, so with it connected
+  // this is 0. Statements missing from Windsor altogether have no amount and
+  // can't be estimated (statement_days_missing).
+  let unreadEst = 0;
+  const unreadList = settledRead.unchecked_list || [];
+  if (unreadList.length) {
+    const dayOfSt = (sid) => { const s = settledRead.list && settledRead.list.get(sid); return s ? s.day : null; };
+    const lagW = new Map(); let lagTot = 0;
+    const own = new Map(); // statement id -> { inP, all }
+    settledRead.rows.forEach((r) => {
+      const od = orderDayPT(r.statement_transaction_order_create_datetime);
+      const sd = dayOfSt(String(r.statement_id || ''));
+      const rev = num(r.statement_transaction_revenue_amount);
+      if (!od || !sd) return;
+      const o = own.get(String(r.statement_id)) || { inP: 0, all: 0 };
+      o.all += Math.abs(rev); if (od >= start && od < end) o.inP += Math.abs(rev);
+      own.set(String(r.statement_id), o);
+      if (rev > 0) { const lag = Math.round((Date.parse(sd) - Date.parse(od)) / 86400000); if (lag >= 0 && lag <= 120) { lagW.set(lag, (lagW.get(lag) || 0) + rev); lagTot += rev; } }
+    });
+    unreadList.forEach((u) => {
+      const o = own.get(u.id);
+      let share;
+      if (o && o.all > 0) share = o.inP / o.all;
+      else if (lagTot > 0) { share = 0; lagW.forEach((w, lag) => { const od = addDays(u.day, -lag); if (od >= start && od < end) share += w / lagTot; }); }
+      else share = u.day >= start && u.day < end ? 1 : 0;
+      unreadEst += u.gap * share;
+    });
+  }
   return {
-    net_sales: settled + unsettled,
+    net_sales: settled + unsettled + unreadEst,
     net_sales_settled: settled,
     net_sales_unsettled: unsettled,
+    net_sales_unread_estimate: unreadEst,
     net_sales_orders: orders.size,
     net_sales_statements_checked: settledRead.statements_checked,
     net_sales_unchecked_statements: settledRead.unchecked_days.length,
