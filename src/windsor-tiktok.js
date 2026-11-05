@@ -844,71 +844,137 @@ const PAYOUT_TZ = 'America/New_York';
 const payoutDay = new Intl.DateTimeFormat('en-CA', { timeZone: PAYOUT_TZ, year: 'numeric', month: '2-digit', day: '2-digit' });
 const payoutCache = new Map(); // key -> { at, value }
 
-
-// Windsor reads in 7-day windows, 4 at a time; rows de-duplicated by the
-// caller. (A month-wide query silently dropped rows — 2026-11-04.)
-function weekWindows(from, to) {
+// ---- Windsor reads for statements / transactions (2026-11-04/05) ----------
+// Windsor's TikTok Shop finance data is unreliable at the edges: the same
+// statement can be missing from one query and present in another (different
+// fields, different window), and a window can hand back part of a statement.
+// Checked 5 Nov: the Oct 1–7 / 8–14 / 15–21 … windows of the statement list
+// dropped Oct 1, 8, 19 and 24 between them, each present in other reads. So
+// every read below is cross-checked against TikTok's own totals and repeated
+// on other windows when it doesn't add up.
+// Windows never start or end after today (2026-11-05: the current month's
+// end+5 window asked Windsor for Nov 10 and it refused the whole request).
+function weekWindows(from, to, offset = 0) {
+  const today = todayISO();
+  if (to > today) to = today;
   const wins = [];
-  for (let a = from; a <= to; a = addDays(a, 7)) wins.push([a, addDays(a, 6) < to ? addDays(a, 6) : to]);
+  for (let a = addDays(from, -offset); a <= to; a = addDays(a, 7)) wins.push([a, addDays(a, 6) < to ? addDays(a, 6) : to]);
   return wins;
 }
-async function chunkedQuery(fields, from, to, filter) {
-  const wins = weekWindows(from, to);
+// One Windsor read with up to 3 tries (2 s, 6 s apart) — a single 429 or
+// timeout used to fail the whole tile (code check 2026-11-05). Windsor's
+// "today" can be a day behind our UTC date late in the US evening: a window
+// it calls "in the future" is retried ending the day before.
+async function windsorRead(fields, from, to, filter) {
+  let lastErr;
+  for (let attempt = 0; attempt < 3; attempt++) {
+    if (attempt) await new Promise((r) => setTimeout(r, 2000 * (attempt * 2 - 1)));
+    try {
+      return await windsorQuery(fields, from, to, filter);
+    } catch (e) {
+      lastErr = e;
+      if (/in the future/i.test(e.message)) {
+        const y = addDays(todayISO(), -1);
+        if (from > y) return [];
+        if (to > y) to = y;
+      } else if (/Windsor 4\d\d/.test(e.message) && !/Windsor 429/.test(e.message)) {
+        throw e; // a bad request won't get better on retry
+      }
+    }
+  }
+  throw lastErr;
+}
+async function chunkedQuery(fields, from, to, { filter, offset = 0 } = {}) {
+  const wins = weekWindows(from, to, offset);
   const out = [];
   for (let i = 0; i < wins.length; i += 4) {
-    const part = await Promise.all(wins.slice(i, i + 4).map(([a, b]) => windsorQuery(fields, a, b, filter)));
+    const part = await Promise.all(wins.slice(i, i + 4).map(([a, b]) => windsorRead(fields, a, b, filter)));
     part.forEach((rs) => out.push(...rs));
   }
   return out;
 }
+const clampToday = (d) => (d > todayISO() ? todayISO() : d);
 
 // TikTok's daily statements: id, statement day (UTC day of
-// statement_statement_datetime — Windsor's `date` label is the day before) and
-// Net sales. 2026-11-04: Windsor answers differ by query — the Oct 28
-// statement ($4,716.15) was missing from one field set and window grid and
-// present in another — so the list is read twice, on two window grids offset
-// by 3 days, and merged by statement id.
-const STATEMENT_LIST_FIELDS = ['statement_id', 'statement_statement_datetime', 'statement_net_sales_amount'];
+// statement_statement_datetime) and Net sales. TikTok issues one statement a
+// day, so the list is read on up to four different window grids / field sets
+// until every day has one; statements more than 3 days old are kept in memory.
+const STATEMENT_LIST_READS = [
+  { fields: ['statement_id', 'statement_statement_datetime', 'statement_net_sales_amount'], offset: 0 },
+  { fields: ['statement_id', 'statement_statement_datetime', 'statement_net_sales_amount'], offset: 3 },
+  { fields: ['date', 'statement_id', 'statement_statement_datetime', 'statement_net_sales_amount'], offset: 1 },
+  { fields: ['date', 'statement_id', 'statement_statement_datetime', 'statement_net_sales_amount'], offset: 5 },
+];
+const knownStatements = new Map(); // id -> { day, net }
+const absentDays = new Map(); // day -> time all reads came back without a statement for it
+const ABSENT_TTL = 6 * 3600000;
 async function statementList(from, to) {
-  const [a, b] = await Promise.all([
-    chunkedQuery(STATEMENT_LIST_FIELDS, from, to),
-    chunkedQuery(STATEMENT_LIST_FIELDS, addDays(from, -3), addDays(to, 3)),
-  ]);
-  const list = new Map(); // id -> { day, net }
-  for (const r of [...a, ...b]) {
-    const id = String(r.statement_id || '');
-    if (!id || list.has(id)) continue;
-    const t = new Date(r.statement_statement_datetime);
-    if (isNaN(t)) continue;
-    list.set(id, { day: t.toISOString().slice(0, 10), net: num(r.statement_net_sales_amount) });
+  const today = todayISO();
+  const list = new Map();
+  const add = (id, s) => { if (s.day >= addDays(from, -1) && s.day <= addDays(to, 1)) list.set(id, s); };
+  knownStatements.forEach((s, id) => add(id, s));
+  const lastDay = addDays(today, -1) < to ? addDays(today, -1) : to;
+  const missingDays = (skipAbsent) => {
+    const have = new Set([...list.values()].map((s) => s.day));
+    const out = [];
+    for (let d = from; d <= lastDay; d = addDays(d, 1)) {
+      if (have.has(d)) continue;
+      if (skipAbsent && absentDays.has(d) && Date.now() - absentDays.get(d) < ABSENT_TTL) continue;
+      out.push(d);
+    }
+    return out;
+  };
+  // Consecutive missing days -> one range each (not first→last of the period).
+  const runs = (days) => {
+    const out = [];
+    days.forEach((d) => { const last = out[out.length - 1]; if (last && addDays(last[1], 1) === d) last[1] = d; else out.push([d, d]); });
+    return out;
+  };
+  for (const read of STATEMENT_LIST_READS) {
+    const miss = missingDays(true);
+    if (!miss.length) break;
+    const rows = [];
+    for (const [a, b] of runs(miss)) rows.push(...await chunkedQuery(read.fields, addDays(a, -1), addDays(b, 1), { offset: read.offset }));
+    for (const r of rows) {
+      const id = String(r.statement_id || '');
+      const t = new Date(r.statement_statement_datetime);
+      if (!id || isNaN(t)) continue;
+      const s = { day: t.toISOString().slice(0, 10), net: num(r.statement_net_sales_amount) };
+      add(id, s);
+      if (s.day < addDays(today, -3)) knownStatements.set(id, s);
+    }
   }
-  return list;
+  while (knownStatements.size > 2000) knownStatements.delete(knownStatements.keys().next().value);
+  const stillMissing = missingDays(false);
+  stillMissing.forEach((d) => { if (!absentDays.has(d) || Date.now() - absentDays.get(d) >= ABSENT_TTL) absentDays.set(d, Date.now()); });
+  while (absentDays.size > 2000) absentDays.delete(absentDays.keys().next().value);
+  return { list, missingDays: stillMissing };
 }
 
 // Net sales by ORDER DATE (2026-11-04, Tomer: "the TikTok Shop net sales
-// should pull from net sales per order date"): every finance transaction of
-// the orders PLACED in the period, whenever it was settled — net sales
-// (revenue) = product subtotal − seller discounts − refunds + refunded seller
-// discounts, i.e. each statement's "Net sales" split back to its orders.
-// Settled transactions: statements from the period start to 90 days after its
-// end (or today). Orders not settled yet: TikTok's estimated revenue
-// (unsettled transactions). De-duplicated by transaction id only — a refund
-// made after an order was paid out is a separate, still-unsettled transaction
-// of the same order and is counted too. Order day = TikTok's fixed GMT-8 day
-// (Seller Center), like the Orders tile.
+// should pull from net sales per order date"; 5 Nov: settled + not settled
+// yet, confirmed): every finance transaction of the orders PLACED in the
+// period, whenever it was settled — net sales (revenue) = product subtotal −
+// seller discounts − refunds + refunded seller discounts, i.e. each
+// statement's "Net sales" split back to its orders (Seller Center → Finance →
+// Statements → View by orders). Settled transactions: statements from the
+// period start to 90 days after its end (or today). Orders not settled yet:
+// TikTok's estimated revenue (unsettled transactions). De-duplicated by
+// transaction id — a transaction keeps its id when it settles, and a stale
+// unsettled copy (353 of them on 5 Nov) is dropped in favour of the settled
+// one; a refund made after an order was paid out is a separate transaction
+// and is counted. Order day = TikTok's fixed GMT-8 day (Seller Center).
 //
-// Every statement is CHECKED (2026-11-04, after the first live run came back
-// $24K short for October): its transactions must add up to the statement's
-// own Net sales. Windsor sometimes hands back a window with part of a
-// statement missing; any statement that doesn't add up is read again on its
-// own (filtered by statement id, so it's a fresh Windsor pull), up to twice.
-// Statements still off are reported (net_sales_unchecked_*).
-// Oct 2026 checked 4 Nov: 6,048 orders, $319,292.11 settled + $32,742.04 not
-// yet settled = $352,034.15.
+// Every statement is CHECKED: its transactions must add up to the
+// statement's own Net sales. One that doesn't is read again on other windows
+// (and with a statement-id filter) and the rows are merged, up to 3 times.
+// Rows are only ever added (by transaction id), so a re-read can't lose data.
+// Oct 2026 checked 5 Nov against a full read: $340,703.42 settled + $11,204.93
+// not settled yet = $351,908.35, 6,047 orders.
 const SETTLED_NET_FIELDS = ['statement_id', 'statement_transaction_id', 'statement_transaction_order_id', 'statement_transaction_order_create_datetime', 'statement_transaction_type', 'statement_transaction_revenue_amount'];
 const UNSETTLED_NET_FIELDS = ['unsettled_transaction_id', 'unsettled_transaction_order_id', 'unsettled_transaction_order_create_datetime', 'unsettled_transaction_type', 'unsettled_transaction_est_revenue_amount'];
-// Statements that added up, kept in memory once they're more than 3 days old
-// (a settled statement doesn't change): statement id -> transaction rows.
+// Statements that added up, kept once they're more than 3 days old (a settled
+// statement doesn't change): statement id -> Map(tx id -> row).
 const checkedStatements = new Map();
 const slimTx = (r) => [String(r.statement_transaction_id || ''), String(r.statement_transaction_order_id || ''), r.statement_transaction_order_create_datetime, num(r.statement_transaction_revenue_amount), String(r.statement_transaction_type || 'ORDER')];
 async function orderDateNetSales(start, end, statements) {
@@ -916,55 +982,72 @@ async function orderDateNetSales(start, end, statements) {
   const settledTo = addDays(end, 90) < today ? addDays(end, 90) : today;
   const wanted = [...statements.entries()].filter(([, s]) => s.day >= start && s.day <= settledTo);
   const byStatement = new Map(); // statement id -> Map(tx id -> row)
-  wanted.forEach(([id]) => { if (checkedStatements.has(id)) byStatement.set(id, checkedStatements.get(id)); });
-  const addRows = (rows) => rows.forEach((r) => {
+  wanted.forEach(([id]) => { if (checkedStatements.has(id)) byStatement.set(id, new Map(checkedStatements.get(id))); });
+  const addRows = (rows, onlyId) => rows.forEach((r) => {
     const sid = String(r.statement_id || '');
-    if (!sid || (checkedStatements.has(sid) && byStatement.get(sid) === checkedStatements.get(sid))) return;
+    if (!sid || (onlyId && sid !== onlyId)) return;
     if (!byStatement.has(sid)) byStatement.set(sid, new Map());
     const tx = slimTx(r);
-    byStatement.get(sid).set(tx[0] || `${tx[1]}|${tx[3]}|${byStatement.get(sid).size}`, tx);
+    if (tx[0]) byStatement.get(sid).set(tx[0], tx);
   });
-  const missingDays = wanted.filter(([id]) => !checkedStatements.has(id)).map(([, s]) => s.day).sort();
-  if (missingDays.length) addRows(await chunkedQuery(SETTLED_NET_FIELDS, addDays(missingDays[0], -1), addDays(missingDays[missingDays.length - 1], 1)));
-  const sumOf = (m) => { let s = 0; m.forEach((tx) => { s += tx[3]; }); return s; };
-  const off = (id) => Math.abs(sumOf(byStatement.get(id) || new Map()) - statements.get(id).net) > 0.05;
-  // Re-read the statements that don't add up, each on its own.
-  for (let attempt = 0; attempt < 2; attempt++) {
+  const toRead = wanted.filter(([id]) => !checkedStatements.has(id)).map(([, s]) => s.day).sort();
+  if (toRead.length) addRows(await chunkedQuery(SETTLED_NET_FIELDS, addDays(toRead[0], -1), addDays(toRead[toRead.length - 1], 1)));
+  const sumOf = (m) => { let s = 0; (m || new Map()).forEach((tx) => { s += tx[3]; }); return s; };
+  const off = (id) => Math.abs(sumOf(byStatement.get(id)) - statements.get(id).net) > 0.05;
+  // Re-read the statements that don't add up, each on its own, on different
+  // windows; rows are merged in.
+  const rereads = [
+    (d, id) => windsorRead(SETTLED_NET_FIELDS, clampToday(addDays(d, -2)), clampToday(addDays(d, 1)), [['statement_id', 'eq', id]]),
+    (d) => windsorRead(SETTLED_NET_FIELDS, clampToday(addDays(d, -1)), clampToday(d)),
+    (d) => windsorRead(SETTLED_NET_FIELDS, clampToday(d), clampToday(addDays(d, 1))),
+  ];
+  for (const reread of rereads) {
     const bad = wanted.map(([id]) => id).filter(off);
     if (!bad.length) break;
     for (let i = 0; i < bad.length; i += 4) {
       await Promise.all(bad.slice(i, i + 4).map(async (id) => {
-        const d = statements.get(id).day;
-        const rows = await windsorQuery(SETTLED_NET_FIELDS, addDays(d, -2 - attempt), addDays(d, 1 + attempt), [['statement_id', 'eq', id]]);
-        const fresh = new Map();
-        rows.forEach((r) => { if (String(r.statement_id || '') === id) { const tx = slimTx(r); fresh.set(tx[0], tx); } });
-        const merged = new Map([...(byStatement.get(id) || new Map()), ...fresh]);
-        const target = statements.get(id).net;
-        // Keep whichever read is closest to the statement's Net sales.
-        const best = [fresh, merged, byStatement.get(id) || new Map()].sort((x, y) => Math.abs(sumOf(x) - target) - Math.abs(sumOf(y) - target))[0];
-        byStatement.set(id, best);
+        try { addRows(await reread(statements.get(id).day, id), id); } catch (e) { /* next re-read */ }
       }));
     }
   }
+  // A statement still off may only be mislabelled (its rows filed under
+  // another statement id by Windsor): check the total too.
+  const seenTx = new Set();
+  let rowsTotal = 0;
+  byStatement.forEach((m, sid) => {
+    const s = statements.get(sid);
+    if (s && (s.day < start || s.day > settledTo)) return;
+    m.forEach((tx, txId) => { if (!seenTx.has(txId)) { seenTx.add(txId); rowsTotal += tx[3]; } });
+  });
+  const netTotal = wanted.reduce((a, [, s]) => a + s.net, 0);
+  const totalOk = Math.abs(rowsTotal - netTotal) <= 0.05 * Math.max(1, wanted.length);
   let uncheckedN = 0, uncheckedGap = 0;
+  const unchecked = [];
   wanted.forEach(([id, s]) => {
-    if (off(id)) { uncheckedN++; uncheckedGap += s.net - sumOf(byStatement.get(id) || new Map()); return; }
+    if (off(id)) { uncheckedN++; uncheckedGap += s.net - sumOf(byStatement.get(id)); unchecked.push(s.day); return; }
     if (s.day < addDays(today, -3)) checkedStatements.set(id, byStatement.get(id));
   });
-  while (checkedStatements.size > 400) checkedStatements.delete(checkedStatements.keys().next().value);
+  while (checkedStatements.size > 1500) checkedStatements.delete(checkedStatements.keys().next().value);
   // Orders settle within ~90 days, so an older period has nothing unsettled.
+  // Read on two window grids and merged by id (Windsor drops rows).
   let unsettledRows = [];
   if (end > addDays(today, -120)) {
     const uFrom = addDays(start, -7) > addDays(today, -120) ? addDays(start, -7) : addDays(today, -120);
-    unsettledRows = (await chunkedQuery(UNSETTLED_NET_FIELDS, uFrom, today))
+    const [u1, u2] = await Promise.all([
+      chunkedQuery(UNSETTLED_NET_FIELDS, uFrom, today),
+      chunkedQuery(UNSETTLED_NET_FIELDS, uFrom, today, { offset: 3 }),
+    ]);
+    unsettledRows = [...u1, ...u2]
       .map((r) => [String(r.unsettled_transaction_id || ''), String(r.unsettled_transaction_order_id || ''), r.unsettled_transaction_order_create_datetime, num(r.unsettled_transaction_est_revenue_amount), String(r.unsettled_transaction_type || 'ORDER')]);
   }
   const seen = new Set();
   const orders = new Set();
   let settled = 0, unsettled = 0;
   const take = (rows, isSettled) => {
-    for (const [id, orderId, created, rev, type] of rows) {
-      if (type !== 'ORDER') continue;
+    // Every transaction type counts (the statement's Net sales is the sum of
+    // all of them — the check above uses the same rows); ones without an
+    // order date (e.g. a chargeback) have no order day and drop out here.
+    for (const [id, orderId, created, rev] of rows) {
       if (id) { if (seen.has(id)) continue; seen.add(id); }
       const d = orderDayPT(created);
       if (!d || d < start || d >= end) continue;
@@ -979,29 +1062,45 @@ async function orderDateNetSales(start, end, statements) {
     net_sales_settled: settled,
     net_sales_unsettled: unsettled,
     net_sales_orders: orders.size,
-    net_sales_statements_checked: wanted.length - uncheckedN,
-    net_sales_unchecked_statements: uncheckedN,
-    net_sales_unchecked_gap: uncheckedGap,
+    net_sales_statements_checked: wanted.length - (totalOk ? 0 : uncheckedN),
+    net_sales_unchecked_statements: totalOk ? 0 : uncheckedN,
+    net_sales_unchecked_gap: totalOk ? 0 : uncheckedGap,
+    net_sales_unchecked_days: totalOk ? [] : unchecked,
     net_sales_basis: 'order date (GMT-8)',
   };
 }
 
-async function fetchPayouts(start, end) {
-  if (!process.env.WINDSOR_API_KEY) return null;
-  if (!isoOk(start) || !isoOk(end) || end <= start) return null;
+const payoutInFlight = new Map();
+function fetchPayouts(start, end) {
+  if (!process.env.WINDSOR_API_KEY) return Promise.resolve(null);
+  if (!isoOk(start) || !isoOk(end) || end <= start) return Promise.resolve(null);
   const key = `${start}|${end}`;
-  const settled = end < addDays(todayISO(), -3);
   const hit = payoutCache.get(key);
-  if (hit && Date.now() - hit.at < (settled ? 6 * 3600000 : 15 * 60000)) return hit.value;
+  if (hit && Date.now() - hit.at < hit.ttl) return Promise.resolve(hit.value);
+  // The dashboard asks for the same range from several views at once — share
+  // one pull (code check 2026-11-05).
+  if (payoutInFlight.has(key)) return payoutInFlight.get(key);
+  const p = pullPayouts(start, end).finally(() => payoutInFlight.delete(key));
+  payoutInFlight.set(key, p);
+  return p;
+}
+async function pullPayouts(start, end) {
+  const key = `${start}|${end}`;
   const today = todayISO();
+  const settled = end < addDays(today, -3);
   const settledTo = addDays(end, 90) < today ? addDays(end, 90) : today;
   // Statements from the period start to the end of the settlement window
   // (order-date net sales) — also gives the statements dated in the period.
-  const [rows, statements] = await Promise.all([
+  // Payouts and net sales fail separately: a payments error only blanks
+  // "paid out" (payout_error); a net-sales error fails the request (the tile
+  // then falls back and retries).
+  const [payRes, st] = await Promise.all([
     chunkedQuery(['date', 'payment_id', 'payment_settlement_amount_value', 'payment_amount_value', 'payment_paid_datetime', 'payment_status'],
-      addDays(start, -5), addDays(end, 5)),
+      addDays(start, -5), addDays(end, 5)).then((r) => ({ rows: r }), (e) => ({ rows: [], error: e.message })),
     statementList(start, settledTo),
   ]);
+  const rows = payRes.rows;
+  const statements = st.list;
   const byOrder = await orderDateNetSales(start, end, statements);
   // Statement-date Net sales (the tile's previous basis), kept for reference.
   let stNet = 0, stCount = 0;
@@ -1023,8 +1122,10 @@ async function fetchPayouts(start, end) {
     if (!first || day < first) first = day;
     if (!last || day > last) last = day;
   }
-  const value = { start, end, ...byOrder, statement_net_sales: stNet, statements: stCount, payout, amount_before_reserve: gross, payouts: count, first_paid: first, last_paid: last, source: 'TikTok Shop statements and payments (Windsor)' };
-  payoutCache.set(key, { at: Date.now(), value });
+  const value = { start, end, ...byOrder, statement_net_sales: stNet, statements: stCount, statement_days_missing: st.missingDays, payout: payRes.error ? null : payout, payout_error: payRes.error || null, amount_before_reserve: payRes.error ? null : gross, payouts: count, first_paid: first, last_paid: last, source: 'TikTok Shop statements and payments (Windsor)' };
+  // Anything incomplete is kept 5 minutes only, so the next view tries again.
+  const partial = payRes.error || byOrder.net_sales_unchecked_statements > 0 || st.missingDays.some((d) => d < addDays(today, -1));
+  payoutCache.set(key, { at: Date.now(), ttl: partial ? 5 * 60000 : (settled ? 6 * 3600000 : 15 * 60000), value });
   if (payoutCache.size > 200) payoutCache.delete(payoutCache.keys().next().value);
   return value;
 }
