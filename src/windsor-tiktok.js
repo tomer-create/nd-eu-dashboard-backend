@@ -39,6 +39,7 @@
 // is older than 3 hours (stale-while-revalidate).
 
 const { getPool } = require('./yotpo');
+const tiktokApi = require('./tiktok-api');
 
 const WINDSOR_URL = 'https://connectors.windsor.ai/tiktok_shop';
 const WINDSOR_ACCOUNT = 'USLCMMEW2K';
@@ -286,8 +287,8 @@ async function pullAffiliateGmv(start, end) {
   // readSettledTransactions below) — the old one-month reads silently lost
   // whole statements (Oct 2026: the Oct 1, 14 and 21 statements, about 7% of
   // the month's settled orders, so affiliate GMV and commission ran low).
-  const st = await statementList(start, settledTo);
-  const settledRead = await readSettledTransactions(SETTLED_FIELDS_CHECKED, start, settledTo, st.list);
+  const settledRead = await settledSource(SETTLED_FIELDS_CHECKED, start, settledTo);
+  const st = { missingDays: settledRead.missingDays };
   const settledParts = settledRead.rows;
   const unsettled = await readUnsettled(UNSETTLED_FIELDS, addDays(start, -7), today);
   // De-duplicate by transaction id — the same transaction can come back
@@ -360,6 +361,7 @@ async function pullAffiliateGmv(start, end) {
     creator_tz: CREATOR_TZ,
     statements_unchecked: settledRead.unchecked_days.length,
     statement_days_missing: st.missingDays,
+    settled_source: settledRead.source,
   };
 }
 
@@ -1032,6 +1034,25 @@ async function readSettledTransactions(fields, from, to, statements) {
   return { rows, statements_checked: wanted.length - unchecked.length, unchecked_days: unchecked.sort(), unchecked_gap: gap };
 }
 
+// Settled transactions of the statements dated from..to: from TikTok's own
+// Finance API when it's connected with the Finance scope (exact — what Seller
+// Center shows), otherwise through Windsor with the checks above. 2026-11-05.
+async function settledSource(fields, from, to) {
+  const fin = await tiktokApi.financeStatus().catch((err) => ({ ok: false, reason: 'error', message: err.message }));
+  if (fin.ok) {
+    try {
+      const r = await tiktokApi.getFinanceSettled(from, minDay(to, todayISO()));
+      return { source: 'tiktok_api', finance_api: fin.reason, list: r.statements, missingDays: [], rows: r.rows, statements_checked: r.checked, unchecked_days: r.unchecked_days, unchecked_gap: r.gap };
+    } catch (err) {
+      console.error('windsor-tiktok: TikTok Finance API failed, using Windsor:', err.message);
+      fin.reason = 'error';
+    }
+  }
+  const st = await statementList(from, to);
+  const sr = await readSettledTransactions(fields, from, to, st.list);
+  return { source: 'windsor', finance_api: fin.reason, list: st.list, missingDays: st.missingDays, ...sr };
+}
+
 // Unsettled transactions (orders TikTok hasn't settled yet), read with and
 // without select_accounts and merged by id.
 async function readUnsettled(fields, from, to) {
@@ -1058,10 +1079,8 @@ async function readUnsettled(fields, from, to) {
 // $340,703.42 settled + $11,204.93 not settled yet = $351,908.35.
 const SETTLED_NET_FIELDS = ['statement_id', 'statement_transaction_id', 'statement_transaction_order_id', 'statement_transaction_order_create_datetime', 'statement_transaction_type', 'statement_transaction_revenue_amount'];
 const UNSETTLED_NET_FIELDS = ['unsettled_transaction_id', 'unsettled_transaction_order_id', 'unsettled_transaction_order_create_datetime', 'unsettled_transaction_type', 'unsettled_transaction_est_revenue_amount'];
-async function orderDateNetSales(start, end, statements) {
+async function orderDateNetSales(start, end, settledRead) {
   const today = todayISO();
-  const settledTo = minDay(addDays(end, 90), today);
-  const settledRead = await readSettledTransactions(SETTLED_NET_FIELDS, start, settledTo, statements);
   // Orders settle within ~90 days, so an older period has nothing unsettled.
   const unsettledRows = end > addDays(today, -120)
     ? await readUnsettled(UNSETTLED_NET_FIELDS, addDays(start, -7) > addDays(today, -120) ? addDays(start, -7) : addDays(today, -120), today)
@@ -1088,6 +1107,8 @@ async function orderDateNetSales(start, end, statements) {
     net_sales_unchecked_gap: settledRead.unchecked_gap,
     net_sales_unchecked_days: settledRead.unchecked_days,
     net_sales_basis: 'order date (GMT-8)',
+    net_sales_source: settledRead.source,
+    finance_api: settledRead.finance_api,
   };
 }
 
@@ -1120,11 +1141,11 @@ async function pullPayouts(start, end) {
       chunkedQuery(PAYMENT_FIELDS, addDays(start, -5), addDays(end, 5), { account: true }),
       chunkedQuery(PAYMENT_FIELDS, addDays(start, -5), addDays(end, 5), { account: false, offset: 3 }),
     ]).then(([a, b]) => ({ rows: [...a, ...b] }), (e) => ({ rows: [], error: e.message })),
-    statementList(start, settledTo),
+    settledSource(SETTLED_NET_FIELDS, start, settledTo),
   ]);
   const rows = payRes.rows;
   const statements = st.list;
-  const byOrder = await orderDateNetSales(start, end, statements);
+  const byOrder = await orderDateNetSales(start, end, st);
   // Statement-date Net sales (the tile's previous basis), kept for reference.
   let stNet = 0, stCount = 0;
   statements.forEach((s) => { if (s.day >= start && s.day < end) { stNet += s.net; stCount++; } });
