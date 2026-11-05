@@ -140,6 +140,11 @@ function shiftDateRange(startISO, endISO, { years = 0, months = 0 } = {}) {
     return new Date(Date.UTC(ty, tm, Math.min(d, last)));
   };
   const fmt = (d) => d.toISOString().slice(0, 10);
+  // An end on the 1st (a whole month / quarter) shifts like the start, so a
+  // closed month compares with the WHOLE prior month — the last-day + 1 rule
+  // below made Feb's MoM stop at Jan 29 and Jun's at May 30 (2026-11-05 code
+  // check). A month in progress (end mid-month) keeps the same-days rule.
+  if (endISO.slice(8) === '01') return { start: fmt(shiftDay(startISO)), end: fmt(shiftDay(endISO)) };
   const lastIncl = new Date(Date.parse(endISO + 'T00:00:00Z') - 86400000).toISOString().slice(0, 10);
   const end = shiftDay(lastIncl);
   end.setUTCDate(end.getUTCDate() + 1);
@@ -777,7 +782,16 @@ async function buildDataResponse({ site, start, end, compare }) {
   // code review; see src/month-cache.js).
   const partial = [];
   if (!result.channels) partial.push('channels');
-  if (!pnlSheetOtherCosts) partial.push('pnl_sheet');
+  // The P&L sheet only has 2026 columns (src/googlesheets.js reads "Mon-26"),
+  // so other years have nothing to wait for — flagging them re-pulled every
+  // 2025 month once a day, forever (2026-11-05 code check).
+  if (!pnlSheetOtherCosts && start.slice(0, 4) === '2026') partial.push('pnl_sheet');
+  // 2026-11-05 code check: these outages used to be stored as complete —
+  // Triple Whale down (channels then came from the P&L sheet alone), the
+  // TikTok Shop block missing, or the voided orders (Discounts total) missing.
+  if (process.env.TRIPLEWHALE_API_KEY && channelPerformance === null) partial.push('triple_whale');
+  if (site === 'com' && process.env.TRIPLEWHALE_API_KEY && !tiktokShop) partial.push('tiktok_shop');
+  if (voidedOrders === null) partial.push('voided_orders');
   if (partial.length) result.partial_sources = partial;
   const slow = Object.entries(timing.parts).sort((a, b) => b[1] - a[1]).slice(0, 8).map(([k, ms]) => `${k} ${(ms / 1000).toFixed(1)}s`).join(', ');
   console.log(`sync timing site=${site} ${start}..${end}: total ${((Date.now() - timing.t0) / 1000).toFixed(1)}s — slowest: ${slow}`);
@@ -939,7 +953,7 @@ function getAttentiveSplitCached(site, start, end) {
     console.error(`attentive split (site=${site} ${start}..${end}) failed:`, err.message);
     return null;
   });
-  const ended = new Date(`${end}T00:00:00Z`).getTime() <= Date.now();
+  const ended = new Date(`${end}T00:00:00Z`).getTime() + 86400000 <= Date.now();
   attentiveSplitCache.set(key, { promise, expires: Date.now() + (ended ? 6 * 3600 : 10 * 60) * 1000 });
   promise.then((v) => { if (!v) attentiveSplitCache.delete(key); });
   if (attentiveSplitCache.size > 500) attentiveSplitCache.delete(attentiveSplitCache.keys().next().value);
@@ -1152,7 +1166,9 @@ app.get('/api/channels-change', async (req, res) => {
     const attentiveOut = attentive && { ...attSplit(attentive), revenue_keys: attentiveRevenueKeys(site, attentive), yoy: attSplit(attentiveYoy), prev: attSplit(attentivePrev) };
     const payload = { site, start, end, has_yoy: !!yoy, has_prev: !!prev, channels, collabs, attentive: attentiveOut };
     const ended = new Date(`${end}T00:00:00Z`).getTime() + 86400000 <= Date.now();
-    channelsChangeCache.set(key, { payload, expires: Date.now() + (ended ? 6 * 3600 : 15 * 60) * 1000 });
+    // A comparison that was asked for and failed isn't cached (2026-11-05).
+    const missing = (yoy_start && !yoy) || (prev_start && !prev);
+    if (!missing) channelsChangeCache.set(key, { payload, expires: Date.now() + (ended ? 6 * 3600 : 15 * 60) * 1000 });
     if (channelsChangeCache.size > 500) channelsChangeCache.delete(channelsChangeCache.keys().next().value);
     res.json(payload);
   } catch (err) {
@@ -1199,7 +1215,7 @@ app.get('/api/top-products', async (req, res) => {
     }));
     const payload = { site, start, end, source: 'shopify_analytics', total_gross: summary ? summary.gross_sales : null, products, has_yoy: !!yMap, has_prev: !!pMap };
     const ended = new Date(`${end}T00:00:00Z`).getTime() + 86400000 <= Date.now();
-    topProductsCache.set(key, { payload, expires: Date.now() + (ended ? 6 * 3600 : 15 * 60) * 1000 });
+    if (!((yoy_start && !yMap) || (prev_start && !pMap) || !summary)) topProductsCache.set(key, { payload, expires: Date.now() + (ended ? 6 * 3600 : 15 * 60) * 1000 });
     if (topProductsCache.size > 300) topProductsCache.delete(topProductsCache.keys().next().value);
     res.json(payload);
   } catch (err) {
@@ -1249,7 +1265,9 @@ app.get('/api/returns-change', async (req, res) => {
       if (!r.return_value) return;
       products[r.title] = [r.return_value, yoyMap ? (yoyMap.get(r.title) || 0) : null, prevMap ? (prevMap.get(r.title) || 0) : null];
     });
-    const ytdList = ytd || cur;
+    // 2026-11-05: a failed YTD pull leaves the YTD figures empty (it used to
+    // show the period's own ratio labelled YTD).
+    const ytdList = ytd_start ? (ytd || []) : cur;
     const ytdMap = new Map(ytdList.map((r) => [r.title, r]));
     const returnsTotal = cur.reduce((t, r) => t + (r.return_value || 0), 0);
     const top = cur.filter((r) => r.return_value > 0).sort((a, b) => b.return_value - a.return_value).slice(0, 25).map((r) => { // 25: room for samples the dashboard leaves out
@@ -1259,7 +1277,7 @@ app.get('/api/returns-change', async (req, res) => {
     });
     const payload = { site, start, end, has_yoy: !!yoy, has_prev: !!prev, products, top, returns_total: returnsTotal };
     const ended = new Date(`${end}T00:00:00Z`).getTime() + 86400000 <= Date.now();
-    returnsChangeCache.set(key, { payload, expires: Date.now() + (ended ? 6 * 3600 : 15 * 60) * 1000 });
+    if (!(ytd_start && !ytd)) returnsChangeCache.set(key, { payload, expires: Date.now() + (ended ? 6 * 3600 : 15 * 60) * 1000 });
     if (returnsChangeCache.size > 500) returnsChangeCache.delete(returnsChangeCache.keys().next().value);
     res.json(payload);
   } catch (err) {
