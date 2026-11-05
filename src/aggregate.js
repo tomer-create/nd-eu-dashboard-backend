@@ -788,7 +788,9 @@ function aggregate(orders, { tagLabels = DEFAULT_TAG_LABELS, discountTags = null
     // 15 (2026-11-04): split valued at retail (variant compare-at / price) +
     //                  order_value at order prices.
     // 16 (2026-11-04): orders_gross (Gross Sales of the whole orders).
-    discounts_version: orders.length === 0 ? 16 : (sawDiscountApps ? (byApp && sawSourceName ? 16 : byApp ? 5 : 3) : 1),
+    // 17 (2026-11-05): whole prior month for a closed month's MoM (was cut at
+    //                  the 29th/30th), more outages flagged as partial.
+    discounts_version: orders.length === 0 ? 17 : (sawDiscountApps ? (byApp && sawSourceName ? 17 : byApp ? 5 : 3) : 1),
     discounts_by_app: byApp,
   };
 }
