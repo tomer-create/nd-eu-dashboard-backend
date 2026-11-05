@@ -192,10 +192,21 @@ async function fetchProductGross(shopId, start, end, titles) {
     GROUP BY title`.trim(), start, end);
   return new Map(rows.map((r) => [r.title, num(r.gross_sales)]));
 }
-// Same arithmetic as server.js shiftDateRange().
+// Same arithmetic as server.js shiftDateRange() (2026-11-05: was
+// setUTCMonth, which rolls May 31 − 3 months over to Mar 3).
 function shiftMonths(range, months) {
-  const f = (iso) => { const d = new Date(iso + 'T00:00:00Z'); d.setUTCMonth(d.getUTCMonth() - months); return d.toISOString().slice(0, 10); };
-  return { start: f(range.start), end: f(range.end) };
+  const shiftDay = (iso) => {
+    const [y, m, d] = iso.split('-').map(Number);
+    const total = y * 12 + (m - 1) - months;
+    const ty = Math.floor(total / 12), tm = total - ty * 12;
+    const last = new Date(Date.UTC(ty, tm + 1, 0)).getUTCDate();
+    return new Date(Date.UTC(ty, tm, Math.min(d, last)));
+  };
+  const fmt = (d) => d.toISOString().slice(0, 10);
+  if (range.end.slice(8) === '01') return { start: fmt(shiftDay(range.start)), end: fmt(shiftDay(range.end)) };
+  const end = shiftDay(new Date(Date.parse(range.end + 'T00:00:00Z') - 86400000).toISOString().slice(0, 10));
+  end.setUTCDate(end.getUTCDate() + 1);
+  return { start: fmt(shiftDay(range.start)), end: fmt(end) };
 }
 
 async function fetchTikTokShop(site, start, end, { yoyRange, momRange } = {}) {
