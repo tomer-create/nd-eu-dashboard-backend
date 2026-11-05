@@ -570,15 +570,16 @@ async function getFinanceSettled(fromDay, toDay) {
   const statements = new Map();
   const rows = [];
   const unchecked = [];
+  const uncheckedList = [];
   let gap = 0;
   list.forEach((st) => {
     statements.set(st.id, { day: st.day, net: st.net });
     const r = rowsById.get(st.id) || [];
     rows.push(...r);
     const d = st.net - sum(r);
-    if (Math.abs(d) > 0.05) { unchecked.push(st.day); gap += d; }
+    if (Math.abs(d) > 0.05) { unchecked.push(st.day); uncheckedList.push({ id: st.id, day: st.day, gap: d }); gap += d; }
   });
-  return { statements, rows, checked: list.length - unchecked.length, unchecked_days: unchecked, gap };
+  return { statements, rows, checked: list.length - unchecked.length, unchecked_days: unchecked, gap, unchecked_list: uncheckedList };
 }
 
 module.exports = { configured, authorizeUrl, checkState, exchangeCode, getCreatorGmv, diagRows, status, financeStatus, getFinanceSettled, _sign: sign, _ptMidnight: ptMidnight, _financeRow: financeRow };
