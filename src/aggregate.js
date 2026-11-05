@@ -437,7 +437,15 @@ function discountSplit(orders, owners, grossSales, discountTags) {
         const v = amt(al.allocatedAmountSet);
         if (!v) continue;
         const a = byIdx.get(al.discountApplication && al.discountApplication.index);
-        allocs.push([a ? splitItemOf(a, isTikTok, owners, shopCur, ctx) : (isTikTok ? 'tiktok_seller' : 'offers'), v]);
+        let item = a ? splitItemOf(a, isTikTok, owners, shopCur, ctx) : (isTikTok ? 'tiktok_seller' : 'offers');
+        // Samples by product (2026-11-05, Tomer: "for the samples on the
+        // discount breakdown show all the samples breakdown by item"): each
+        // free-sample discount goes to the product it was taken off.
+        if (item === 'free_sample') {
+          item = 'sample:' + (String(e.node.title || '').trim() || 'Unnamed product');
+          if (!itemAcc.has(item)) { bucketOf.set(item, 'samples'); itemAcc.set(item, { value: 0, orderValue: 0, orders: 0, discGross: 0 }); }
+        }
+        allocs.push([item, v]);
       }
       const retail = Math.max(orig, retailUnit(e.node) * (Number(e.node.quantity) || 0));
       const uplift = allocs.length ? retail - orig : 0;
@@ -481,7 +489,10 @@ function discountSplit(orders, owners, grossSales, discountTags) {
       discount_value: bucketAcc.get(b.key).value, order_value: bucketAcc.get(b.key).orderValue, orders: bucketAcc.get(b.key).orders, discounted_gross: bucketAcc.get(b.key).discGross, orders_gross: bucketAcc.get(b.key).ordersGross || 0,
       items: (b.key === 'sales'
         ? saleKeys.map((k) => [k, k === 'sale:other' ? SALE_OTHER_LABEL : saleLabel.get(k.slice(5)) || k.slice(5)])
-        : b.items).map(([k, label]) => ({ key: k, label, discount_value: itemAcc.get(k).value, order_value: itemAcc.get(k).orderValue, orders: itemAcc.get(k).orders, discounted_gross: itemAcc.get(k).discGross, orders_gross: itemAcc.get(k).ordersGross || 0 })),
+        : b.key === 'samples'
+          // One item per product, biggest first (2026-11-05).
+          ? [...itemAcc.keys()].filter((k) => k.startsWith('sample:')).sort((x, y) => itemAcc.get(y).value - itemAcc.get(x).value).map((k) => [k, k.slice(7)])
+          : b.items).map(([k, label]) => ({ key: k, label, discount_value: itemAcc.get(k).value, order_value: itemAcc.get(k).orderValue, orders: itemAcc.get(k).orders, discounted_gross: itemAcc.get(k).discGross, orders_gross: itemAcc.get(k).ordersGross || 0 })),
     })),
   };
 }
@@ -790,7 +801,8 @@ function aggregate(orders, { tagLabels = DEFAULT_TAG_LABELS, discountTags = null
     // 16 (2026-11-04): orders_gross (Gross Sales of the whole orders).
     // 17 (2026-11-05): whole prior month for a closed month's MoM (was cut at
     //                  the 29th/30th), more outages flagged as partial.
-    discounts_version: orders.length === 0 ? 17 : (sawDiscountApps ? (byApp && sawSourceName ? 17 : byApp ? 5 : 3) : 1),
+    // 18 (2026-11-05): Samples broken down by product.
+    discounts_version: orders.length === 0 ? 18 : (sawDiscountApps ? (byApp && sawSourceName ? 18 : byApp ? 5 : 3) : 1),
     discounts_by_app: byApp,
   };
 }
