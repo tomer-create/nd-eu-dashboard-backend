@@ -1268,7 +1268,97 @@ async function fetchCollabsCodeSales(site, startISO, endISOExclusive) {
   return out;
 }
 
+// ---- Returns vs. refunds by product (2026-11-11) ----------------------------
+// Tomer: "on the Top 15 Return Products, separate between refunds to returns"
+// — he chose "By refund note": a refund whose note mentions a return (rtn,
+// RMA, swap, return(ed), exchange — or החזרה on ND.IL) is a RETURN; every
+// other refund (damaged, missing, lost, cancelled, out of stock …) and any
+// reversal with no refund behind it is a REFUND. The money and units are
+// Shopify's own sales reversals per refund and product (ShopifyQL sales,
+// GROUP BY refund_id, product_title; rows without a reversal drop out) — the same
+// figures the old Top 15 Return Products table showed, so returns + refunds
+// add up to it. Notes come from the Refund objects (Admin API, cached).
+// Checked on ND.EU Oct 2026: 630 rows, −€18,096.69 = Shopify's total.
+const RETURN_NOTE_RE = /\b(rtn|rma|swap|returns?|returned|exchanges?)\b|החזרה/i;
+const refundNoteCache = new Map(); // `${site}|${id}` -> note ('' when none)
+async function refundNotes(site, ids) {
+  const todo = [...new Set(ids)].filter((id) => !refundNoteCache.has(`${site}|${id}`));
+  for (let i = 0; i < todo.length; i += 100) {
+    const batch = todo.slice(i, i + 100);
+    const data = await graphql(site, `query RefundNotes($ids: [ID!]!) { nodes(ids: $ids) { ... on Refund { id note } } }`,
+      { ids: batch.map((id) => `gid://shopify/Refund/${id}`) });
+    const got = new Set();
+    (data.nodes || []).forEach((n) => {
+      if (!n || !n.id) return;
+      const id = String(n.id).split('/').pop();
+      got.add(id);
+      refundNoteCache.set(`${site}|${id}`, n.note || '');
+    });
+    batch.forEach((id) => { if (!got.has(id)) refundNoteCache.set(`${site}|${id}`, ''); });
+  }
+  while (refundNoteCache.size > 200000) refundNoteCache.delete(refundNoteCache.keys().next().value);
+  const out = new Map();
+  ids.forEach((id) => out.set(id, refundNoteCache.get(`${site}|${id}`) || ''));
+  return out;
+}
+const isReturnNote = (note) => RETURN_NOTE_RE.test(String(note || ''));
+// One date range: { returns: {title: {value, units}}, refunds: {...},
+// totals: { returns, refunds } } — values positive, in the shop's currency.
+async function fetchRefundSplitByProduct(site, startISO, endISOExclusive) {
+  const untilDate = new Date(endISOExclusive + 'T00:00:00Z');
+  untilDate.setUTCDate(untilDate.getUTCDate() - 1);
+  const untilISO = untilDate.toISOString().slice(0, 10);
+  const LIMIT = 10000;
+  const q = `FROM sales SHOW sales_reversals, quantity_returned GROUP BY refund_id, product_title SINCE ${startISO} UNTIL ${untilISO} LIMIT ${LIMIT}`;
+  const data = await graphql(site, `query RefundSplit($q: String!) { shopifyqlQuery(query: $q) { parseErrors tableData { columns { name } rows } } }`, { q });
+  const result = data.shopifyqlQuery;
+  if (result.parseErrors && result.parseErrors.length) throw new Error(`ShopifyQL parse error for "${site}" (query: ${q}): ${result.parseErrors.join('; ')}`);
+  const cols = (result.tableData.columns || []).map((c) => c.name);
+  const rows = (result.tableData.rows || []).map((row) => {
+    const values = Array.isArray(row) ? row : cols.map((n) => row[n]);
+    const o = {}; cols.forEach((n, i) => { o[n] = values[i]; }); return o;
+  });
+  if (rows.length >= LIMIT) throw new Error(`Too many refund rows for ${site} ${startISO}..${untilISO} — split the range`);
+  const ids = rows.map((r) => String(r.refund_id || '')).filter(Boolean);
+  const notes = await refundNotes(site, ids);
+  const out = { returns: {}, refunds: {}, totals: { returns: 0, refunds: 0 } };
+  rows.forEach((r) => {
+    const title = String(r.product_title || '').trim();
+    const value = -(Number(r.sales_reversals) || 0);
+    const units = Math.abs(Number(r.quantity_returned) || 0);
+    if (!title) return; // shipping / order-level adjustments aren't products
+    if (!value && !units) return;
+    const id = String(r.refund_id || '');
+    const kind = id && isReturnNote(notes.get(id)) ? 'returns' : 'refunds';
+    const a = out[kind][title] || (out[kind][title] = { value: 0, units: 0 });
+    a.value += value; a.units += units;
+    out.totals[kind] += value;
+  });
+  return out;
+}
+
+// Sessions and completed checkouts by visitor country (2026-11-11, Tomer:
+// "to the sales by country section add conversion rate column"). Shopify's
+// own conversion rate = sessions that completed checkout ÷ sessions.
+async function fetchCountrySessions(site, startISO, endISOExclusive) {
+  const untilDate = new Date(endISOExclusive + 'T00:00:00Z');
+  untilDate.setUTCDate(untilDate.getUTCDate() - 1);
+  const untilISO = untilDate.toISOString().slice(0, 10);
+  const q = `FROM sessions SHOW sessions, sessions_that_completed_checkout GROUP BY session_country SINCE ${startISO} UNTIL ${untilISO} LIMIT 500`;
+  const data = await graphql(site, `query CountrySessions($q: String!) { shopifyqlQuery(query: $q) { parseErrors tableData { columns { name } rows } } }`, { q });
+  const result = data.shopifyqlQuery;
+  if (result.parseErrors && result.parseErrors.length) throw new Error(`ShopifyQL parse error for "${site}" (query: ${q}): ${result.parseErrors.join('; ')}`);
+  const cols = (result.tableData.columns || []).map((c) => c.name);
+  return (result.tableData.rows || []).map((row) => {
+    const values = Array.isArray(row) ? row : cols.map((n) => row[n]);
+    const o = {}; cols.forEach((n, i) => { o[n] = values[i]; });
+    return { country: String(o.session_country || '').trim(), sessions: Number(o.sessions) || 0, completed: Number(o.sessions_that_completed_checkout) || 0 };
+  }).filter((c) => c.country);
+}
+
 module.exports = {
+  fetchRefundSplitByProduct,
+  fetchCountrySessions,
   fetchVoidedOrders,
   fetchTopProductsAnalytics,
   getSiteConfig,
