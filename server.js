@@ -2,7 +2,7 @@ require('dotenv').config();
 const path = require('path');
 const express = require('express');
 const cors = require('cors');
-const { fetchOrders, fetchVoidedOrders, fetchOrdersLight, fetchOrdersForTierRevenue, fetchSalesReversals, fetchCostOfGoodsSold, fetchTopReturnsByProduct, fetchCountryBreakdown, fetchUsStateBreakdown, fetchSalesSummary, fetchCustomerAcquisition, fetchProductRetailPrices, fetchCollabsCodeSales, fetchTopProductsAnalytics, getAuthorizeUrl, exchangeCodeForToken } = require('./src/shopify');
+const { fetchRefundSplitByProduct, fetchCountrySessions, fetchOrders, fetchVoidedOrders, fetchOrdersLight, fetchOrdersForTierRevenue, fetchSalesReversals, fetchCostOfGoodsSold, fetchTopReturnsByProduct, fetchCountryBreakdown, fetchUsStateBreakdown, fetchSalesSummary, fetchCustomerAcquisition, fetchProductRetailPrices, fetchCollabsCodeSales, fetchTopProductsAnalytics, getAuthorizeUrl, exchangeCodeForToken } = require('./src/shopify');
 const { aggregate } = require('./src/aggregate');
 const { fetchDiscountTags } = require('./src/discount-tags');
 const { fetchChannelPerformance, fetchAttentiveSplit, attentiveRevenueKeys, ATTENTIVE_LABEL_KEYS } = require('./src/triplewhale');
@@ -1201,7 +1201,7 @@ app.get('/api/top-products', async (req, res) => {
       return null;
     }) : Promise.resolve(null));
     const [cur, summary, yoy, prev] = await Promise.all([
-      fetchTopProductsAnalytics(site, start, end, 15),
+      fetchTopProductsAnalytics(site, start, end, 250), // 250 (2026-11-11): Top 10 + the full list behind "+"
       fetchSalesSummary(site, start, end).catch(() => null),
       priorList(yoy_start, yoy_end),
       priorList(prev_start, prev_end),
@@ -1241,6 +1241,117 @@ const returnsChangeCache = new Map();
 // quarters (Tomer: "כן תתקן את זה"), which used to merge only the months that
 // had their own list (Aug–Oct). Optional ytd_start / ytd_end: the
 // year-to-date range for the YTD ratio when the period isn't already YTD.
+// GET /api/refund-split?site=com&start=&end=[&yoy_start=&yoy_end=][&prev_start=&prev_end=][&ytd_start=&ytd_end=]
+// Top 10 Return Products / Top 10 Refunded Products (2026-11-11, Tomer:
+// "separate between refunds to returns"; split "By refund note" — see
+// fetchRefundSplitByProduct in src/shopify.js). Every product with a return
+// (or a refund) in the period, with its gross sales, $ value, units, the
+// same figures for the YTD range (Return Ratio YTD) and the YoY / prior
+// period values. Each range is read month by month; a closed month is kept
+// 12 h, the month in progress 15 min.
+const refundSliceCache = new Map(); // site|start|end -> { at, ttl, promise }
+function refundSplitSlice(site, start, end) {
+  const key = [site, start, end].join('|');
+  const hit = refundSliceCache.get(key);
+  if (hit && Date.now() - hit.at < hit.ttl) return hit.promise;
+  const closed = new Date(`${end}T00:00:00Z`).getTime() + 86400000 <= Date.now();
+  const promise = fetchRefundSplitByProduct(site, start, end);
+  refundSliceCache.set(key, { at: Date.now(), ttl: closed ? 12 * 3600000 : 15 * 60000, promise });
+  promise.catch(() => refundSliceCache.delete(key));
+  if (refundSliceCache.size > 600) refundSliceCache.delete(refundSliceCache.keys().next().value);
+  return promise;
+}
+async function refundSplitRange(site, start, end) {
+  const slices = [];
+  let cur = start;
+  while (cur < end) {
+    const d = new Date(cur + 'T00:00:00Z');
+    const next = new Date(Date.UTC(d.getUTCFullYear(), d.getUTCMonth() + 1, 1)).toISOString().slice(0, 10);
+    slices.push([cur, next < end ? next : end]);
+    cur = next;
+  }
+  const parts = [];
+  for (let i = 0; i < slices.length; i += 3) {
+    parts.push(...await Promise.all(slices.slice(i, i + 3).map(([a, b]) => refundSplitSlice(site, a, b))));
+  }
+  const out = { returns: {}, refunds: {}, totals: { returns: 0, refunds: 0 } };
+  parts.forEach((p) => ['returns', 'refunds'].forEach((k) => {
+    out.totals[k] += p.totals[k];
+    Object.entries(p[k]).forEach(([t, v]) => { const a = out[k][t] || (out[k][t] = { value: 0, units: 0 }); a.value += v.value; a.units += v.units; });
+  }));
+  return out;
+}
+const refundSplitCache = new Map();
+app.get('/api/refund-split', async (req, res) => {
+  const { site, start, end, yoy_start, yoy_end, prev_start, prev_end, ytd_start, ytd_end } = req.query;
+  if (!['com', 'eu', 'il'].includes(site)) return res.status(400).json({ error: `Unknown or missing site "${site}"` });
+  const ok = (a, b) => US_STATES_DATE.test(a || '') && US_STATES_DATE.test(b || '') && a < b;
+  const opt = (a, b) => !(a || b) || ok(a, b);
+  if (!ok(start, end) || !opt(yoy_start, yoy_end) || !opt(prev_start, prev_end) || !opt(ytd_start, ytd_end)) return res.status(400).json({ error: 'Invalid date range' });
+  const key = [site, start, end, yoy_start, prev_start, ytd_start, ytd_end].join('|');
+  const hit = refundSplitCache.get(key);
+  if (hit && hit.expires > Date.now()) return res.json(hit.payload);
+  try {
+    const sameYtd = ytd_start === start && ytd_end === end;
+    const [cur, yoy, prev, ytd, gross, ytdGross] = await Promise.all([
+      refundSplitRange(site, start, end),
+      yoy_start ? refundSplitRange(site, yoy_start, yoy_end) : null,
+      prev_start ? refundSplitRange(site, prev_start, prev_end) : null,
+      ytd_start && !sameYtd ? refundSplitRange(site, ytd_start, ytd_end) : null,
+      fetchTopReturnsByProduct(site, start, end, 1000),
+      ytd_start && !sameYtd ? fetchTopReturnsByProduct(site, ytd_start, ytd_end, 1000) : null,
+    ]);
+    const ytdSplit = sameYtd ? cur : ytd;
+    const grossOf = new Map(gross.map((p) => [p.title, p.gross_sales]));
+    const ytdGrossOf = sameYtd ? grossOf : (ytdGross ? new Map(ytdGross.map((p) => [p.title, p.gross_sales])) : null);
+    const list = (kind) => Object.entries(cur[kind]).map(([title, v]) => ({
+      title, value: v.value, units: v.units,
+      gross_sales: grossOf.has(title) ? grossOf.get(title) : null,
+      yoy_value: yoy ? ((yoy[kind][title] || {}).value || 0) : null,
+      prev_value: prev ? ((prev[kind][title] || {}).value || 0) : null,
+      ytd_value: ytdSplit ? ((ytdSplit[kind][title] || {}).value || 0) : null,
+      ytd_gross: ytdGrossOf && ytdGrossOf.has(title) ? ytdGrossOf.get(title) : null,
+    })).sort((a, b) => b.value - a.value);
+    const payload = {
+      site, start, end, rule: 'refund note mentions a return (rtn, RMA, swap, return, exchange) → return; any other refund → refund',
+      has_yoy: !!yoy, has_prev: !!prev, has_ytd: !!ytdSplit,
+      totals: cur.totals, yoy_totals: yoy ? yoy.totals : null, prev_totals: prev ? prev.totals : null,
+      returns: list('returns'), refunds: list('refunds'),
+    };
+    const ended = new Date(`${end}T00:00:00Z`).getTime() + 86400000 <= Date.now();
+    refundSplitCache.set(key, { payload, expires: Date.now() + (ended ? 6 * 3600 : 15 * 60) * 1000 });
+    if (refundSplitCache.size > 300) refundSplitCache.delete(refundSplitCache.keys().next().value);
+    res.json(payload);
+  } catch (err) {
+    console.error(`refund-split (site=${site}) failed:`, err.message);
+    res.status(502).json({ error: err.message });
+  }
+});
+
+// GET /api/country-sessions?site=eu&start=&end= — sessions and completed
+// checkouts by visitor country, for Sales by Country's Conversion Rate
+// (2026-11-11). Cached 6 h for an ended range, 15 min otherwise.
+const countrySessionsCache = new Map();
+app.get('/api/country-sessions', async (req, res) => {
+  const { site, start, end } = req.query;
+  if (!['com', 'eu', 'il'].includes(site)) return res.status(400).json({ error: `Unknown or missing site "${site}"` });
+  if (!US_STATES_DATE.test(start || '') || !US_STATES_DATE.test(end || '') || end <= start) return res.status(400).json({ error: 'Invalid date range' });
+  const key = [site, start, end].join('|');
+  const hit = countrySessionsCache.get(key);
+  if (hit && hit.expires > Date.now()) return res.json(hit.payload);
+  try {
+    const countries = await fetchCountrySessions(site, start, end);
+    const payload = { site, start, end, countries };
+    const ended = new Date(`${end}T00:00:00Z`).getTime() + 86400000 <= Date.now();
+    countrySessionsCache.set(key, { payload, expires: Date.now() + (ended ? 6 * 3600 : 15 * 60) * 1000 });
+    if (countrySessionsCache.size > 300) countrySessionsCache.delete(countrySessionsCache.keys().next().value);
+    res.json(payload);
+  } catch (err) {
+    console.error(`country-sessions (site=${site}) failed:`, err.message);
+    res.status(502).json({ error: err.message });
+  }
+});
+
 app.get('/api/returns-change', async (req, res) => {
   const { site, start, end, yoy_start, yoy_end, prev_start, prev_end, ytd_start, ytd_end } = req.query;
   if (!['com', 'eu', 'il'].includes(site)) return res.status(400).json({ error: `Unknown or missing site "${site}"` });
