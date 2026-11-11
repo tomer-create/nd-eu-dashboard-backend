@@ -4899,9 +4899,19 @@ function renderYotpoSection(el, data, yoyData, momData, combined) {
   // same period (2026-10-29, Tomer): what the Yotpo points codes actually took
   // off in Shopify, split across tiers by points redeemed. Falls back to
   // points ÷ 10 when the breakdown isn't loaded for this period.
+  // 2026-11-11 (Tomer: "Value ($) … is different than Points redemptions on
+  // the Discounts Breakdown, they should be the same"): when the breakdown
+  // shows the five-bucket split, use its Yotpo Loyalty → Points redemptions
+  // line (same classifier, retail value); the older "Loyalty Points" entry is
+  // only for periods that still show the older table.
   const yMd = getMonthData();
-  const yLoyalty = yMd && Array.isArray(yMd.discounts)
-    ? yMd.discounts.find(d => d.label === 'Loyalty Points' || d.label === 'Yotpo Loyalty' || d.tag === 'Yotpo points codes') : null;
+  const ySplitBucket = yMd && yMd.discount_split && Array.isArray(yMd.discount_split.buckets)
+    ? yMd.discount_split.buckets.find(b => b.key === 'yotpo') : null;
+  const ySplitPoints = ySplitBucket ? (ySplitBucket.items || []).find(i => i.key === 'points') : null;
+  const yLoyalty = ySplitBucket
+    ? (ySplitPoints || { discount_value: 0 })
+    : (yMd && Array.isArray(yMd.discounts)
+      ? yMd.discounts.find(d => d.label === 'Loyalty Points' || d.label === 'Yotpo Loyalty' || d.tag === 'Yotpo points codes') : null);
   const yPtsTotal = rows.reduce((s, r) => s + r.points_used, 0);
   const valueFromDiscounts = !!(yLoyalty && typeof yLoyalty.discount_value === 'number');
   if (valueFromDiscounts) {
@@ -4974,7 +4984,7 @@ function renderYotpoSection(el, data, yoyData, momData, combined) {
     </div>
     <div style="font-size:12.5px;font-weight:600;margin:4px 0 6px">Points redeemed by tier</div>
     <table class="dtable">
-      <thead><tr><th style="text-align:left">Tier</th><th>Redeemers</th><th>Uses</th><th>Points used</th><th title="${valueFromDiscounts ? 'The Loyalty Points discount from the Discounts Breakdown (what the Yotpo points codes took off in Shopify), split across tiers by points used' : 'Points used ÷ 10 (the Discounts Breakdown isn’t loaded for this period yet)'}">Value (${sym()})</th><th>Net Sales (${sym()})</th><th>YoY</th><th>${momLabel()}</th></tr></thead>
+      <thead><tr><th style="text-align:left">Tier</th><th>Redeemers</th><th>Uses</th><th>Points used</th><th title="${valueFromDiscounts ? 'The Points redemptions line from the Discounts Breakdown (what the Yotpo points codes took off in Shopify, at retail value), split across tiers by points used' : 'Points used ÷ 10 (the Discounts Breakdown isn’t loaded for this period yet)'}">Value (${sym()})</th><th>Net Sales (${sym()})</th><th>YoY</th><th>${momLabel()}</th></tr></thead>
       <tbody>${tierRows}${totalRow}</tbody>
     </table>
     ${movementSection}
