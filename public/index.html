@@ -2648,7 +2648,17 @@ function renderTikTokShop(monthData, opts = {}) {
   // Affiliate commission = Section 4's "TikTok Affiliates" spend (the row was
   // "TikTok Affiliates + Organic" until the 2026-10-13 split).
   const chan = (monthData.channels || []).find(c => c.label === 'TikTok Affiliates') || (monthData.channels || []).find(c => c.label === 'TikTok Affiliates + Organic');
-  const commission = chan && !chan.no_data ? (chan.spend_actual || 0) : null;
+  // 2026-11-11 (Tomer: "under Affiliate commission you pulled the wrong
+  // number" — it should be Seller Center's Affiliate Center → Performance →
+  // Est. commission): TikTok's own estimated commission on the period's
+  // affiliate orders from the TikTok Shop Affiliate API (creator commission +
+  // shop-ads commission, GMT-8 days, /api/tiktok-shop/creator-gmv). The P&L
+  // sheet's TikTok Affiliates cost is only the fallback when the API isn't
+  // available (it lags: Nov showed $780).
+  const commRange = ttPeriodRange();
+  const commApiOf = (r) => { const d = r ? ttCreatorApiOk(ttEnsureCreatorApi(r)) : null; return d && typeof d.est_commission === 'number' ? d.est_commission + (d.est_ads_commission || 0) : null; };
+  const commApi = commApiOf(commRange);
+  const commission = commApi !== null ? commApi : (chan && !chan.no_data ? (chan.spend_actual || 0) : null);
   // Samples (TikTok Gifting) — 2026-10-26, Tomer: "take all the $0 orders
   // from Channel TikTok and take their product costs, add them together".
   // From /api/tiktok-shop/gifting (Shopify product cost of the $0 TikTok-
@@ -3048,7 +3058,13 @@ function renderTikTokShop(monthData, opts = {}) {
     return a && !a.error && typeof a.commission === 'number' && g && a.gross_seen / g >= 0.9 ? a.commission : null; };
   const ttSmpOf = e => { const d = scOk(e), m = d && d.samples; return m && !m.error && typeof m.samples_shipped === 'number' ? m.samples_shipped : null; };
   const ttRel = (c, p) => (c === null || p === null || !p) ? null : (c - p) / p;
-  const commChg = { yoy: ttRel(ttCommOf(sc, 'cur'), ttCommOf(scY, 'yoy')), mom: ttRel(ttCommOf(sc, 'cur'), ttCommOf(scM, 'mom')) };
+  // With TikTok's API figure: the change vs the same API figure for the
+  // comparison period; if TikTok has none for it (e.g. a year back), the
+  // change from TikTok's order data for the same days.
+  const commChgOrders = { yoy: ttRel(ttCommOf(sc, 'cur'), ttCommOf(scY, 'yoy')), mom: ttRel(ttCommOf(sc, 'cur'), ttCommOf(scM, 'mom')) };
+  const commChg = commApi !== null
+    ? { yoy: (pr.yoy ? ttRel(commApi, commApiOf(pr.yoy)) : null) ?? commChgOrders.yoy, mom: (pr.mom ? ttRel(commApi, commApiOf(pr.mom)) : null) ?? commChgOrders.mom }
+    : commChgOrders;
   // Gifting YoY / MoM: the same $0-order formula for the comparison period.
   const giftChg = giftCur
     ? { yoy: giftY ? ttRel(giftCur.cost, giftY.cost) : null, mom: giftM ? ttRel(giftCur.cost, giftM.cost) : null }
@@ -3072,7 +3088,8 @@ function renderTikTokShop(monthData, opts = {}) {
   const txCur = txFeeOf(sc), txY = txFeeOf(scY), txM = txFeeOf(scM);
   const costRows = [
     { label: 'TikTok Ads spend', v: tt.ads_spend, yoy: tt.yoy ? tt.yoy.ads_spend : null, mom: tt.mom ? tt.mom.ads_spend : null, py: null, pm: null },
-    { label: 'Affiliate commission', v: commission, yoy: commChg.yoy, mom: commChg.mom, pm: commChg.mom === null && sheetPrev ? sheetPrev.commission : null },
+    { label: 'Affiliate commission', v: commission, yoy: commChg.yoy, mom: commChg.mom, pm: commApi === null && commChg.mom === null && sheetPrev ? sheetPrev.commission : null,
+      sub: commApi !== null ? 'TikTok Affiliate Center est. commission' : (commission !== null ? 'P&L sheet — TikTok’s figure unavailable' : '') },
     { label: 'Samples (TikTok Gifting)', v: samples, yoy: giftChg.yoy, mom: giftChg.mom, pm: !giftCur && giftChg.mom === null && sheetPrev ? sheetPrev.gifting : null,
       sub: giftCur ? (giftCur.cost_pct === 1 ? `Retail price of the ${fmtVal(giftCur.units || 0, 'number')} products in ${fmtVal(giftCur.orders, 'number')} $0 TikTok orders${giftCur.units_no_price ? ` · ${fmtVal(giftCur.units_no_price, 'number')} without a price` : ''}` : giftCur.cost_pct ? `${Math.round(giftCur.cost_pct * 100)}% of the ${fmtVal(giftCur.retail_value || 0, 'currency-full')} price of the ${fmtVal(giftCur.units || 0, 'number')} products in ${fmtVal(giftCur.orders, 'number')} $0 TikTok orders${giftCur.units_no_price ? ` · ${fmtVal(giftCur.units_no_price, 'number')} without a price` : ''}` : `product cost of ${fmtVal(giftCur.orders, 'number')} $0 TikTok orders`) : giftFromSheet ? 'P&L sheet — $0-order figure unavailable' : '' },
     { label: 'Sample shipping cost', v: sampleShip, py: shipY, pm: shipM, sub: giftCur ? `${fmtVal(giftCur.orders,'number')} creators = ${fmtVal(giftCur.orders,'number')} $0 TikTok orders × $${SHIP_PER}` : '' },
@@ -3131,7 +3148,7 @@ function renderTikTokShop(monthData, opts = {}) {
         <tr class="total-row"><td>Total TikTok costs</td><td>${fmtVal(totalCost,'currency-full')}</td><td>${gmvShown ? fmtVal(totalCost/gmvShown,'percent') : '—'}</td><td>${cCell(totalYoy)}</td><td>${cCell(totalMom)}</td></tr>
       </tbody>
     </table>
-    <div class="tt-note">TikTok ROAS (tile above) = TikTok Shop GMV ÷ Total TikTok costs; “% of GMV” is on the same GMV. Product cost (COGS ${fmtVal(tt.cogs,'currency-full')}) isn't included. Sources: TikTok Ads spend — Triple Whale; Affiliate commission — P&amp;L sheet, with its YoY / ${mLabel} from TikTok's own data for the same days (TikTok's affiliate commission on the period's orders), since the sheet only has 2026 and no figure yet for a month in progress; Samples (TikTok Gifting) — product cost of everything inside the $0 orders from the TikTok sales channel (the creator samples): each product's retail price × quantity, added up (2026-11-04: at retail, no longer 20% of it); YoY / ${mLabel} on the same formula; TikTok Shop transaction fee — TikTok's referral fee (its commission on each sale), plus any transaction fee / platform commission and the refund administration fee, from TikTok's settlement statements, by statement date; Sample shipping — one shipment per $0 order from the TikTok sales channel (the same orders as Samples / TikTok Gifting) × $11.</div>`;
+    <div class="tt-note">TikTok ROAS (tile above) = TikTok Shop GMV ÷ Total TikTok costs; “% of GMV” is on the same GMV. Product cost (COGS ${fmtVal(tt.cogs,'currency-full')}) isn't included. Sources: TikTok Ads spend — Triple Whale; Affiliate commission — TikTok Affiliate Center's Est. commission (the estimated creator commission + shop-ads commission on the period's affiliate orders, GMT-8 days, from TikTok's Affiliate API), YoY / ${mLabel} on the same figure; the P&amp;L sheet is only used when TikTok's figure isn't available; Samples (TikTok Gifting) — product cost of everything inside the $0 orders from the TikTok sales channel (the creator samples): each product's retail price × quantity, added up (2026-11-04: at retail, no longer 20% of it); YoY / ${mLabel} on the same formula; TikTok Shop transaction fee — TikTok's referral fee (its commission on each sale), plus any transaction fee / platform commission and the refund administration fee, from TikTok's settlement statements, by statement date; Sample shipping — one shipment per $0 order from the TikTok sales channel (the same orders as Samples / TikTok Gifting) × $11.</div>`;
 
   // Revenue & costs by source (2026-10-20, Tomer: "add Revenue by source and
   // TikTok costs on the same chart, when the cost of the affiliate should be
