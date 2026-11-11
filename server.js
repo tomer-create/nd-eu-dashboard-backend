@@ -1275,6 +1275,12 @@ async function refundSplitRange(site, start, end) {
     parts.push(...await Promise.all(slices.slice(i, i + 3).map(([a, b]) => refundSplitSlice(site, a, b))));
   }
   const out = { returns: {}, refunds: {}, totals: { returns: 0, refunds: 0 } };
+  // ND.IL (2026-11-11): returns from Shopify Returns — see ilReturnSplit.
+  if (parts.length && parts.every((p) => p.source === 'shopify_returns')) {
+    out.source = 'shopify_returns';
+    out.return_count = parts.reduce((t, p) => t + (p.return_count || 0), 0);
+    out.exchange_count = parts.reduce((t, p) => t + (p.exchange_count || 0), 0);
+  }
   parts.forEach((p) => ['returns', 'refunds'].forEach((k) => {
     out.totals[k] += p.totals[k];
     Object.entries(p[k]).forEach(([t, v]) => { const a = out[k][t] || (out[k][t] = { value: 0, units: 0 }); a.value += v.value; a.units += v.units; });
@@ -1317,6 +1323,7 @@ app.get('/api/refund-split', async (req, res) => {
       has_yoy: !!yoy, has_prev: !!prev, has_ytd: !!ytdSplit,
       totals: cur.totals, yoy_totals: yoy ? yoy.totals : null, prev_totals: prev ? prev.totals : null,
       returns: list('returns'), refunds: list('refunds'),
+      returns_source: cur.source || 'refund_notes', return_count: cur.return_count, exchange_count: cur.exchange_count,
     };
     const ended = new Date(`${end}T00:00:00Z`).getTime() + 86400000 <= Date.now();
     refundSplitCache.set(key, { payload, expires: Date.now() + (ended ? 6 * 3600 : 15 * 60) * 1000 });
