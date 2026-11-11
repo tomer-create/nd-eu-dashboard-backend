@@ -5,7 +5,7 @@ const cors = require('cors');
 const { fetchRefundSplitByProduct, fetchCountrySessions, fetchOrders, fetchVoidedOrders, fetchOrdersLight, fetchOrdersForTierRevenue, fetchSalesReversals, fetchCostOfGoodsSold, fetchTopReturnsByProduct, fetchCountryBreakdown, fetchUsStateBreakdown, fetchSalesSummary, fetchCustomerAcquisition, fetchProductRetailPrices, fetchCollabsCodeSales, fetchTopProductsAnalytics, getAuthorizeUrl, exchangeCodeForToken } = require('./src/shopify');
 const { aggregate } = require('./src/aggregate');
 const { fetchDiscountTags } = require('./src/discount-tags');
-const { fetchChannelPerformance, fetchAttentiveSplit, attentiveRevenueKeys, ATTENTIVE_LABEL_KEYS } = require('./src/triplewhale');
+const { fetchChannelPerformance, fetchAttentiveSplit, attentiveRevenueKeys, ATTENTIVE_LABEL_KEYS, fetchCountryConversion } = require('./src/triplewhale');
 const { fetchTikTokShop, fetchGmvEstimate, fetchGifting } = require('./src/tiktokshop');
 const { getSellerCenter, fetchPayouts } = require('./src/windsor-tiktok');
 const tiktokApi = require('./src/tiktok-api');
@@ -1347,8 +1347,12 @@ app.get('/api/country-sessions', async (req, res) => {
   const hit = countrySessionsCache.get(key);
   if (hit && hit.expires > Date.now()) return res.json(hit.payload);
   try {
-    const countries = await fetchCountrySessions(site, start, end);
-    const payload = { site, start, end, countries };
+    // 2026-11-11 (Tomer): Triple Whale's Conversion Rate (Pixel purchases ÷
+    // Pixel sessions) by country instead of Shopify's sessions report.
+    // `completed` keeps the field the page reads; it holds Triple Whale's orders.
+    const tw = await fetchCountryConversion(site, start, end);
+    const countries = tw.map((c) => ({ country: c.country, sessions: c.sessions, completed: c.orders }));
+    const payload = { site, start, end, source: 'triple_whale', countries };
     const ended = new Date(`${end}T00:00:00Z`).getTime() + 86400000 <= Date.now();
     countrySessionsCache.set(key, { payload, expires: Date.now() + (ended ? 6 * 3600 : 15 * 60) * 1000 });
     if (countrySessionsCache.size > 300) countrySessionsCache.delete(countrySessionsCache.keys().next().value);
