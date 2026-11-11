@@ -5320,6 +5320,7 @@ function refundSplitData() {
     results.forEach(({ site, body }) => {
       const fx = state.site === 'all' && FX_TO_USD[site] != null ? FX_TO_USD[site] : 1;
       out.hasYoy = out.hasYoy && body.has_yoy; out.hasPrev = out.hasPrev && body.has_prev;
+      if (body.returns_source === 'shopify_returns') { out.ilReturns = { count: body.return_count || 0, exchanges: body.exchange_count || 0 }; }
       ['returns', 'refunds'].forEach(kind => {
         out.totals[kind] += (body.totals[kind] || 0) * fx;
         (body[kind] || []).forEach(p => {
@@ -5390,9 +5391,13 @@ function renderReturnTable(elId, kind, data) {
     <thead><tr><th style="text-align:left">Product</th><th>Gross Sales (${scopeLabel})</th><th>${word} $ Value (${scopeLabel})</th><th>Units ${ret ? 'Returned' : 'Refunded'} (${scopeLabel})</th><th>${word} Ratio (${scopeLabel})</th><th>${word} Ratio (YTD)</th><th>% of Total ${word}s</th><th>YoY</th><th>${momLabel()}</th></tr></thead>
     <tbody>${empty}${rows}${more}${totalRow}</tbody>
   </table>
-  <div style="margin-top:10px;font-size:11px;color:var(--text-muted)">${ret
+  <div style="margin-top:10px;font-size:11px;color:var(--text-muted)">${data.ilReturns && state.site === 'il'
+    ? (ret
+      ? `ND.IL returns come from Shopify’s return process: every return opened in the period (${data.ilReturns.count.toLocaleString('en-US')} returns, ${data.ilReturns.exchanges.toLocaleString('en-US')} of them exchanges), each returned item at the price the customer paid after discounts, without VAT, by the date the return was opened. `
+      : 'ND.IL refunds = refunds that aren’t part of a Shopify return — cancelled, damaged, missing, out of stock. Items sent back through a return are in Top 10 Return Products. ')
+    : (ret
     ? 'Returns = refunds whose note in Shopify mentions a return (rtn, RMA, swap, return, exchange). '
-    : 'Refunds = every other refund — damaged, missing, lost, cancelled, out of stock, or no note. '}${word} $ Value and units are Shopify’s own sales reversals for each product (the same figures as Shopify’s returns), by the date of the refund${state.site === 'all' ? ', the three sites added up in USD' : ''}. ${word} Ratio = ${word.toLowerCase()} $ value ÷ the product’s gross sales; YTD = Jan 1 to the end of the period. % of Total ${word}s is against all ${ret ? 'returns' : 'refunds'} in the period (${fmtVal(total || 0, 'currency-full')}). Samples are left out. Showing ${shown.length} of ${all.length} products${all.length > RETURNS_PAGE ? ' — press + for the full list' : ''}.</div>`;
+    : 'Refunds = every other refund — damaged, missing, lost, cancelled, out of stock, or no note. ')}${data.ilReturns && state.site === 'all' ? 'ND.IL: returns come from Shopify’s return process (exchanges included) and refunds are those outside a return. ' : ''}${data.ilReturns && state.site === 'il' && ret ? '' : `${word} $ Value and units are Shopify’s own sales reversals for each product (the same figures as Shopify’s returns), by the date of the refund${state.site === 'all' ? ', the three sites added up in USD' : ''}. `}${word} Ratio = ${word.toLowerCase()} $ value ÷ the product’s gross sales; YTD = Jan 1 to the end of the period. % of Total ${word}s is against all ${ret ? 'returns' : 'refunds'} in the period (${fmtVal(total || 0, 'currency-full')}). Samples are left out. Showing ${shown.length} of ${all.length} products${all.length > RETURNS_PAGE ? ' — press + for the full list' : ''}.</div>`;
   const btn = document.getElementById(elId + '-more');
   if (btn) btn.addEventListener('click', () => { returnListOpen[okey] = !open; renderReturnTable(elId, kind, data); if (typeof applyMobileTableLabels === 'function') applyMobileTableLabels(el); });
 }
