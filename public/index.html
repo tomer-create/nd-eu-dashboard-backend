@@ -272,9 +272,9 @@
   /* Top 15 Return Products has 8 columns since YoY/MoM were added (2026-10-08):
      let its long period headers wrap, and scroll inside the card if a very
      narrow window still can't fit it, rather than pushing the page sideways. */
-  body:not(.mobile-mode) #section-3 { overflow-x: auto; }
-  body:not(.mobile-mode) #section-3 table.dtable th { white-space: normal; vertical-align: bottom; min-width: 64px; }
-  body:not(.mobile-mode) #section-3 table.dtable td:first-child { min-width: 180px; }
+  body:not(.mobile-mode) #section-3, body:not(.mobile-mode) #section-3b { overflow-x: auto; }
+  body:not(.mobile-mode) #section-3 table.dtable th, body:not(.mobile-mode) #section-3b table.dtable th { white-space: normal; vertical-align: bottom; min-width: 64px; }
+  body:not(.mobile-mode) #section-3 table.dtable td:first-child, body:not(.mobile-mode) #section-3b table.dtable td:first-child { min-width: 180px; }
   table.dtable td { text-align: right; padding: 8px 8px; border-bottom: 1px solid var(--gridline); font-variant-numeric: tabular-nums; vertical-align: middle; }
   table.dtable tr:last-child td { border-bottom: none; }
   table.dtable tr.no-data-row td { color: var(--text-muted); font-style: italic; }
@@ -479,49 +479,55 @@
   </div>
 
   <div class="card" id="card-2">
-    <div class="section-title"><span class="section-num">2</span>Top 15 Selling Products</div>
-    <div class="section-sub">Gross sales, net sales, units sold, share of total, YoY &amp; MoM — from Shopify</div>
+    <div class="section-title"><span class="section-num">2</span>Top 10 Selling Products</div>
+    <div class="section-sub">Gross sales, net sales, units sold, share of total, YoY &amp; MoM — from Shopify. Press + for every product.</div>
     <div id="section-2"></div>
   </div>
 
   <div class="card" id="card-3">
-    <div class="section-title"><span class="section-num">3</span>Top 15 Return Products<span id="mtd-flag-3"></span></div>
-    <div class="section-sub">Ranked year-to-date by return $ value; return ratio shown for both YTD and the current month — from Shopify</div>
+    <div class="section-title"><span class="section-num">3</span>Top 10 Return Products<span id="mtd-flag-3"></span></div>
+    <div class="section-sub">Products customers sent back (refunds noted as a return), ranked by return $ value for the period, with return ratio for the period and YTD — from Shopify. Press + for every product.</div>
     <div id="section-3"></div>
   </div>
 
+  <div class="card" id="card-3b">
+    <div class="section-title"><span class="section-num">4</span>Top 10 Refunded Products</div>
+    <div class="section-sub">Products refunded without a return (damaged, missing, lost, cancelled …), ranked by refund $ value for the period, with refund ratio for the period and YTD — from Shopify. Press + for every product.</div>
+    <div id="section-3b"></div>
+  </div>
+
   <div class="card" id="card-4">
-    <div class="section-title"><span class="section-num">4</span>Marketing &amp; Sales Channel Performance<span id="mtd-flag-4"></span></div>
+    <div class="section-title"><span class="section-num">5</span>Marketing &amp; Sales Channel Performance<span id="mtd-flag-4"></span></div>
     <div class="section-sub">What each marketing and sales channel spent and brought in, against its goal — and how that compares with past periods</div>
     <div id="section-4"></div>
   </div>
 
   <div class="card" id="card-tiktok">
-    <div class="section-title"><span class="section-num">5</span>TikTok Shop<span id="mtd-flag-tt"></span></div>
+    <div class="section-title"><span class="section-num">6</span>TikTok Shop<span id="mtd-flag-tt"></span></div>
     <div class="section-sub">ND.COM's TikTok Shop: GMV, sales, revenue by source (TikTok Ads, affiliates, organic) and TikTok costs. GMV comes from TikTok Shop's own analytics; days TikTok hasn't reported yet are filled from TikTok's order data in Triple Whale. Affiliate revenue follows TikTok's Affiliate Center (creator-attributed GMV). Sales, orders and ad results come from Triple Whale. Costs come from Triple Whale (ads), the P&amp;L sheet (commission), Shopify's $0 TikTok orders (samples and shipping) and TikTok's settlement statements (fees).</div>
     <div id="section-tiktok"></div>
   </div>
 
   <div class="card" id="card-section-5">
-    <div class="section-title"><span class="section-num">6</span>Sales by Country</div>
+    <div class="section-title"><span class="section-num">7</span>Sales by Country</div>
     <div class="section-sub">Gross &amp; net sales, AOV, orders, returns, YoY &amp; MoM by shipping destination — from Shopify</div>
     <div id="section-5"></div>
   </div>
 
   <div class="card" id="card-6">
-    <div class="section-title"><span class="section-num">7</span>Yotpo Loyalty</div>
+    <div class="section-title"><span class="section-num">8</span>Yotpo Loyalty</div>
     <div class="section-sub">New members, points redeemed by tier, and movement between tiers — from Yotpo webhook events</div>
     <div id="section-8"></div>
   </div>
 
   <div class="card" id="card-7">
-    <div class="section-title"><span class="section-num">8</span>Discounts Breakdown</div>
+    <div class="section-title"><span class="section-num">9</span>Discounts Breakdown</div>
     <div class="section-sub">Discount $ by program (storefront orders only), identified by order tag — from Shopify</div>
     <div id="section-6"></div>
   </div>
 
   <div class="card" id="card-8">
-    <div class="section-title"><span class="section-num">9</span>Other Costs<span id="mtd-flag-7"></span></div>
+    <div class="section-title"><span class="section-num">10</span>Other Costs<span id="mtd-flag-7"></span></div>
     <div class="section-sub">Monthly goal vs. actual by cost line item, and each item's share of total other costs</div>
     <div id="section-7"></div>
   </div>
@@ -2335,6 +2341,7 @@ async function performSync(opts) {
     const succeeded = sites.filter(s => succeededSet.has(s));
     // Top products (Shopify's report) are re-asked after a Sync.
     Object.keys(topProductsPeriodCache).forEach(k => { if (topProductsPeriodCache[k] !== 'loading') delete topProductsPeriodCache[k]; });
+    Object.keys(refundSplitCache).forEach(k => { if (refundSplitCache[k] !== 'loading') delete refundSplitCache[k]; });
     if (!failed.length) {
       statusEl.className = 'sync-status ok';
       statusEl.textContent = 'Synced ' + succeeded.map(s => siteMeta(s).name).join(', ') + monthTail + ' at ' + new Date().toLocaleTimeString('en-US', { hour: 'numeric', minute: '2-digit' });
@@ -5024,7 +5031,9 @@ function topProductsPeriodData() {
         });
       });
       const chg = (c, p) => p ? (c - p) / p : null;
-      const list = Array.from(map.values()).sort((a, b) => b.gross_sales - a.gross_sales).slice(0, 15).map(p => ({
+      // Every product (2026-11-11): the table shows the top 10 and the rest
+      // behind "+".
+      const list = Array.from(map.values()).sort((a, b) => b.gross_sales - a.gross_sales).map(p => ({
         title: p.title, gross_sales: p.gross_sales, net_sales_est: p.net_sales, units_sold: p.units_sold,
         pct_of_total: totalKnown && total ? p.gross_sales / total : null,
         yoy: hasYoy ? chg(p.gross_sales, p.yoy_gross) : null,
@@ -5076,7 +5085,17 @@ function renderTopProducts(monthData) {
     : monthData.top_products_source === 'combined'
     ? (periodErr ? 'Shopify’s full-period product list didn’t load (' + String(periodErr).replace(/</g, '&lt;') + ') — showing each month’s own top 15 added up, which leaves out months where a product wasn’t in that month’s top 15. ' : '') + (monthData.top_products_combined_note || 'Combined from the underlying periods/sites client-side.')
     : `Pulled live from Shopify (best-sellers by revenue, last ${monthData.top_products_window_days} days ≈ month-to-date). Net Sales is estimated using the store's overall net/gross ratio for the month, not a per-product figure. YoY / MoM aren't available from this tool — it only returns a rolling window from today, not arbitrary past periods.`;
-  const rows = monthData.top_products.map((p, i) => `<tr>
+  // Top 10 + "+" for the rest (2026-11-11, Tomer: "show the first 10
+  // products and then minimized the rest and will give the option for the
+  // full breakdown by pressing the +").
+  const tpKey = state.site + '|' + state.month;
+  const tpAll = monthData.top_products;
+  const tpOpen = !!topProductsOpen[tpKey];
+  const tpShown = tpOpen ? tpAll : tpAll.slice(0, TOP_PRODUCTS_PAGE);
+  const tpMore = tpAll.length > TOP_PRODUCTS_PAGE
+    ? `<tr class="show-more-row"><td colspan="7"><button type="button" class="show-more-btn" id="top-products-more" aria-expanded="${tpOpen}">${tpOpen ? '− Show top ' + TOP_PRODUCTS_PAGE : '+ ' + (tpAll.length - TOP_PRODUCTS_PAGE) + ' more products'}</button></td></tr>`
+    : '';
+  const rows = tpShown.map((p, i) => `<tr>
       <td>${i+1}. ${escText(p.title)}</td>
       <td>${fmtVal(p.gross_sales, 'currency-full')}</td>
       <td>${p.net_sales_est !== null ? fmtVal(p.net_sales_est, 'currency-full') : '—'}</td>
@@ -5096,7 +5115,7 @@ function renderTopProducts(monthData) {
   // value from gross_sales and the change, sum current and prior separately
   // across all such products, then take the ratio of the sums -- this gives
   // a properly weighted blended change rather than an average of percentages.
-  const products = monthData.top_products;
+  const products = tpShown;
   const totalGross = products.reduce((s, p) => s + (p.gross_sales || 0), 0);
   const totalNetSalesEst = products.reduce((s, p) => s + (p.net_sales_est || 0), 0);
   let totalUnitsSold = null;
@@ -5132,10 +5151,14 @@ function renderTopProducts(monthData) {
     </tr>` : '';
   el.innerHTML = `<table class="dtable">
     <thead><tr><th style="text-align:left">Product</th><th>Gross Sales</th><th>${monthData.top_products_source === 'shopify_period' ? 'Net Sales' : 'Net Sales (est.)'}</th><th>Units Sold</th><th>% of Total Sales</th><th>YoY</th><th>${momLabel()}</th></tr></thead>
-    <tbody>${rows}${totalRow}</tbody>
+    <tbody>${rows}${tpMore}${totalRow}</tbody>
   </table>
   <div style="margin-top:10px;font-size:11px;color:var(--text-muted)">${srcNote}${errTail}</div>`;
+  const tpBtn = document.getElementById('top-products-more');
+  if (tpBtn) tpBtn.addEventListener('click', () => { topProductsOpen[tpKey] = !tpOpen; renderTopProducts(getMonthData()); if (typeof applyMobileTableLabels === 'function') applyMobileTableLabels(el); });
 }
+const TOP_PRODUCTS_PAGE = 10;
+const topProductsOpen = {};
 
 /* ---------------- Placeholder sections (3, 5, 6) ---------------- */
 const PLACEHOLDERS = {
@@ -5254,122 +5277,130 @@ function returnsChangeData(monthData) {
   }
   return 'loading';
 }
+// Top 10 Return Products + Top 10 Refunded Products (2026-11-11, Tomer:
+// "separate between refunds to returns, set it for 2 different sections
+// each will contain 10 products on the first view and minimized the rest …
+// pressing the +"; split "By refund note"). Both come from /api/refund-split
+// for exactly the period on screen: Shopify's own sales reversals per refund
+// and product, each refund sorted by its note — a note mentioning a return
+// (rtn, RMA, swap, return, exchange) is a return, any other refund is a
+// refund. Same columns as the old Top 15 Return Products. All Sites adds the
+// three stores up in USD by product name.
+const RETURNS_PAGE = 10;
+const refundSplitCache = {};
+const returnListOpen = {}; // kind|site|month -> expanded
+function refundSplitData() {
+  const r = usStatesRanges();
+  const sites = state.site === 'all' ? Object.keys(DATA.sites) : [state.site];
+  const ytd = { start: r.cur.start.slice(0, 4) + '-01-01', end: r.cur.end };
+  const ck = [state.site, r.cur.start, r.cur.end, r.prev ? r.prev.start : ''].join('|');
+  let entry = refundSplitCache[ck];
+  if (entry && entry.error && Date.now() - (entry.at || 0) > 60000) { delete refundSplitCache[ck]; entry = null; }
+  if (entry) return entry;
+  refundSplitCache[ck] = 'loading';
+  const view = state.site + '|' + state.month;
+  Promise.all(sites.map(site => {
+    const q = new URLSearchParams({ site, start: r.cur.start, end: r.cur.end, yoy_start: r.yoy.start, yoy_end: r.yoy.end, ytd_start: ytd.start, ytd_end: ytd.end });
+    if (r.prev) { q.set('prev_start', r.prev.start); q.set('prev_end', r.prev.end); }
+    return fetch(`${BACKEND_URL}/api/refund-split?${q}`)
+      .then(res => res.json().then(body => { if (!res.ok) throw new Error(body.error || ('Backend returned ' + res.status)); return { site, body }; }));
+  })).then(results => {
+    const keyOf = (t) => state.site === 'all' ? String(t).replace(/\s+-\s+[^\x00-\x7F].*$/, '').trim() : t;
+    const out = { hasYoy: true, hasPrev: !!r.prev, returns: new Map(), refunds: new Map(), totals: { returns: 0, refunds: 0 } };
+    results.forEach(({ site, body }) => {
+      const fx = state.site === 'all' && FX_TO_USD[site] != null ? FX_TO_USD[site] : 1;
+      out.hasYoy = out.hasYoy && body.has_yoy; out.hasPrev = out.hasPrev && body.has_prev;
+      ['returns', 'refunds'].forEach(kind => {
+        out.totals[kind] += (body.totals[kind] || 0) * fx;
+        (body[kind] || []).forEach(p => {
+          const k = keyOf(p.title);
+          const a = out[kind].get(k) || { title: k, value: 0, units: 0, gross_sales: 0, _g: true, yoy_value: 0, prev_value: 0, ytd_value: 0, ytd_gross: 0, _yg: true };
+          a.value += p.value * fx; a.units += p.units;
+          if (p.gross_sales == null) a._g = false; else a.gross_sales += p.gross_sales * fx;
+          a.yoy_value += (p.yoy_value || 0) * fx; a.prev_value += (p.prev_value || 0) * fx; a.ytd_value += (p.ytd_value || 0) * fx;
+          if (p.ytd_gross == null) a._yg = false; else a.ytd_gross += p.ytd_gross * fx;
+          out[kind].set(k, a);
+        });
+      });
+    });
+    ['returns', 'refunds'].forEach(kind => {
+      out[kind] = Array.from(out[kind].values()).sort((a, b) => b.value - a.value);
+    });
+    refundSplitCache[ck] = out;
+  }).catch(err => {
+    console.error('refund-split fetch failed:', err);
+    refundSplitCache[ck] = { error: String(err.message || err), at: Date.now() };
+  }).finally(() => { if (state.site + '|' + state.month === view) renderReturns(getMonthData()); });
+  return 'loading';
+}
+function renderReturnTable(elId, kind, data) {
+  const el = document.getElementById(elId);
+  const ret = kind === 'returns';
+  const word = ret ? 'Return' : 'Refund';
+  const monthLabel = monthLabelText();
+  const scopeLabel = isQuarter(state.month) ? state.month : (state.month === 'YTD' ? 'YTD' : monthLabel);
+  const all = data[kind].filter(p => !isSampleProduct(p.title) && Math.abs(p.value) >= 0.005);
+  const total = data.totals[kind];
+  const okey = kind + '|' + state.site + '|' + state.month;
+  const open = !!returnListOpen[okey];
+  const shown = open ? all : all.slice(0, RETURNS_PAGE);
+  const pctChg = (cur, prior) => (prior ? (cur - prior) / prior : null);
+  const ratio = (v, g) => (g ? v / g : null);
+  const pct = v => (v === null || v === undefined ? '—' : fmtVal(v, 'percent'));
+  const rows = shown.map((p, i) => `<tr>
+      <td>${i + 1}. ${escText(p.title)}</td>
+      <td>${p._g ? fmtVal(p.gross_sales, 'currency-full') : '—'}</td>
+      <td>${fmtVal(p.value, 'currency-full')}</td>
+      <td>${p.units.toLocaleString('en-US')}</td>
+      <td>${pct(p._g ? ratio(p.value, p.gross_sales) : null)}</td>
+      <td>${pct(p._yg ? ratio(p.ytd_value, p.ytd_gross) : null)}</td>
+      <td>${pct(total ? p.value / total : null)}</td>
+      <td>${returnsChangeCell(data.hasYoy ? pctChg(p.value, p.yoy_value) : null)}</td>
+      <td>${returnsChangeCell(data.hasPrev ? pctChg(p.value, p.prev_value) : null)}</td>
+    </tr>`).join('');
+  const more = all.length > RETURNS_PAGE
+    ? `<tr class="show-more-row"><td colspan="9"><button type="button" class="show-more-btn" id="${elId}-more" aria-expanded="${open}" title="${open ? 'Show the top ' + RETURNS_PAGE + ' only' : 'Show all ' + all.length + ' products'}">${open ? '− Show top ' + RETURNS_PAGE : '+ ' + (all.length - RETURNS_PAGE) + ' more products'}</button></td></tr>`
+    : '';
+  const sum = (f) => shown.reduce((t, p) => t + (p[f] || 0), 0);
+  const gOk = shown.every(p => p._g), ygOk = shown.every(p => p._yg);
+  const tv = sum('value'), tg = sum('gross_sales');
+  const totalRow = shown.length ? `<tr class="total-row">
+      <td>Total (products shown above)</td>
+      <td>${gOk ? fmtVal(tg, 'currency-full') : '—'}</td>
+      <td>${fmtVal(tv, 'currency-full')}</td>
+      <td>${sum('units').toLocaleString('en-US')}</td>
+      <td>${pct(gOk ? ratio(tv, tg) : null)}</td>
+      <td>${pct(ygOk ? ratio(sum('ytd_value'), sum('ytd_gross')) : null)}</td>
+      <td>${pct(total ? tv / total : null)}</td>
+      <td>${returnsChangeCell(data.hasYoy ? pctChg(tv, sum('yoy_value')) : null)}</td>
+      <td>${returnsChangeCell(data.hasPrev ? pctChg(tv, sum('prev_value')) : null)}</td>
+    </tr>` : '';
+  const empty = !all.length ? `<tr class="no-data-row"><td colspan="9">No ${ret ? 'returns' : 'refunds'} in this period.</td></tr>` : '';
+  el.innerHTML = `<table class="dtable">
+    <thead><tr><th style="text-align:left">Product</th><th>Gross Sales (${scopeLabel})</th><th>${word} $ Value (${scopeLabel})</th><th>Units ${ret ? 'Returned' : 'Refunded'} (${scopeLabel})</th><th>${word} Ratio (${scopeLabel})</th><th>${word} Ratio (YTD)</th><th>% of Total ${word}s</th><th>YoY</th><th>${momLabel()}</th></tr></thead>
+    <tbody>${empty}${rows}${more}${totalRow}</tbody>
+  </table>
+  <div style="margin-top:10px;font-size:11px;color:var(--text-muted)">${ret
+    ? 'Returns = refunds whose note in Shopify mentions a return (rtn, RMA, swap, return, exchange). '
+    : 'Refunds = every other refund — damaged, missing, lost, cancelled, out of stock, or no note. '}${word} $ Value and units are Shopify’s own sales reversals for each product (the same figures as Shopify’s returns), by the date of the refund${state.site === 'all' ? ', the three sites added up in USD' : ''}. ${word} Ratio = ${word.toLowerCase()} $ value ÷ the product’s gross sales; YTD = Jan 1 to the end of the period. % of Total ${word}s is against all ${ret ? 'returns' : 'refunds'} in the period (${fmtVal(total || 0, 'currency-full')}). Samples are left out. Showing ${shown.length} of ${all.length} products${all.length > RETURNS_PAGE ? ' — press + for the full list' : ''}.</div>`;
+  const btn = document.getElementById(elId + '-more');
+  if (btn) btn.addEventListener('click', () => { returnListOpen[okey] = !open; renderReturnTable(elId, kind, data); if (typeof applyMobileTableLabels === 'function') applyMobileTableLabels(el); });
+}
 function renderReturns(monthData) {
   const badgeEl = document.getElementById('mtd-flag-3');
-  // Year to Date / quarters (2026-10-22): the list comes from Shopify for the
-  // whole period (returnsChangeData's `top`) instead of adding up the months
-  // that happen to have their own list.
-  if (isMultiMonth(state.month)) {
-    const rc = returnsChangeData(monthData);
-    if (rc === 'loading') {
-      if (badgeEl) badgeEl.innerHTML = '';
-      document.getElementById('section-3').innerHTML = `<div class="tt-pending"><span class="tt-loading" aria-hidden="true"></span>Loading return products from Shopify for this period…</div>`;
-      return;
-    }
-    if (rc && rc.top) monthData = Object.assign({}, monthData, {
-      top_returns: rc.top, top_returns_source: 'shopify_period',
-      top_returns_note: `Shopify analytics for the whole period (sales reversals, gross sales and units returned per product — Shopify's own figures)${state.site === 'all' ? ', the three sites added up in USD' : ''}. Ranked by return value. % of Total Returns = the product's returns ÷ all returns in the period. Return Ratio (YTD) = Jan 1 to the end of the period.`,
-    });
-  }
-  if (!monthData.top_returns) {
-    if (badgeEl) badgeEl.innerHTML = '';
-    renderPlaceholder('section-3');
+  if (badgeEl) badgeEl.innerHTML = '';
+  const d = refundSplitData();
+  const ids = ['section-3', 'section-3b'];
+  if (d === 'loading') {
+    ids.forEach(id => { document.getElementById(id).innerHTML = `<div class="tt-pending"><span class="tt-loading" aria-hidden="true"></span>Loading ${id === 'section-3' ? 'returns' : 'refunds'} from Shopify for this period…</div>`; });
     return;
   }
-  const monthLabel = monthLabelText();
-  const isLive = monthData.top_returns_source === 'live_backend';
-  if (badgeEl) badgeEl.innerHTML = isLive ? '<span class="mtd-flag">Live \u00b7 ' + monthLabel + '</span>' : '<span class="mtd-flag">' + (isQuarter(state.month) ? quarterLabel(state.month) : 'Year to date') + '</span>';
-  // Two data sources feed this table:
-  // 1) The ND.COM embedded snapshot — a one-time YTD (Jan 1-today) ShopifyQL
-  //    pull baked in 2026-08-24 ("show the return ratio year to date"). Gross
-  //    Sales/Return $ Value/% of Total Returns are all YTD; Return Ratio is
-  //    shown for both YTD and just the current month side by side.
-  // 2) Live via the Sync button — added 2026-08-24 after Tomer reported this
-  //    section "doesn't show at all" for ND.EU (it had NO live path at all
-  //    before this: only ND.COM ever had a snapshot). The live path ranks by
-  //    dollar return value for whatever period is currently selected (not
-  //    YTD), using Shopify's own accurate sales_reversals metric grouped by
-  //    product — deliberately NOT the Orders-API refund data already fetched
-  //    elsewhere in this app, since that's attributed by order CREATION date
-  //    and was already found to undercount real returns by ~69% (see the
-  //    Section 1 Returns KPI fix). Live rows carry return_ratio_month (the
-  //    selected-period ratio); return_ratio_ytd was hardcoded null here until
-  //    2026-08-25, when the backend started matching each ranked product
-  //    against a separate Jan-1-through-period-end pull by title (see
-  //    server.js). Ranking itself still stays period-based, not YTD — only
-  //    the ratio column's scope changed.
-  const scopeLabel = isLive ? monthLabel : (isQuarter(state.month) ? state.month : 'YTD');
-  // Excludes Samples (per Tomer's 2026-09-02 request) -- free/trial items,
-  // not real sellable products, that skew the return ranking (a $0-cost
-  // sample "returned" shows up disproportionately in ratio terms). Filtered
-  // here at render time (not at merge time) so it applies uniformly whether
-  // the list came from a live sync or the embedded YTD snapshot -- both
-  // funnel through this function.
-  const products = monthData.top_returns.filter(p => !isSampleProduct(p.title)).slice(0, 15);
-  const chg = returnsChangeData(monthData);
-  const chgReady = chg && chg !== 'loading' && !chg.error;
-  const pctChg = (cur, prior) => (prior ? (cur - prior) / prior : null);
-  const chgCells = (title) => {
-    if (chg === 'loading') return '<td><span style="color:var(--text-muted)">…</span></td><td><span style="color:var(--text-muted)">…</span></td>';
-    if (!chgReady || !chg.map[title]) return '<td>' + returnsChangeCell(null) + '</td><td>' + returnsChangeCell(null) + '</td>';
-    const [cur, yoy, prev] = chg.map[title];
-    return '<td>' + returnsChangeCell(pctChg(cur, yoy)) + '</td><td>' + returnsChangeCell(chg.hasPrev ? pctChg(cur, prev) : null) + '</td>';
-  };
-  const rows = products.map((p, i) => `<tr>
-      <td>${i+1}. ${escText(p.title)}</td>
-      <td>${fmtVal(p.gross_sales, 'currency-full')}</td>
-      <td>${fmtVal(p.return_value, 'currency-full')}</td>
-      <td>${typeof p.units_returned === 'number' ? p.units_returned.toLocaleString('en-US') : '<span style="color:var(--text-muted)" title="Not in this period’s saved data yet — click Sync">—</span>'}</td>
-      <td>${p.return_ratio_month != null ? fmtVal(p.return_ratio_month, 'percent') : '—'}</td>
-      <td>${p.return_ratio_ytd != null ? fmtVal(p.return_ratio_ytd, 'percent') : '—'}</td>
-      <td>${p.pct_of_total_returns != null ? fmtVal(p.pct_of_total_returns, 'percent') : '—'}</td>
-      ${chgCells(p.title)}
-    </tr>`).join('');
-  // Total row -- added 2026-09-02 per Tomer's request. This table is
-  // inherently capped at the top 15 return products (server-side), so unlike
-  // Sections 5/6/7 this Total can only ever be an honest sum of the products
-  // SHOWN above, not a true store-wide total -- labeled accordingly. Return
-  // Ratio columns use a gross-sales-weighted average across the shown
-  // products; % of Total Returns is the SUM of each row's own
-  // already-correctly-scoped share (each computed against the true
-  // store-wide returns_total), not forced to equal 100%.
-  const totalGross = products.reduce((s, p) => s + (p.gross_sales || 0), 0);
-  const totalReturnValue = products.reduce((s, p) => s + (p.return_value || 0), 0);
-  const totalUnitsReturned = products.length && products.every(p => typeof p.units_returned === 'number') ? products.reduce((s, p) => s + p.units_returned, 0) : null;
-  function weightedReturnRatio(field) {
-    let num = 0, den = 0;
-    products.forEach(p => {
-      if (p[field] !== null && p[field] !== undefined && p.gross_sales) { num += p[field] * p.gross_sales; den += p.gross_sales; }
-    });
-    return den ? num / den : null;
+  if (d.error) {
+    ids.forEach(id => { document.getElementById(id).innerHTML = `<div class="placeholder"><div class="ph-title">Couldn’t load ${id === 'section-3' ? 'returns' : 'refunds'} from Shopify</div><ul><li>${escText(d.error)}</li><li>It’s tried again automatically in a minute.</li></ul></div>`; });
+    return;
   }
-  const totalReturnRatioMonth = weightedReturnRatio('return_ratio_month');
-  const totalReturnRatioYtd = weightedReturnRatio('return_ratio_ytd');
-  let totalPctOfTotalReturns = null;
-  if (products.some(p => p.pct_of_total_returns !== null && p.pct_of_total_returns !== undefined)) {
-    totalPctOfTotalReturns = products.reduce((s, p) => s + (p.pct_of_total_returns || 0), 0);
-  }
-  const totalRow = products.length ? `<tr class="total-row">
-      <td>Total (products shown above)</td>
-      <td>${fmtVal(totalGross, 'currency-full')}</td>
-      <td>${fmtVal(totalReturnValue, 'currency-full')}</td>
-      <td>${totalUnitsReturned !== null ? totalUnitsReturned.toLocaleString('en-US') : '—'}</td>
-      <td>${totalReturnRatioMonth !== null ? fmtVal(totalReturnRatioMonth, 'percent') : '—'}</td>
-      <td>${totalReturnRatioYtd !== null ? fmtVal(totalReturnRatioYtd, 'percent') : '—'}</td>
-      <td>${totalPctOfTotalReturns !== null ? fmtVal(totalPctOfTotalReturns, 'percent') : '—'}</td>
-      ${(() => {
-        if (chg === 'loading') return chgCells(null);
-        if (!chgReady) return chgCells(null);
-        let c = 0, y = 0, pv = 0;
-        products.forEach(p => { const m = chg.map[p.title]; if (m) { c += m[0]; y += m[1]; pv += m[2]; } });
-        return '<td>' + returnsChangeCell(pctChg(c, y)) + '</td><td>' + returnsChangeCell(chg.hasPrev ? pctChg(c, pv) : null) + '</td>';
-      })()}
-    </tr>` : '';
-  document.getElementById('section-3').innerHTML = `<table class="dtable">
-    <thead><tr><th style="text-align:left">Product</th><th>Gross Sales (${scopeLabel})</th><th>Return $ Value (${scopeLabel})</th><th>Units Returned (${scopeLabel})</th><th>Return Ratio (${monthLabel})</th><th>Return Ratio (${isLive || monthData.top_returns_source === 'shopify_period' ? 'YTD' : scopeLabel})</th><th>% of Total Returns (${scopeLabel})</th><th title="Change in Return $ Value vs the same dates last year">YoY</th><th title="Change in Return $ Value vs the previous period">${momLabel()}</th></tr></thead>
-    <tbody>${rows}${totalRow}</tbody>
-  </table>
-  <div style="margin-top:10px;font-size:11px;color:var(--text-muted)">${monthData.top_returns_note || (isLive ? `Pulled live via the Sync button (real-time Shopify sales-reversals data, grouped by product, for the selected date range). Ranked by dollar return value for ${monthLabel} specifically — not year-to-date like the ND.COM embedded snapshot. Return Ratio (YTD) reflects Jan 1 through the end of ${monthLabel} for each product (same Shopify sales-reversals ÷ gross-sales calculation, just a longer window) — shows "—" only for a product with no matching year-to-date data, e.g. one first sold this period; % of Total Returns is this period's share of ${monthLabel}'s Shopify-reported Returns total (Section 1).` : `Pulled from Shopify analytics. Ranked by year-to-date (Jan 1 – today) dollar return value — Gross Sales, Return $ Value, Return Ratio (YTD), and % of Total Returns all reflect that same Jan 1–today window, so they're internally consistent with each other even though they don't match ${monthLabel}'s own totals. Return Ratio (${monthLabel}) additionally shows how each of these 15 products performed in just the currently-selected month, for a more recent read alongside the steadier YTD figure. Ranked by dollar return value; Units Returned is Shopify's returned-units count per product. The store-wide total of ${monthData.top_returns_units_total_ytd !== undefined ? monthData.top_returns_units_total_ytd.toLocaleString('en-US') : '—'} units returned year-to-date (${monthData.top_returns_units_total !== undefined ? monthData.top_returns_units_total.toLocaleString('en-US') : '—'} in ${monthLabel} alone) is shown in Section 1.`)} YoY / ${momLabel()} compare each product's Return $ Value for ${monthLabel} with the same dates last year / the previous ${isQuarter(state.month) ? 'quarter' : 'month'}${state.month === 'YTD' || (isQuarter(state.month) && isQuarterInProgress(state.month)) ? ' (not shown for ' + (state.month === 'YTD' ? 'Year to Date' : 'a quarter still in progress') + ')' : ''} — an increase in returns is shown in red. Samples are excluded from this list.</div>`;
+  renderReturnTable('section-3', 'returns', d);
+  renderReturnTable('section-3b', 'refunds', d);
 }
 
 // Filters out Shopify's catch-all bucket for orders with no resolvable
@@ -5431,14 +5462,14 @@ function usStateRows(key, monthData) {
         .catch(err => { console.error('us-states fetch failed:', err); usStatesCache[ck] = { error: String(err.message || err) }; })
         .finally(() => { if (countryViewKey() === key && usStatesOpen[key]) renderCountry(monthData); });
     }
-    return `<tr class="state-row state-info"><td colspan="9">Loading sales by state…</td></tr>`;
+    return `<tr class="state-row state-info"><td colspan="10">Loading sales by state…</td></tr>`;
   }
   if (entry.error) {
     delete usStatesCache[ck]; // try again next time the row is opened
-    return `<tr class="state-row state-info"><td colspan="9">Sales by state couldn't load (${String(entry.error).replace(/</g, '&lt;')}). Close and reopen United States to retry.</td></tr>`;
+    return `<tr class="state-row state-info"><td colspan="10">Sales by state couldn't load (${String(entry.error).replace(/</g, '&lt;')}). Close and reopen United States to retry.</td></tr>`;
   }
   const states = (entry.states || []).slice().sort((a, b) => b.gross_sales - a.gross_sales);
-  if (!states.length) return `<tr class="state-row state-info"><td colspan="9">No US orders with a shipping state in this period.</td></tr>`;
+  if (!states.length) return `<tr class="state-row state-info"><td colspan="10">No US orders with a shipping state in this period.</td></tr>`;
   const usTotal = states.reduce((t, x) => t + (x.gross_sales || 0), 0);
   const all = !!usStatesAll[key];
   const shown = all ? states : states.slice(0, US_STATES_PAGE_SIZE);
@@ -5448,18 +5479,58 @@ function usStateRows(key, monthData) {
       <td>${fmtVal(x.gross_sales, 'currency-full')}</td>
       <td>${fmtVal(x.net_sales, 'currency-full')}</td>
       <td>${x.aov !== null ? fmtVal(x.aov, 'currency-full') : '—'}</td>
+      <td>—</td>
       <td title="Share of United States gross sales">${usTotal ? fmtVal(x.gross_sales / usTotal, 'percent') + ' of US' : '—'}</td>
       <td>${x.return_rate !== null && x.return_rate !== undefined ? fmtVal(x.return_rate, 'percent') : '—'}</td>
       <td>${yoyCell(x.yoy)}</td>
       <td>${yoyCell(x.mom)}</td>
     </tr>`).join('');
   const more = states.length > US_STATES_PAGE_SIZE
-    ? `<tr class="state-row state-more"><td colspan="9"><button type="button" class="show-more-btn" id="us-states-all">${all ? 'Show top ' + US_STATES_PAGE_SIZE + ' states' : 'Show all ' + states.length + ' states'}</button></td></tr>`
+    ? `<tr class="state-row state-more"><td colspan="10"><button type="button" class="show-more-btn" id="us-states-all">${all ? 'Show top ' + US_STATES_PAGE_SIZE + ' states' : 'Show all ' + states.length + ' states'}</button></td></tr>`
     : '';
   return rows + more;
 }
+// Conversion Rate by country (2026-11-11, Tomer: "to the sales by country
+// section add conversion rate column"): Shopify's own conversion rate —
+// sessions that completed checkout ÷ sessions — by the visitor's country,
+// from /api/country-sessions for exactly the period on screen. All Sites adds
+// the three stores' sessions up.
+const countrySessionsCache = {};
+function countrySessionsData() {
+  const r = usStatesRanges();
+  const sites = state.site === 'all' ? Object.keys(DATA.sites) : [state.site];
+  const ck = [state.site, r.cur.start, r.cur.end].join('|');
+  let entry = countrySessionsCache[ck];
+  if (entry && entry.error && Date.now() - (entry.at || 0) > 60000) { delete countrySessionsCache[ck]; entry = null; }
+  if (entry) return entry;
+  countrySessionsCache[ck] = 'loading';
+  const view = state.site + '|' + state.month;
+  Promise.all(sites.map(site => fetch(`${BACKEND_URL}/api/country-sessions?${new URLSearchParams({ site, start: r.cur.start, end: r.cur.end })}`)
+    .then(res => res.json().then(body => { if (!res.ok) throw new Error(body.error || ('Backend returned ' + res.status)); return body; }))))
+    .then(results => {
+      const map = new Map();
+      let sessions = 0, completed = 0;
+      results.forEach(body => (body.countries || []).forEach(c => {
+        const k = c.country.trim().toLowerCase();
+        const a = map.get(k) || { sessions: 0, completed: 0 };
+        a.sessions += c.sessions; a.completed += c.completed; map.set(k, a);
+        sessions += c.sessions; completed += c.completed;
+      }));
+      countrySessionsCache[ck] = { map, sessions, completed };
+    })
+    .catch(err => { console.error('country-sessions fetch failed:', err); countrySessionsCache[ck] = { error: String(err.message || err), at: Date.now() }; })
+    .finally(() => { if (state.site + '|' + state.month === view && state.site !== 'il') renderCountry(getMonthData()); });
+  return 'loading';
+}
 function renderCountry(monthData) {
   if (!monthData.by_country) { renderPlaceholder('section-5'); return; }
+  const cs = countrySessionsData();
+  const convCell = (country) => {
+    if (cs === 'loading') return '<span style="color:var(--text-muted)">…</span>';
+    if (!cs || cs.error) return '—';
+    const x = cs.map.get(String(country || '').trim().toLowerCase());
+    return x && x.sessions ? `<span title="${x.completed.toLocaleString('en-US')} of ${x.sessions.toLocaleString('en-US')} sessions completed checkout">${fmtVal(x.completed / x.sessions, 'percent')}</span>` : '—';
+  };
   // Sort defensively by gross sales descending — the backend/combine logic
   // already sorts this way, but "top N + show more" only makes sense if
   // we're guaranteed the first N really are the biggest, so don't just
@@ -5485,6 +5556,7 @@ function renderCountry(monthData) {
       <td>${fmtVal(c.gross_sales, 'currency-full')}</td>
       <td>${fmtVal(c.net_sales, 'currency-full')}</td>
       <td>${c.aov !== null ? fmtVal(c.aov, 'currency-full') : '—'}</td>
+      <td>${convCell(c.country)}</td>
       <td>${grandTotalGross ? fmtVal(c.gross_sales / grandTotalGross, 'percent') : '—'}</td>
       <td>${(c.return_rate !== undefined && c.return_rate !== null) ? fmtVal(c.return_rate, 'percent') : '—'}</td>
       <td>${yoyCell(c.yoy)}</td>
@@ -5492,7 +5564,7 @@ function renderCountry(monthData) {
     </tr>${isUsRow(c.country) ? usStateRows(key, monthData) : ''}`).join('');
 
   const showMoreRow = hiddenCount > 0 || expanded
-    ? `<tr class="show-more-row"><td colspan="9">
+    ? `<tr class="show-more-row"><td colspan="10">
          <button type="button" class="show-more-btn" id="country-show-more-btn">${expanded ? 'Show less' : `Show ${hiddenCount} more`}</button>
        </td></tr>`
     : '';
@@ -5529,6 +5601,7 @@ function renderCountry(monthData) {
       <td>${fmtVal(grandTotalGross, 'currency-full')}</td>
       <td>${fmtVal(totalNet, 'currency-full')}</td>
       <td>${totalAov !== null ? fmtVal(totalAov, 'currency-full') : '—'}</td>
+      <td>${cs === 'loading' ? '<span style="color:var(--text-muted)">…</span>' : (cs && !cs.error && cs.sessions ? `<span title="All visitor countries: ${cs.completed.toLocaleString('en-US')} of ${cs.sessions.toLocaleString('en-US')} sessions">${fmtVal(cs.completed / cs.sessions, 'percent')}</span>` : '—')}</td>
       <td>${fmtVal(1, 'percent')}</td>
       <td>${totalReturnRate !== null ? fmtVal(totalReturnRate, 'percent') : '—'}</td>
       <td>${yoyCell(totalChange('yoy'))}</td>
@@ -5536,7 +5609,7 @@ function renderCountry(monthData) {
     </tr>`;
 
   document.getElementById('section-5').innerHTML = `<table class="dtable">
-    <thead><tr><th style="text-align:left">Country</th><th>Orders</th><th>Gross Sales</th><th>Net Sales</th><th>AOV</th><th>% of Total</th><th>Return Rate</th><th>YoY</th><th>${momLabel()}</th></tr></thead>
+    <thead><tr><th style="text-align:left">Country</th><th>Orders</th><th>Gross Sales</th><th>Net Sales</th><th>AOV</th><th title="Sessions that completed checkout ÷ sessions, by visitor country (Shopify)">Conversion Rate</th><th>% of Total</th><th>Return Rate</th><th>YoY</th><th>${momLabel()}</th></tr></thead>
     <tbody>${rows}${showMoreRow}${totalRow}</tbody>
   </table>
   <div style="margin-top:10px;font-size:11px;color:var(--text-muted)">${monthData.by_country_note || 'Pulled live from Shopify analytics, grouped by shipping country where Shopify supports it for this query (falls back to billing country otherwise), exact calendar-month-to-date range.'}</div>`;
@@ -5885,13 +5958,13 @@ function render() {
     renderCountry(monthData);
   }
   // Sales by Country's pill is #6 since the TikTok Shop section became #5.
-  const quicknav5Btn = document.getElementById('quicknav-6');
+  const quicknav5Btn = document.getElementById('quicknav-card-section-5');
   if (quicknav5Btn) quicknav5Btn.hidden = section5Card.hidden;
   // TikTok Shop (added 2026-10-07) — ND.COM only; hidden on ND.EU, ND.IL and
   // All Sites, same pattern as Sales by Country on ND.IL above.
   const ttCard = document.getElementById('card-tiktok');
   ttCard.hidden = state.site !== 'com';
-  const ttPill = document.getElementById('quicknav-5');
+  const ttPill = document.getElementById('quicknav-card-tiktok');
   if (ttPill) ttPill.hidden = ttCard.hidden;
   if (!ttCard.hidden) renderTikTokShop(monthData);
   renderDiscounts(monthData);
@@ -5927,16 +6000,19 @@ document.getElementById('sync-btn').addEventListener('click', performSync);
 // entirely for ND.IL — its pill's hidden state is kept in sync inside
 // render() above (see quicknav-5), not here, since only render() knows
 // the current site.
+// 2026-11-11: Top 10 Refunded Products became #4 (everything after moved
+// up one); pill ids are now 'quicknav-<cardId>' so they don't drift again.
 const QUICKNAV_CARDS = [
   { num: 1, cardId: 'card-1' },
   { num: 2, cardId: 'card-2' },
   { num: 3, cardId: 'card-3' },
-  { num: 4, cardId: 'card-4' },
-  { num: 5, cardId: 'card-tiktok' }, // TikTok Shop (ND.COM only) — added 2026-10-07
-  { num: 6, cardId: 'card-section-5' },
-  { num: 7, cardId: 'card-6' },
-  { num: 8, cardId: 'card-7' },
-  { num: 9, cardId: 'card-8' },
+  { num: 4, cardId: 'card-3b' },
+  { num: 5, cardId: 'card-4' },
+  { num: 6, cardId: 'card-tiktok' }, // TikTok Shop (ND.COM only) — added 2026-10-07
+  { num: 7, cardId: 'card-section-5' },
+  { num: 8, cardId: 'card-6' },
+  { num: 9, cardId: 'card-7' },
+  { num: 10, cardId: 'card-8' },
 ];
 function renderMobileQuicknav() {
   const el = document.getElementById('mobile-quicknav');
@@ -5944,7 +6020,7 @@ function renderMobileQuicknav() {
   QUICKNAV_CARDS.forEach(({ num, cardId }) => {
     const btn = document.createElement('button');
     btn.type = 'button';
-    btn.id = 'quicknav-' + num;
+    btn.id = 'quicknav-' + cardId;
     btn.textContent = String(num);
     btn.title = 'Jump to section ' + num;
     btn.addEventListener('click', () => {
