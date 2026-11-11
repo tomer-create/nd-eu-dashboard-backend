@@ -5523,10 +5523,18 @@ function usStateRows(key, monthData) {
   return rows + more;
 }
 // Conversion Rate by country (2026-11-11, Tomer: "to the sales by country
-// section add conversion rate column"): Shopify's own conversion rate —
-// sessions that completed checkout ÷ sessions — by the visitor's country,
-// from /api/country-sessions for exactly the period on screen. All Sites adds
-// the three stores' sessions up.
+// section add conversion rate column"; then "use this Conversion rate
+// breakdown from triple whale"): Triple Whale's Conversion Rate — Pixel
+// purchases ÷ Pixel sessions — by the visitor's country, from
+// /api/country-sessions for exactly the period on screen (`completed` holds
+// Triple Whale's orders). All Sites adds the three stores up. Country names
+// are matched loosely (Triple Whale writes "The Netherlands", Shopify
+// "Netherlands", etc.).
+const COUNTRY_ALIASES = { 'czech republic': 'czechia', 'turkey': 'türkiye', 'russian federation': 'russia', 'korea, republic of': 'south korea', 'republic of korea': 'south korea', 'united states of america': 'united states', 'usa': 'united states', 'uk': 'united kingdom', 'great britain': 'united kingdom', 'hong kong sar': 'hong kong', 'hong kong sar china': 'hong kong', 'macao sar china': 'macao', 'viet nam': 'vietnam', 'côte d’ivoire': "cote d'ivoire", "côte d'ivoire": "cote d'ivoire" };
+function countryKey(name) {
+  const k = String(name || '').trim().toLowerCase().replace(/^the\s+/, '').replace(/\s+/g, ' ');
+  return COUNTRY_ALIASES[k] || k;
+}
 const countrySessionsCache = {};
 function countrySessionsData() {
   const r = usStatesRanges();
@@ -5543,7 +5551,7 @@ function countrySessionsData() {
       const map = new Map();
       let sessions = 0, completed = 0;
       results.forEach(body => (body.countries || []).forEach(c => {
-        const k = c.country.trim().toLowerCase();
+        const k = countryKey(c.country);
         const a = map.get(k) || { sessions: 0, completed: 0 };
         a.sessions += c.sessions; a.completed += c.completed; map.set(k, a);
         sessions += c.sessions; completed += c.completed;
@@ -5560,8 +5568,8 @@ function renderCountry(monthData) {
   const convCell = (country) => {
     if (cs === 'loading') return '<span style="color:var(--text-muted)">…</span>';
     if (!cs || cs.error) return '—';
-    const x = cs.map.get(String(country || '').trim().toLowerCase());
-    return x && x.sessions ? `<span title="${x.completed.toLocaleString('en-US')} of ${x.sessions.toLocaleString('en-US')} sessions completed checkout">${fmtVal(x.completed / x.sessions, 'percent')}</span>` : '—';
+    const x = cs.map.get(countryKey(country));
+    return x && x.sessions ? `<span title="Triple Whale: ${x.completed.toLocaleString('en-US')} orders from ${x.sessions.toLocaleString('en-US')} sessions">${fmtVal(x.completed / x.sessions, 'percent')}</span>` : '—';
   };
   // Sort defensively by gross sales descending — the backend/combine logic
   // already sorts this way, but "top N + show more" only makes sense if
@@ -5633,7 +5641,7 @@ function renderCountry(monthData) {
       <td>${fmtVal(grandTotalGross, 'currency-full')}</td>
       <td>${fmtVal(totalNet, 'currency-full')}</td>
       <td>${totalAov !== null ? fmtVal(totalAov, 'currency-full') : '—'}</td>
-      <td>${cs === 'loading' ? '<span style="color:var(--text-muted)">…</span>' : (cs && !cs.error && cs.sessions ? `<span title="All visitor countries: ${cs.completed.toLocaleString('en-US')} of ${cs.sessions.toLocaleString('en-US')} sessions">${fmtVal(cs.completed / cs.sessions, 'percent')}</span>` : '—')}</td>
+      <td>${cs === 'loading' ? '<span style="color:var(--text-muted)">…</span>' : (cs && !cs.error && cs.sessions ? `<span title="Triple Whale, all visitor countries: ${cs.completed.toLocaleString('en-US')} orders from ${cs.sessions.toLocaleString('en-US')} sessions">${fmtVal(cs.completed / cs.sessions, 'percent')}</span>` : '—')}</td>
       <td>${fmtVal(1, 'percent')}</td>
       <td>${totalReturnRate !== null ? fmtVal(totalReturnRate, 'percent') : '—'}</td>
       <td>${yoyCell(totalChange('yoy'))}</td>
@@ -5641,7 +5649,7 @@ function renderCountry(monthData) {
     </tr>`;
 
   document.getElementById('section-5').innerHTML = `<table class="dtable">
-    <thead><tr><th style="text-align:left">Country</th><th>Orders</th><th>Gross Sales</th><th>Net Sales</th><th>AOV</th><th title="Sessions that completed checkout ÷ sessions, by visitor country (Shopify)">Conversion Rate</th><th>% of Total</th><th>Return Rate</th><th>YoY</th><th>${momLabel()}</th></tr></thead>
+    <thead><tr><th style="text-align:left">Country</th><th>Orders</th><th>Gross Sales</th><th>Net Sales</th><th>AOV</th><th title="Triple Whale Conversion Rate: Pixel purchases ÷ Pixel sessions, by visitor country">Conversion Rate</th><th>% of Total</th><th>Return Rate</th><th>YoY</th><th>${momLabel()}</th></tr></thead>
     <tbody>${rows}${showMoreRow}${totalRow}</tbody>
   </table>
   <div style="margin-top:10px;font-size:11px;color:var(--text-muted)">${monthData.by_country_note || 'Pulled live from Shopify analytics, grouped by shipping country where Shopify supports it for this query (falls back to billing country otherwise), exact calendar-month-to-date range.'}</div>`;
