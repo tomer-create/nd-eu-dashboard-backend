@@ -1320,6 +1320,15 @@ async function fetchRefundSplitByProduct(site, startISO, endISOExclusive) {
   });
   if (rows.length >= LIMIT) throw new Error(`Too many refund rows for ${site} ${startISO}..${untilISO} — split the range`);
   const ids = rows.map((r) => String(r.refund_id || '')).filter(Boolean);
+  // ND.IL only (2026-11-11): returns come from Shopify's own return process.
+  if (site === 'il') {
+    try {
+      return await ilReturnSplit(site, startISO, endISOExclusive, rows, ids);
+    } catch (err) {
+      // e.g. the app can't read returns yet — keep the refund-note split.
+      console.error(`ND.IL returns from Shopify Returns failed, using refund notes (${startISO}..${untilISO}):`, err.message);
+    }
+  }
   const notes = await refundNotes(site, ids);
   const out = { returns: {}, refunds: {}, totals: { returns: 0, refunds: 0 } };
   rows.forEach((r) => {
@@ -1333,6 +1342,102 @@ async function fetchRefundSplitByProduct(site, startISO, endISOExclusive) {
     const a = out[kind][title] || (out[kind][title] = { value: 0, units: 0 });
     a.value += value; a.units += units;
     out.totals[kind] += value;
+  });
+  return out;
+}
+
+// ---- ND.IL: returns from Shopify's return process (2026-11-11) --------------
+// Tomer: "for the ND.IL … take the actual return process that's been done from
+// Shopify, find a solution only for ND.IL that will not affect the rest."
+// ND.IL runs its returns through Shopify Returns (order → Return → items
+// marked "Returned" with a reason, restocked; most end as an EXCHANGE with no
+// refund, so they never had a refund note). For ND.IL only:
+//   RETURNS = every Shopify Return created in the period (not cancelled /
+//             declined), per product: the returned quantity × the price the
+//             customer actually paid for it (after all discounts), without
+//             VAT — the same basis as Gross Sales and the other sites'
+//             returns. Exchanges and refunded returns both count.
+//   REFUNDS = Shopify's sales reversals of refunds that are NOT part of a
+//             return (cancelled, damaged, missing, out of stock …). Reversals
+//             with no refund behind them (exchange bookkeeping) and refunds
+//             that belong to a return are left out — the return above
+//             already counts those items.
+// ND.COM and ND.EU keep the refund-note split above.
+const IL_RETURN_STATUSES = ['return_requested', 'in_progress', 'inspection_complete', 'returned', 'return_failed'];
+const refundReturnCache = new Map(); // `${site}|${id}` -> true when the refund belongs to a return
+async function refundReturnLinks(site, ids) {
+  const todo = [...new Set(ids)].filter((id) => !refundReturnCache.has(`${site}|${id}`));
+  for (let i = 0; i < todo.length; i += 100) {
+    const batch = todo.slice(i, i + 100);
+    const data = await graphql(site, `query RefundLinks($ids: [ID!]!) { nodes(ids: $ids) { ... on Refund { id return { id } } } }`,
+      { ids: batch.map((id) => `gid://shopify/Refund/${id}`) });
+    const got = new Set();
+    (data.nodes || []).forEach((n) => {
+      if (!n || !n.id) return;
+      const id = String(n.id).split('/').pop();
+      got.add(id);
+      refundReturnCache.set(`${site}|${id}`, !!n.return);
+    });
+    batch.forEach((id) => { if (!got.has(id)) refundReturnCache.set(`${site}|${id}`, false); });
+  }
+  while (refundReturnCache.size > 200000) refundReturnCache.delete(refundReturnCache.keys().next().value);
+  const out = new Map();
+  ids.forEach((id) => out.set(id, !!refundReturnCache.get(`${site}|${id}`)));
+  return out;
+}
+const IL_TZ_DAY = new Intl.DateTimeFormat('en-CA', { timeZone: 'Asia/Jerusalem', year: 'numeric', month: '2-digit', day: '2-digit' });
+async function fetchShopifyReturnsByProduct(site, startISO, endISOExclusive) {
+  const q = `(${IL_RETURN_STATUSES.map((x) => 'return_status:' + x).join(' OR ')}) updated_at:>=${startISO} created_at:<${endISOExclusive}`;
+  const query = `query ShopReturns($q: String!, $after: String) { orders(first: 10, after: $after, query: $q) { pageInfo { hasNextPage endCursor } nodes { id name returns(first: 5) { nodes { id name status createdAt exchangeLineItems(first: 1) { nodes { id } } returnLineItems(first: 20) { nodes { ... on ReturnLineItem { quantity fulfillmentLineItem { lineItem { title product { title } discountedUnitPriceAfterAllDiscountsSet { shopMoney { amount } } taxLines { rate } } } } } } } } } } }`;
+  const products = {};
+  const meta = { returns: 0, exchanges: 0 };
+  let after = null;
+  for (let page = 0; page < 200; page++) {
+    const data = await graphql(site, query, { q, after });
+    const conn = data.orders;
+    (conn.nodes || []).forEach((o) => ((o.returns && o.returns.nodes) || []).forEach((r) => {
+      if (!r || r.status === 'CANCELED' || r.status === 'DECLINED') return;
+      const day = IL_TZ_DAY.format(new Date(r.createdAt));
+      if (day < startISO || day >= endISOExclusive) return;
+      meta.returns += 1;
+      if (r.exchangeLineItems && r.exchangeLineItems.nodes && r.exchangeLineItems.nodes.length) meta.exchanges += 1;
+      ((r.returnLineItems && r.returnLineItems.nodes) || []).forEach((rl) => {
+        const li = rl && rl.fulfillmentLineItem && rl.fulfillmentLineItem.lineItem;
+        if (!li || !rl.quantity) return;
+        const title = String((li.product && li.product.title) || li.title || '').trim();
+        if (!title) return;
+        const unit = Number(li.discountedUnitPriceAfterAllDiscountsSet && li.discountedUnitPriceAfterAllDiscountsSet.shopMoney.amount) || 0;
+        const rate = (li.taxLines || []).reduce((t, x) => t + (Number(x.rate) || 0), 0);
+        const value = (unit * rl.quantity) / (1 + rate); // ND.IL prices include VAT
+        const a = products[title] || (products[title] = { value: 0, units: 0 });
+        a.value += value; a.units += rl.quantity;
+      });
+    }));
+    if (!conn.pageInfo.hasNextPage) break;
+    after = conn.pageInfo.endCursor;
+  }
+  return { products, meta };
+}
+async function ilReturnSplit(site, startISO, endISOExclusive, rows, ids) {
+  const [ret, links] = await Promise.all([
+    fetchShopifyReturnsByProduct(site, startISO, endISOExclusive),
+    refundReturnLinks(site, ids),
+  ]);
+  const out = { returns: {}, refunds: {}, totals: { returns: 0, refunds: 0 }, source: 'shopify_returns', return_count: ret.meta.returns, exchange_count: ret.meta.exchanges };
+  Object.entries(ret.products).forEach(([title, v]) => {
+    out.returns[title] = { value: v.value, units: v.units };
+    out.totals.returns += v.value;
+  });
+  rows.forEach((r) => {
+    const title = String(r.product_title || '').trim();
+    const value = -(Number(r.sales_reversals) || 0);
+    const units = Math.abs(Number(r.quantity_returned) || 0);
+    const id = String(r.refund_id || '');
+    if (!title || (!value && !units)) return;
+    if (!id || links.get(id)) return; // exchange bookkeeping / part of a return
+    const a = out.refunds[title] || (out.refunds[title] = { value: 0, units: 0 });
+    a.value += value; a.units += units;
+    out.totals.refunds += value;
   });
   return out;
 }
