@@ -500,4 +500,31 @@ function attentiveRevenueKeys(site, split) {
 }
 const ATTENTIVE_LABEL_KEYS = { 'Attentive - SMS Journey': 'sms_journey', 'Attentive - Email Journey': 'email_journey', 'Attentive - SMS Campaign': 'sms_campaign', 'Attentive - Email Campaign (Newsletter)': 'email_campaign' };
 
-module.exports = { fetchChannelPerformance, fetchAttentiveSplit, attentiveBucket, attentiveRevenueKeys, ATTENTIVE_LABEL_KEYS, CHANNEL_MAP, TW_SHOP_ID, twSqlRequest };
+// Conversion rate by country (2026-11-11, Tomer: "for the conversion rate
+// use this Conversion rate breakdown from triple whale"): Triple Whale's own
+// Conversion Rate = Pixel purchases ÷ Pixel sessions (web_analytics_table),
+// by the visitor's country, for [start, endExclusive).
+async function fetchCountryConversion(site, start, endExclusive) {
+  if (!process.env.TRIPLEWHALE_API_KEY) throw new Error('Triple Whale isn\'t configured (TRIPLEWHALE_API_KEY)');
+  if (!ISO_DAY.test(String(start)) || !ISO_DAY.test(String(endExclusive))) throw new Error('Invalid date range');
+  const shopId = TW_SHOP_ID[site];
+  if (!shopId) throw new Error(`No Triple Whale shop for site "${site}"`);
+  const query = `
+    SELECT country, SUM(sessions) AS sessions, SUM(orders_quantity) AS orders
+    FROM web_analytics_table
+    WHERE event_date >= '${start}' AND event_date < '${endExclusive}'
+    GROUP BY country
+  `.trim();
+  const res = await twSqlRequest(shopId, query, start, endExclusive);
+  if (!res.ok) {
+    const body = await res.text().catch(() => '');
+    throw new Error(`Triple Whale conversion rate failed (${res.status}): ${body.slice(0, 300)}`);
+  }
+  const json = await res.json();
+  const rows = Array.isArray(json) ? json : json.rows || json.data || [];
+  if (!Array.isArray(rows)) throw new Error('Unexpected Triple Whale response');
+  return rows.map((r) => ({ country: String(r.country || '').trim(), sessions: Number(r.sessions) || 0, orders: Number(r.orders) || 0 }))
+    .filter((r) => r.country && r.sessions > 0);
+}
+
+module.exports = { fetchCountryConversion, fetchChannelPerformance, fetchAttentiveSplit, attentiveBucket, attentiveRevenueKeys, ATTENTIVE_LABEL_KEYS, CHANNEL_MAP, TW_SHOP_ID, twSqlRequest };
