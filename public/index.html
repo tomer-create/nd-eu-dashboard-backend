@@ -353,6 +353,36 @@
   .mobile-quicknav-wrap { display:none; }
   .mobile-quicknav-title { display:none; }
   .mobile-quicknav { display:none; }
+  /* UI pass 2026-11-12: desktop section bar — the same jump buttons as on
+     mobile, with each section's name, pinned under the control bar; the
+     section in view is highlighted. */
+  body:not(.mobile-mode) .mobile-quicknav-wrap { display:block; position: sticky; top: var(--ctl-h, 112px); z-index: 38;
+    background: var(--page-plane); padding: 6px 0 8px; margin: -10px 0 14px; border-bottom: 1px solid var(--border); }
+  body:not(.mobile-mode) .mobile-quicknav { display:flex; gap:6px; overflow-x:auto; scrollbar-width:none; }
+  body:not(.mobile-mode) .mobile-quicknav::-webkit-scrollbar { display:none; }
+  body:not(.mobile-mode) .mobile-quicknav button { flex:none; display:inline-flex; align-items:center; gap:6px;
+    padding: 5px 11px 5px 6px; border-radius: 20px; border: 1px solid var(--border); background: var(--surface-1);
+    color: var(--text-secondary); font: 600 12px/1 inherit; font-family: inherit; cursor: pointer; white-space: nowrap; }
+  body:not(.mobile-mode) .mobile-quicknav button .qn-num { display:inline-flex; align-items:center; justify-content:center;
+    width: 18px; height: 18px; border-radius: 50%; background: var(--track); font-size: 10.5px; }
+  body:not(.mobile-mode) .mobile-quicknav button:hover { border-color: var(--text-muted); color: var(--text-primary); }
+  body:not(.mobile-mode) .mobile-quicknav button.active { background: var(--text-primary); color: var(--page-plane); border-color: var(--text-primary); }
+  body:not(.mobile-mode) .mobile-quicknav button.active .qn-num { background: rgba(255,255,255,0.22); }
+  body:not(.mobile-mode) .mobile-quicknav button[hidden] { display:none; }
+  body:not(.mobile-mode) .card { scroll-margin-top: calc(var(--ctl-h, 112px) + 58px); }
+  .mobile-quicknav button .qn-label { display:none; }
+  body:not(.mobile-mode) .mobile-quicknav button .qn-label { display:inline; }
+  body.mobile-mode .mobile-quicknav button .qn-num { background:none; width:auto; height:auto; }
+  /* UI pass 2026-11-12: long "how it's calculated" notes fold away. */
+  details.calc-note { margin-top: 10px; }
+  details.calc-note > summary { cursor: pointer; font-size: 11.5px; font-weight: 600; color: var(--text-secondary);
+    list-style: none; display: inline-flex; align-items: center; gap: 5px; user-select: none; }
+  details.calc-note > summary::-webkit-details-marker { display:none; }
+  details.calc-note > summary::before { content: 'ⓘ'; font-size: 12.5px; }
+  details.calc-note > summary::after { content: '▸'; font-size: 10px; transition: transform .15s; }
+  details.calc-note[open] > summary::after { transform: rotate(90deg); }
+  details.calc-note > :not(summary) { margin-top: 6px !important; }
+  @media (prefers-reduced-motion: reduce) { details.calc-note > summary::after { transition: none; } }
 
   body.mobile-mode .wrap { padding: 14px 12px 48px; max-width: 600px; }
   /* Not sticky on mobile: the control bar (brand/date/dropdowns/sync) is
@@ -2417,8 +2447,25 @@ function fmtVal(v, fmt) {
 }
 function fmtYoY(v) {
   if (v === null || v === undefined) return null;
-  const s = (v*100).toFixed(0) + '%';
-  return v > 0 ? '+' + s : s;
+  // UI pass 2026-11-12: ▲ / ▼ arrows, so the direction doesn't rely on the
+  // badge colour alone (the colour says good / bad, the arrow says up / down).
+  const pct = Math.round(Math.abs(v) * 100);
+  if (pct === 0) return '0%';
+  return (v > 0 ? '▲' : '▼') + pct + '%';
+}
+// Tile figures (UI pass 2026-11-12): money from 100K up is shortened
+// ($1.19M, $899.3K); smaller amounts drop the cents. fmtTileExact = hover text.
+function fmtTile(v, fmt) {
+  if (v === null || v === undefined) return '—';
+  if (fmt === 'currency' || fmt === 'currency-cents' || fmt === 'currency-full') {
+    return Math.abs(v) >= 100000 ? fmtVal(v, 'currency') : fmtVal(v, 'currency-full');
+  }
+  return fmtVal(v, fmt);
+}
+function fmtTileExact(v, fmt) {
+  if (v === null || v === undefined) return '';
+  if (fmt === 'currency' || fmt === 'currency-cents' || fmt === 'currency-full') return fmtVal(v, 'currency-cents');
+  return String(fmtVal(v, fmt));
 }
 function pctLabel(p) {
   if (p === null || p === undefined) return '—';
@@ -2485,6 +2532,10 @@ function renderKPIs(monthData) {
     const momStr = fmtYoY(momVal);
     const momDir = momVal === null ? 'flat' : (momVal >= 0 === k.higher_is_better ? 'up' : 'down');
     const isUserSplitTile = totalUsers !== null && (k.label === 'New Users' || k.label === 'Returning Users');
+    // UI pass 2026-11-12: a tile without a real goal (none in the sheet, or a
+    // 0 placeholder — Units Sold / Units Returned showed "Goal: 0 · Met goal")
+    // shows no goal line and no bar. Profit keeps 0 / negative goals.
+    const noGoal = k.goal === null || k.goal === undefined || (k.goal === 0 && !/profit/i.test(k.label));
     let progressHtml;
     if (isUserSplitTile) {
       const pctOfTotal = k.actual / totalUsers;
@@ -2492,6 +2543,8 @@ function renderKPIs(monthData) {
       // neutral "info" color (see pbarClass) rather than a good/warn/crit
       // threshold read — a users-mix share isn't a goal being hit or missed.
       progressHtml = renderPBar(pctOfTotal, true, true) + `<div class="pbar-pct">${pctLabel(pctOfTotal)} of total users</div>`;
+    } else if (noGoal) {
+      progressHtml = '';
     } else if ((k.pct_of_goal === null && k.met_goal !== null && k.met_goal !== undefined)
       || (typeof k.goal === 'number' && k.goal <= 0 && typeof k.actual === 'number')) {
       // goal is zero/negative (e.g. a loss-making profit target) — a ratio isn't meaningful.
@@ -2515,16 +2568,18 @@ function renderKPIs(monthData) {
         : pctLabel(k.pct_of_goal) + ' of goal';
       progressHtml = renderPBar(k.pct_of_goal, k.higher_is_better, monthData.is_current) + `<div class="pbar-pct">${pctStr}</div>`;
     }
+    // UI pass 2026-11-12: money rounded on the tile ($1.19M / $899.3K), the
+    // exact figure on hover; empty "YoY —" placeholders left out.
     tile.innerHTML = `
       <div class="kpi-top">
         <span class="kpi-label">${k.label}</span>
-        <span class="kpi-yoy ${yoyStr === null ? 'flat' : yoyDir}">${yoyStr === null ? 'YoY —' : 'YoY ' + yoyStr}</span>
+        ${yoyStr === null ? '' : `<span class="kpi-yoy ${yoyDir}">YoY ${yoyStr}</span>`}
       </div>
       <div class="kpi-mom-row">
-        <span class="kpi-yoy ${momStr === null ? 'flat' : momDir}">${momStr === null ? momLabel() + ' —' : momLabel() + ' ' + momStr}</span>
+        ${momStr === null ? '' : `<span class="kpi-yoy ${momDir}">${momLabel()} ${momStr}</span>`}
       </div>
-      <div class="kpi-value">${fmtVal(k.actual, k.fmt)}</div>
-      <div class="kpi-goal-line">Goal: ${fmtVal(k.goal, k.fmt)}</div>
+      <div class="kpi-value" title="${escText(fmtTileExact(k.actual, k.fmt))}">${fmtTile(k.actual, k.fmt)}</div>
+      ${noGoal && !isUserSplitTile ? '' : `<div class="kpi-goal-line">Goal: ${noGoal ? '—' : fmtTile(k.goal, k.fmt)}</div>`}
       ${progressHtml}
     `;
     grid.appendChild(tile);
@@ -2681,8 +2736,8 @@ function renderTikTokShop(monthData, opts = {}) {
     const y = ttChange(tt.yoy ? tt.yoy[key] : null, higherIsBetter);
     const m = ttChange(tt.mom ? tt.mom[key] : null, higherIsBetter);
     return `<div class="kpi-tile">
-      <div class="kpi-top"><span class="kpi-label">${label}</span>${key ? `<span class="kpi-yoy ${y.dir}">${y.str === null ? 'YoY —' : 'YoY ' + y.str}</span>` : ''}</div>
-      ${key ? `<div class="kpi-mom-row"><span class="kpi-yoy ${m.dir}">${m.str === null ? mLabel + ' —' : mLabel + ' ' + m.str}</span></div>` : ''}
+      <div class="kpi-top"><span class="kpi-label">${label}</span>${key && y.str !== null ? `<span class="kpi-yoy ${y.dir}">YoY ${y.str}</span>` : ''}</div>
+      ${key ? `<div class="kpi-mom-row">${m.str !== null ? `<span class="kpi-yoy ${m.dir}">${mLabel} ${m.str}</span>` : ''}</div>` : ''}
       <div class="kpi-value">${fmtVal(value, fmt)}</div>
       ${extra ? `<div class="kpi-goal-line">${extra}</div>` : ''}
     </div>`;
@@ -2692,8 +2747,8 @@ function renderTikTokShop(monthData, opts = {}) {
   const tileV = (label, valueHtml, yoyV, momV, higherIsBetter, extra, title) => {
     const y = ttChange(yoyV, higherIsBetter), m = ttChange(momV, higherIsBetter);
     return `<div class="kpi-tile"${title ? ` title="${title}"` : ''}>
-      <div class="kpi-top"><span class="kpi-label">${label}</span><span class="kpi-yoy ${y.dir}">${y.str === null ? 'YoY —' : 'YoY ' + y.str}</span></div>
-      <div class="kpi-mom-row"><span class="kpi-yoy ${m.dir}">${m.str === null ? mLabel + ' —' : mLabel + ' ' + m.str}</span></div>
+      <div class="kpi-top"><span class="kpi-label">${label}</span>${y.str !== null ? `<span class="kpi-yoy ${y.dir}">YoY ${y.str}</span>` : ''}</div>
+      <div class="kpi-mom-row">${m.str !== null ? `<span class="kpi-yoy ${m.dir}">${mLabel} ${m.str}</span>` : ''}</div>
       <div class="kpi-value">${valueHtml}</div>
       ${extra ? `<div class="kpi-goal-line">${extra}</div>` : ''}
     </div>`;
@@ -6058,6 +6113,15 @@ const QUICKNAV_CARDS = [
   { num: 9, cardId: 'card-7' },
   { num: 10, cardId: 'card-8' },
 ];
+function quicknavLabel(cardId) {
+  const t = document.querySelector('#' + cardId + ' .section-title');
+  if (!t) return '';
+  const c = t.cloneNode(true);
+  c.querySelectorAll('.section-num, span[id^="mtd-flag"], .pill').forEach(x => x.remove());
+  return c.textContent.replace(/\s+/g, ' ').trim()
+    .replace(/^Marketing & Sales Channel Performance$/, 'Channels')
+    .replace(/^Top 10 /, '');
+}
 function renderMobileQuicknav() {
   const el = document.getElementById('mobile-quicknav');
   el.innerHTML = '';
@@ -6065,13 +6129,72 @@ function renderMobileQuicknav() {
     const btn = document.createElement('button');
     btn.type = 'button';
     btn.id = 'quicknav-' + cardId;
-    btn.textContent = String(num);
-    btn.title = 'Jump to section ' + num;
+    const label = quicknavLabel(cardId);
+    btn.innerHTML = `<span class="qn-num">${num}</span><span class="qn-label">${escText(label)}</span>`;
+    btn.title = label ? `Jump to ${num}. ${label}` : 'Jump to section ' + num;
     btn.addEventListener('click', () => {
       const target = document.getElementById(cardId);
       if (target) target.scrollIntoView({ behavior: 'smooth', block: 'start' });
     });
     el.appendChild(btn);
+  });
+}
+
+// UI pass 2026-11-12 — page chrome:
+//  * --ctl-h = the sticky control bar's height, so the desktop section bar
+//    sits right under it;
+//  * the section bar highlights the section in view;
+//  * long grey "how it's calculated" notes are folded into an
+//    "ⓘ How this is calculated" toggle (sections re-render on their own, so
+//    a MutationObserver folds new notes as they appear).
+function setupPageChrome() {
+  const bar = document.querySelector('.control-bar');
+  const setH = () => { if (bar) document.documentElement.style.setProperty('--ctl-h', bar.offsetHeight + 'px'); };
+  setH();
+  if (bar && 'ResizeObserver' in window) new ResizeObserver(setH).observe(bar);
+  window.addEventListener('resize', setH);
+
+  const markActive = () => {
+    const offset = (bar ? bar.offsetHeight : 0) + 70;
+    let current = null;
+    QUICKNAV_CARDS.forEach(({ cardId }) => {
+      const c = document.getElementById(cardId);
+      if (!c || c.hidden) return;
+      if (c.getBoundingClientRect().top - offset <= 0) current = cardId;
+    });
+    if (!current && QUICKNAV_CARDS.length) current = QUICKNAV_CARDS[0].cardId;
+    let activeBtn = null;
+    document.querySelectorAll('#mobile-quicknav button').forEach(b => { const on = b.id === 'quicknav-' + current; b.classList.toggle('active', on); if (on) activeBtn = b; });
+    const nav = document.getElementById('mobile-quicknav');
+    if (activeBtn && nav && activeBtn.dataset.wasActive !== '1') {
+      nav.querySelectorAll('button').forEach(b => { b.dataset.wasActive = ''; });
+      activeBtn.dataset.wasActive = '1';
+      const l = activeBtn.offsetLeft - nav.offsetLeft, r = l + activeBtn.offsetWidth;
+      if (l < nav.scrollLeft || r > nav.scrollLeft + nav.clientWidth) nav.scrollTo({ left: Math.max(0, l - 24), behavior: 'smooth' });
+    }
+  };
+  let ticking = false;
+  window.addEventListener('scroll', () => { if (!ticking) { ticking = true; requestAnimationFrame(() => { ticking = false; markActive(); }); } }, { passive: true });
+  markActive();
+
+  let pending = false;
+  const fold = () => { pending = false; foldCalcNotes(document); };
+  const mo = new MutationObserver(() => { if (!pending) { pending = true; setTimeout(fold, 60); } });
+  document.querySelectorAll('.card').forEach(c => mo.observe(c, { childList: true, subtree: true }));
+  foldCalcNotes(document);
+}
+function foldCalcNotes(root) {
+  const notes = root.querySelectorAll('.card div.tt-note, .card div[style*="font-size:11px"][style*="text-muted"]');
+  notes.forEach(n => {
+    if (n.closest('details.calc-note') || n.closest('table')) return;
+    if ((n.textContent || '').trim().length < 220) return;
+    const d = document.createElement('details');
+    d.className = 'calc-note';
+    const sum = document.createElement('summary');
+    sum.textContent = 'How this is calculated';
+    n.parentNode.insertBefore(d, n);
+    d.appendChild(sum);
+    d.appendChild(n);
   });
 }
 
@@ -6176,6 +6299,7 @@ renderSiteTabs();
 renderMonthPicker();
 renderTodayDate();
 renderMobileQuicknav();
+setupPageChrome();
 render();
 applyMobileTableLabels(document.querySelector('.wrap'));
 
