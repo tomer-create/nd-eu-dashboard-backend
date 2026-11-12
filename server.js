@@ -2,7 +2,7 @@ require('dotenv').config();
 const path = require('path');
 const express = require('express');
 const cors = require('cors');
-const { fetchRefundSplitByProduct, fetchCountrySessions, fetchOrders, fetchVoidedOrders, fetchOrdersLight, fetchOrdersForTierRevenue, fetchSalesReversals, fetchCostOfGoodsSold, fetchTopReturnsByProduct, fetchCountryBreakdown, fetchUsStateBreakdown, fetchSalesSummary, fetchCustomerAcquisition, fetchProductRetailPrices, fetchCollabsCodeSales, fetchTopProductsAnalytics, getAuthorizeUrl, exchangeCodeForToken } = require('./src/shopify');
+const { fetchSalesTimeseries, fetchRefundSplitByProduct, fetchCountrySessions, fetchOrders, fetchVoidedOrders, fetchOrdersLight, fetchOrdersForTierRevenue, fetchSalesReversals, fetchCostOfGoodsSold, fetchTopReturnsByProduct, fetchCountryBreakdown, fetchUsStateBreakdown, fetchSalesSummary, fetchCustomerAcquisition, fetchProductRetailPrices, fetchCollabsCodeSales, fetchTopProductsAnalytics, getAuthorizeUrl, exchangeCodeForToken } = require('./src/shopify');
 const { aggregate } = require('./src/aggregate');
 const { fetchDiscountTags } = require('./src/discount-tags');
 const { fetchChannelPerformance, fetchAttentiveSplit, attentiveRevenueKeys, ATTENTIVE_LABEL_KEYS, fetchCountryConversion } = require('./src/triplewhale');
@@ -1331,6 +1331,32 @@ app.get('/api/refund-split', async (req, res) => {
     res.json(payload);
   } catch (err) {
     console.error(`refund-split (site=${site}) failed:`, err.message);
+    res.status(502).json({ error: err.message });
+  }
+});
+
+// GET /api/sales-trend?site=com&start=&end=&grain=day|month — Shopify's gross
+// sales, net sales and orders per day / month for the trend charts under the
+// Goal Tracker (UI pass 2, 2026-11-12). Cached 6 h for an ended range, 15 min
+// otherwise.
+const salesTrendCache = new Map();
+app.get('/api/sales-trend', async (req, res) => {
+  const { site, start, end } = req.query;
+  const grain = req.query.grain === 'month' ? 'month' : 'day';
+  if (!['com', 'eu', 'il'].includes(site)) return res.status(400).json({ error: `Unknown or missing site "${site}"` });
+  if (!US_STATES_DATE.test(start || '') || !US_STATES_DATE.test(end || '') || end <= start) return res.status(400).json({ error: 'Invalid date range' });
+  const key = [site, start, end, grain].join('|');
+  const hit = salesTrendCache.get(key);
+  if (hit && hit.expires > Date.now()) return res.json(hit.payload);
+  try {
+    const rows = await fetchSalesTimeseries(site, start, end, grain);
+    const payload = { site, start, end, grain, rows };
+    const ended = new Date(`${end}T00:00:00Z`).getTime() + 86400000 <= Date.now();
+    salesTrendCache.set(key, { payload, expires: Date.now() + (ended ? 6 * 3600 : 15 * 60) * 1000 });
+    if (salesTrendCache.size > 400) salesTrendCache.delete(salesTrendCache.keys().next().value);
+    res.json(payload);
+  } catch (err) {
+    console.error(`sales-trend (site=${site}) failed:`, err.message);
     res.status(502).json({ error: err.message });
   }
 });
