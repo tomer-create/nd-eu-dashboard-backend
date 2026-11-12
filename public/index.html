@@ -807,6 +807,15 @@ async function fetchLiveData(site, month, isCurrent, opts, attempt = 0) {
       throw new Error('The server is restarting (an update was just deployed) — click Sync again in a minute');
     }
     if (!res.ok) throw new Error(body.error || `Backend returned ${res.status}`);
+    // The month in progress may come from the server's shared copy (2026-11-12
+    // reliability pass, see src/month-cache.js): keep when it was pulled and
+    // whether a newer pull is already on its way ("open-stale").
+    const cacheState = res.headers.get('X-Month-Cache') || '';
+    const asOf = res.headers.get('X-Month-Cache-Fetched-At');
+    if (/^open/.test(cacheState) && asOf && body && typeof body === 'object') {
+      Object.defineProperty(body, '__asOf', { value: asOf, enumerable: false });
+      Object.defineProperty(body, '__stale', { value: cacheState === 'open-stale', enumerable: false });
+    }
     return body;
   } finally {
     clearTimeout(timeout);
@@ -2346,7 +2355,7 @@ function monthNeedsPull(month) {
   return Object.keys(DATA.sites).some(s => {
     const c = liveCache[s + '|' + month];
     if (!c) return true;
-    return month === DATA.meta.current_month && (Date.now() - new Date(c.fetchedAt).getTime()) > AUTO_SYNC_FRESH_MS;
+    return month === DATA.meta.current_month && (c.stale || (Date.now() - new Date(c.fetchedAt).getTime()) > AUTO_SYNC_FRESH_MS);
   });
 }
 // 2026-11-04 (Tomer: "make sure you pull all the data retroactive"): Year to
@@ -2360,6 +2369,9 @@ function autoTargetMonths() {
   const cur = DATA.meta.current_month;
   return ms.includes(cur) ? [cur].concat(ms.filter(m => m !== cur)) : ms;
 }
+// When the server answered with its older copy while it pulls a new one, the
+// page asks again a little later (at most 3 times in a row) to pick that up.
+let staleRetryTimer = null, staleRetries = 0;
 function autoSyncForPeriod() {
   if (syncInProgress) { autoSyncPending = true; return; }
   const months = autoTargetMonths().filter(monthNeedsPull);
@@ -2381,6 +2393,7 @@ async function performSync(opts) {
   statusEl.className = 'sync-status';
   const baseText = 'Syncing ' + sites.map(s => siteMeta(s).name).join(', ') + monthTail + ' with Shopify… (can take up to a minute or so, especially the first sync after a while)';
   statusEl.textContent = baseText;
+  let oldestAsOf = null, anyStale = false;
   try {
     const succeededSet = new Set();
     const failed = [];
@@ -2396,14 +2409,22 @@ async function performSync(opts) {
       const results = await Promise.allSettled(sites.map(site => {
         const isCurrent = DATA.sites[site].months[month].is_current;
         // Manual Sync forces a fresh pull (current month, or a single month
-        // you asked for); an automatic pull reads closed months from the
-        // backend's month cache.
-        return fetchLiveData(site, month, isCurrent, { refresh: isCurrentMonth || (!auto && months.length === 1) });
+        // you asked for). An automatic pull (opening the page, switching
+        // store or period) reads the backend's caches: closed months from the
+        // month cache, the month in progress from the copy shared by everyone
+        // viewing (at most 5 minutes old, or refreshed in the background) —
+        // 2026-11-12, so several people opening the dashboard together don't
+        // each start the same heavy pulls.
+        return fetchLiveData(site, month, isCurrent, { refresh: !auto && (isCurrentMonth || months.length === 1) });
       }));
       results.forEach((r, i) => {
         const site = sites[i];
         if (r.status === 'fulfilled') {
-          liveCache[site + '|' + month] = { data: r.value, fetchedAt: new Date() };
+          const asOf = r.value && r.value.__asOf ? new Date(r.value.__asOf) : new Date();
+          const stale = !!(r.value && r.value.__stale);
+          liveCache[site + '|' + month] = { data: r.value, fetchedAt: asOf, stale };
+          if (!oldestAsOf || asOf < oldestAsOf) oldestAsOf = asOf;
+          if (stale) anyStale = true;
           succeededSet.add(site);
         } else {
           const err = r.reason;
@@ -2418,7 +2439,7 @@ async function performSync(opts) {
     Object.keys(refundSplitCache).forEach(k => { if (refundSplitCache[k] !== 'loading') delete refundSplitCache[k]; });
     if (!failed.length) {
       statusEl.className = 'sync-status ok';
-      statusEl.textContent = 'Synced ' + succeeded.map(s => siteMeta(s).name).join(', ') + monthTail + ' at ' + new Date().toLocaleTimeString('en-US', { hour: 'numeric', minute: '2-digit' });
+      statusEl.textContent = 'Synced ' + succeeded.map(s => siteMeta(s).name).join(', ') + monthTail + ' at ' + (oldestAsOf || new Date()).toLocaleTimeString('en-US', { hour: 'numeric', minute: '2-digit' }) + (anyStale ? ' — newer numbers are loading' : '');
     } else if (!succeeded.length) {
       statusEl.className = 'sync-status err';
       statusEl.textContent = 'Sync failed for all sites' + monthTail + ' — ' + failed.join('; ') + '. Showing snapshot data.';
@@ -2432,6 +2453,10 @@ async function performSync(opts) {
     btn.classList.remove('syncing');
     syncInProgress = false;
     if (autoSyncPending) { autoSyncPending = false; autoSyncForPeriod(); }
+    else if (anyStale && staleRetries < 3 && !staleRetryTimer) {
+      staleRetries++;
+      staleRetryTimer = setTimeout(() => { staleRetryTimer = null; autoSyncForPeriod(); }, 75000);
+    } else if (!anyStale) staleRetries = 0;
   }
 }
 
@@ -6570,7 +6595,9 @@ applyMobileTableLabels(document.querySelector('.wrap'));
 // resolves). performSync() disables the button for its own duration, and a
 // disabled <button> doesn't dispatch click events, so a manual click during
 // this initial auto-sync is already safely a no-op — no separate lock needed.
-performSync().finally(autoFillClosedMonths);
+// 2026-11-12: as an automatic pull, so it reads the server's shared copy of
+// the month in progress instead of forcing a fresh pull for every viewer.
+performSync({ auto: true, months: syncTargetMonths() }).finally(autoFillClosedMonths);
 
 // Goals live from the P&L sheet — added 2026-10-12 (Tomer: "the goal October
 // on the ND.COM is wrong"; he chose to read goals live). The goals built
