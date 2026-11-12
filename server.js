@@ -4,6 +4,7 @@ const express = require('express');
 const cors = require('cors');
 const { fetchSalesTimeseries, fetchRefundSplitByProduct, fetchCountrySessions, fetchOrders, fetchVoidedOrders, fetchOrdersLight, fetchOrdersForTierRevenue, fetchSalesReversals, fetchCostOfGoodsSold, fetchTopReturnsByProduct, fetchCountryBreakdown, fetchUsStateBreakdown, fetchSalesSummary, fetchCustomerAcquisition, fetchProductRetailPrices, fetchCollabsCodeSales, fetchTopProductsAnalytics, getAuthorizeUrl, exchangeCodeForToken } = require('./src/shopify');
 const { aggregate } = require('./src/aggregate');
+const { singleFlight } = require('./src/singleflight');
 const { fetchDiscountTags } = require('./src/discount-tags');
 const { fetchChannelPerformance, fetchAttentiveSplit, attentiveRevenueKeys, ATTENTIVE_LABEL_KEYS, fetchCountryConversion } = require('./src/triplewhale');
 const { fetchTikTokShop, fetchGmvEstimate, fetchGifting } = require('./src/tiktokshop');
@@ -67,6 +68,11 @@ app.use(express.json());
 // around as a snapshot-only preview, but Sync will never work there.
 // express.static serves public/index.html automatically for GET /.
 app.use(express.static(path.join(__dirname, 'public')));
+
+// Identical API requests that arrive while one is being answered share that
+// answer instead of each starting the same upstream pulls (2026-11-12 —
+// see src/singleflight.js).
+app.use('/api', singleFlight);
 
 const VALID_SITES = ['com', 'eu', 'il'];
 
