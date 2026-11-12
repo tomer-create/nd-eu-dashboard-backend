@@ -1450,6 +1450,27 @@ async function ilReturnSplit(site, startISO, endISOExclusive, rows, ids) {
   return out;
 }
 
+// Sales over time (UI pass 2, 2026-11-12: trend charts under the Goal
+// Tracker). Shopify's own gross sales, net sales and orders per day or per
+// month, straight from ShopifyQL's TIMESERIES (the same figures as Shopify's
+// sales report). Returns [{ period: 'YYYY-MM-DD', gross_sales, net_sales, orders }].
+async function fetchSalesTimeseries(site, startISO, endISOExclusive, grain) {
+  const g = grain === 'month' ? 'month' : 'day';
+  const untilDate = new Date(endISOExclusive + 'T00:00:00Z');
+  untilDate.setUTCDate(untilDate.getUTCDate() - 1);
+  const untilISO = untilDate.toISOString().slice(0, 10);
+  const q = `FROM sales SHOW gross_sales, net_sales, orders TIMESERIES ${g} SINCE ${startISO} UNTIL ${untilISO}`;
+  const data = await graphql(site, `query SalesTrend($q: String!) { shopifyqlQuery(query: $q) { parseErrors tableData { columns { name } rows } } }`, { q });
+  const result = data.shopifyqlQuery;
+  if (result.parseErrors && result.parseErrors.length) throw new Error(`ShopifyQL parse error for "${site}" (query: ${q}): ${result.parseErrors.join('; ')}`);
+  const cols = (result.tableData.columns || []).map((c) => c.name);
+  return (result.tableData.rows || []).map((row) => {
+    const values = Array.isArray(row) ? row : cols.map((n) => row[n]);
+    const o = {}; cols.forEach((n, i) => { o[n] = values[i]; });
+    return { period: String(o[g] || '').slice(0, 10), gross_sales: Number(o.gross_sales) || 0, net_sales: Number(o.net_sales) || 0, orders: Number(o.orders) || 0 };
+  }).filter((r) => r.period);
+}
+
 // Sessions and completed checkouts by visitor country (2026-11-11, Tomer:
 // "to the sales by country section add conversion rate column"). Shopify's
 // own conversion rate = sessions that completed checkout ÷ sessions.
@@ -1470,6 +1491,7 @@ async function fetchCountrySessions(site, startISO, endISOExclusive) {
 }
 
 module.exports = {
+  fetchSalesTimeseries,
   fetchRefundSplitByProduct,
   fetchCountrySessions,
   fetchVoidedOrders,
