@@ -174,6 +174,14 @@ async function graphql(site, query, variables = {}, attempt = 0) {
       await new Promise((r) => setTimeout(r, waitMs));
       return graphql(site, query, variables, attempt + 1);
     }
+    // QA 2026-11-12: Shopify sometimes answers a valid query with a one-off
+    // "Error executing query" / INTERNAL_SERVER_ERROR (seen on ND.IL's
+    // returns) — retried twice before giving up.
+    const internal = errorsArray.some((e) => e && (/Error executing query/i.test(e.message || '') || (e.extensions && e.extensions.code === 'INTERNAL_SERVER_ERROR')));
+    if (internal && attempt < 2) {
+      await new Promise((r) => setTimeout(r, 1500 * (attempt + 1)));
+      return graphql(site, query, variables, attempt + 1);
+    }
     throw new Error(`Shopify GraphQL error for "${site}": ${JSON.stringify(body.errors)}`);
   }
 
