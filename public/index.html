@@ -373,6 +373,36 @@
   .mobile-quicknav button .qn-label { display:none; }
   body:not(.mobile-mode) .mobile-quicknav button .qn-label { display:inline; }
   body.mobile-mode .mobile-quicknav button .qn-num { background:none; width:auto; height:auto; }
+  /* UI pass 2 (2026-11-12): sticky table headers on desktop — the tables'
+     own horizontal-scroll wrappers are lifted on wide screens so the header
+     row can stick under the section bar. */
+  @media (min-width: 1100px) {
+    body:not(.mobile-mode) .c4-table-wrap, body:not(.mobile-mode) #section-3, body:not(.mobile-mode) #section-3b { overflow: visible; }
+  }
+  body:not(.mobile-mode) table.dtable thead th { position: sticky; top: calc(var(--ctl-h, 112px) + var(--qn-h, 46px)); z-index: 5;
+    background: var(--surface-1); box-shadow: inset 0 -1px 0 var(--border); }
+  /* Share bar next to a percentage (Sales by Country). */
+  .share-cell { display:inline-flex; align-items:center; gap:8px; justify-content:flex-end; }
+  .share-bar { display:inline-block; width:56px; height:6px; border-radius:3px; background:var(--track); overflow:hidden; }
+  .share-bar > i { display:block; height:100%; background: var(--series-1); border-radius:3px; }
+  tr.other-row td { color: var(--text-secondary); font-style: italic; }
+  /* Trend charts under the Goal Tracker. */
+  .trend-block { display:grid; grid-template-columns: 1fr 1fr; gap: 14px; margin-top: 14px; }
+  .trend-card { border: 1px solid var(--border); border-radius: 10px; padding: 12px 14px 8px; background: var(--page-plane); position: relative; min-width: 0; }
+  .trend-head { display:flex; justify-content:space-between; align-items:baseline; gap:10px; flex-wrap:wrap; }
+  .trend-title { font-size: 12.5px; font-weight: 650; color: var(--text-primary); }
+  .trend-legend { display:flex; gap:12px; font-size: 11px; color: var(--text-secondary); }
+  .trend-legend i { display:inline-block; width:14px; height:0; border-top:2.5px solid var(--series-1); vertical-align: middle; margin-right:5px; }
+  .trend-legend i.ly { border-top: 2px dashed var(--text-muted); }
+  .trend-legend i.bar { height:8px; border:0; background: var(--series-1); border-radius:2px; opacity:.85; }
+  .trend-sum { font-size: 11px; color: var(--text-muted); margin-top: 2px; }
+  .trend-svg { width: 100%; height: 190px; display:block; margin-top: 6px; overflow: visible; }
+  .trend-svg text { font-size: 10px; fill: var(--text-muted); font-family: inherit; font-variant-numeric: tabular-nums; }
+  .trend-tip { position:absolute; pointer-events:none; background: var(--text-primary); color: var(--page-plane); font-size: 11px;
+    padding: 6px 8px; border-radius: 6px; white-space: nowrap; transform: translate(-50%, -100%); line-height: 1.45; z-index: 6;
+    font-variant-numeric: tabular-nums; }
+  .trend-msg { font-size: 12px; color: var(--text-muted); padding: 40px 0; text-align: center; }
+  body.mobile-mode .trend-block { grid-template-columns: 1fr; }
   /* UI pass 2026-11-12: long "how it's calculated" notes fold away. */
   details.calc-note { margin-top: 10px; }
   details.calc-note > summary { cursor: pointer; font-size: 11.5px; font-weight: 600; color: var(--text-secondary);
@@ -392,6 +422,19 @@
      verifying the quicknav title/centering change 2026-09-09. Only the
      compact quicknav-wrap below stays pinned in mobile mode now. */
   body.mobile-mode .control-bar { position: static; gap: 10px; padding: 12px 0 10px; }
+  /* UI pass 2 (2026-11-12): compact mobile header — brand and buttons on one
+     line, store + period side by side, Sync next to its status. */
+  body.mobile-mode .control-bar-top { flex-direction: row !important; justify-content: space-between !important; align-items: center !important; text-align: left !important; gap: 8px !important; }
+  body.mobile-mode .brand { justify-content: flex-start !important; gap: 8px; min-width: 0; }
+  body.mobile-mode .brand .sub, body.mobile-mode .today-date, body.mobile-mode .mobile-quicknav-title { display: none !important; }
+  body.mobile-mode .brand h1 { font-size: 15px !important; white-space: nowrap; }
+  body.mobile-mode .brand-logo { height: 24px !important; }
+  body.mobile-mode .date-toggle-row { width: auto !important; flex-wrap: nowrap !important; gap: 6px !important; }
+  body.mobile-mode .mobile-toggle-btn { padding: 6px 9px !important; font-size: 11.5px !important; }
+  body.mobile-mode .controls { display: grid !important; grid-template-columns: 1fr 1fr; gap: 8px !important; }
+  body.mobile-mode select.site-picker-mobile, body.mobile-mode select.month-picker { padding: 9px 10px !important; font-size: 13.5px !important; min-width: 0; }
+  body.mobile-mode .sync-btn { padding: 9px 12px !important; font-size: 13px !important; }
+  body.mobile-mode .sync-status { align-self: center; text-align: left !important; font-size: 11px; }
   /* Top line (brand) and the date+toggle line below it are both centered as
      a block -- requested 2026-09-09: "center the first line" + "desktop
      view button move to the same line of the date". */
@@ -506,6 +549,7 @@
     <div class="section-title"><span class="section-num">1</span>Goal Tracker<span id="mtd-flag-1"></span></div>
     <div class="section-sub">Monthly goal vs. actual, progress to goal, and year-over-year change</div>
     <div class="kpi-grid" id="kpi-grid"></div>
+    <div class="trend-block" id="trend-block"></div>
   </div>
 
   <div class="card" id="card-2">
@@ -2467,6 +2511,26 @@ function fmtTileExact(v, fmt) {
   if (fmt === 'currency' || fmt === 'currency-cents' || fmt === 'currency-full') return fmtVal(v, 'currency-cents');
   return String(fmtVal(v, fmt));
 }
+// Product names (UI pass 2, 2026-11-12): Shopify's ALL-CAPS titles shown in
+// title case ("MY DREAM CONCEALER LIPSTICK" -> "My Dream Concealer
+// Lipstick"); names that already have lower-case letters, and the Hebrew
+// part of ND.IL names, are left as they are. The full original name stays in
+// the tooltip.
+const TITLE_KEEP_UPPER = new Set(['ND', 'BA', 'EU', 'US', 'UK', 'IL', 'II', 'III', 'XL', 'SPF', 'UV', 'TV', 'DIY', 'BFF']);
+const TITLE_SMALL = new Set(['a', 'an', 'and', 'of', 'the', 'to', 'in', 'on', 'for', 'with', 'or', 'by', 'at']);
+function prettyTitle(t) {
+  const s = String(t || '');
+  if (/[a-z]/.test(s.replace(/[^\x00-\x7F]/g, ''))) return s;
+  let first = true;
+  return s.replace(/[A-Z][A-Z'’]*|\d+[A-Z]*/g, (w) => {
+    let out;
+    if (TITLE_KEEP_UPPER.has(w) || /\d/.test(w)) out = w;
+    else if (!first && TITLE_SMALL.has(w.toLowerCase())) out = w.toLowerCase();
+    else out = w.charAt(0) + w.slice(1).toLowerCase();
+    first = false;
+    return out;
+  });
+}
 function pctLabel(p) {
   if (p === null || p === undefined) return '—';
   return Math.round(p*100) + '%';
@@ -3416,7 +3480,7 @@ function renderTikTokShop(monthData, opts = {}) {
   const prodTable = prods.length ? `
     <table class="dtable">
       <thead><tr><th style="text-align:left">Product</th><th>Gross sales</th><th>Units</th><th>% of gross</th><th>YoY</th><th>${mLabel}</th></tr></thead>
-      <tbody>${prods.map((p, i) => `<tr><td><div class="tt-title" title="${escText(p.title)}">${i+1}. ${escText(p.title)}</div></td><td>${fmtVal(p.gross_sales,'currency-full')}</td><td>${fmtVal(p.units,'number')}</td><td>${gmv ? fmtVal(p.gross_sales/gmv,'percent') : '—'}</td><td>${pCell(p.gross_sales, p.yoy_gross)}</td><td>${pCell(p.gross_sales, multi ? (qoqOk ? p.prev3_gross : undefined) : p.prev_gross)}</td></tr>`).join('')}</tbody>
+      <tbody>${prods.map((p, i) => `<tr><td><div class="tt-title" title="${escText(p.title)}">${i+1}. ${escText(prettyTitle(p.title))}</div></td><td>${fmtVal(p.gross_sales,'currency-full')}</td><td>${fmtVal(p.units,'number')}</td><td>${gmv ? fmtVal(p.gross_sales/gmv,'percent') : '—'}</td><td>${pCell(p.gross_sales, p.yoy_gross)}</td><td>${pCell(p.gross_sales, multi ? (qoqOk ? p.prev3_gross : undefined) : p.prev_gross)}</td></tr>`).join('')}</tbody>
     </table>${tt.top_products_note ? `<div class="tt-note">${tt.top_products_note}</div>` : ''}` : `<div class="tt-pending">No product-level TikTok Shop data for this period.</div>`;
 
   const partial = tt.months_with_data && tt.months_total && tt.months_with_data < tt.months_total
@@ -5182,7 +5246,7 @@ function renderTopProducts(monthData) {
     ? `<tr class="show-more-row"><td colspan="7"><button type="button" class="show-more-btn" id="top-products-more" aria-expanded="${tpOpen}">${tpOpen ? '− Show top ' + TOP_PRODUCTS_PAGE : '+ ' + (tpAll.length - TOP_PRODUCTS_PAGE) + ' more products'}</button></td></tr>`
     : '';
   const rows = tpShown.map((p, i) => `<tr>
-      <td>${i+1}. ${escText(p.title)}</td>
+      <td title="${escText(p.title)}">${i+1}. ${escText(prettyTitle(p.title))}</td>
       <td>${fmtVal(p.gross_sales, 'currency-full')}</td>
       <td>${p.net_sales_est !== null ? fmtVal(p.net_sales_est, 'currency-full') : '—'}</td>
       <td>${p.units_sold !== null && p.units_sold !== undefined ? p.units_sold.toLocaleString('en-US') : '—'}</td>
@@ -5435,7 +5499,7 @@ function renderReturnTable(elId, kind, data) {
   const ratio = (v, g) => (g ? v / g : null);
   const pct = v => (v === null || v === undefined ? '—' : fmtVal(v, 'percent'));
   const rows = shown.map((p, i) => `<tr>
-      <td>${i + 1}. ${escText(p.title)}</td>
+      <td title="${escText(p.title)}">${i + 1}. ${escText(prettyTitle(p.title))}</td>
       <td>${p._g ? fmtVal(p.gross_sales, 'currency-full') : '—'}</td>
       <td>${fmtVal(p.value, 'currency-full')}</td>
       <td>${p.units.toLocaleString('en-US')}</td>
@@ -5512,7 +5576,7 @@ function isUnknownCountry(name) {
 // Total row (matching the Total-row convention already used in Sections 6
 // and 7) — added 2026-09-01 after Tomer flagged ND.EU's country list running
 // long (Europe naturally spans many more countries than ND.COM/ND.IL).
-const COUNTRY_PAGE_SIZE = 15;
+const COUNTRY_PAGE_SIZE = 5; // UI pass 2 (2026-11-12): top 5 + "Other countries" (was 15)
 
 // ---- US sales by state (added 2026-10-08 per Tomer: "on ND.COM under Sales
 // by Country under United States add breakdown by state") ----
@@ -5621,6 +5685,157 @@ function countrySessionsData() {
     .finally(() => { if (state.site + '|' + state.month === view && state.site !== 'il') renderCountry(getMonthData()); });
   return 'loading';
 }
+// ---- Trend charts (UI pass 2, 2026-11-12) ---------------------------------
+// Under the Goal Tracker: (1) gross sales per day for the period on screen
+// against the same days last year; (2) gross sales per month for the last 13
+// months against the year before. Shopify's own figures (/api/sales-trend);
+// All Sites adds the three stores up in USD.
+const trendCache = {};
+function trendSeries(start, end, grain) {
+  const sites = state.site === 'all' ? Object.keys(DATA.sites) : [state.site];
+  const ck = [state.site, start, end, grain].join('|');
+  let e = trendCache[ck];
+  if (e && e.error && Date.now() - (e.at || 0) > 60000) { delete trendCache[ck]; e = null; }
+  if (e) return e;
+  trendCache[ck] = 'loading';
+  const view = state.site + '|' + state.month;
+  Promise.all(sites.map(site => fetch(`${BACKEND_URL}/api/sales-trend?${new URLSearchParams({ site, start, end, grain })}`)
+    .then(res => res.json().catch(() => ({ error: 'Backend returned ' + res.status })).then(b => { if (!res.ok || b.error) throw new Error(b.error || ('Backend returned ' + res.status)); return { site, rows: b.rows || [] }; }))))
+    .then(list => {
+      const by = new Map();
+      list.forEach(({ site, rows }) => {
+        const fx = state.site === 'all' && FX_TO_USD[site] != null ? FX_TO_USD[site] : 1;
+        rows.forEach(r => { const a = by.get(r.period) || { period: r.period, gross: 0, net: 0, orders: 0 }; a.gross += r.gross_sales * fx; a.net += r.net_sales * fx; a.orders += r.orders; by.set(r.period, a); });
+      });
+      trendCache[ck] = Array.from(by.values()).sort((a, b) => a.period < b.period ? -1 : 1);
+    })
+    .catch(err => { trendCache[ck] = { error: String(err.message || err), at: Date.now() }; })
+    .finally(() => { if (state.site + '|' + state.month === view) renderTrends(); });
+  return 'loading';
+}
+function isoAddDays(iso, n) { const d = new Date(iso + 'T00:00:00Z'); d.setUTCDate(d.getUTCDate() + n); return d.toISOString().slice(0, 10); }
+function isoMonthStart(iso, addMonths) { const d = new Date(iso + 'T00:00:00Z'); return new Date(Date.UTC(d.getUTCFullYear(), d.getUTCMonth() + (addMonths || 0), 1)).toISOString().slice(0, 10); }
+const MONTHS_SHORT = ['Jan','Feb','Mar','Apr','May','Jun','Jul','Aug','Sep','Oct','Nov','Dec'];
+function trendLabel(iso, grain) {
+  const d = new Date(iso + 'T00:00:00Z');
+  return grain === 'month' ? MONTHS_SHORT[d.getUTCMonth()] + ' ' + String(d.getUTCFullYear()).slice(2) : MONTHS_SHORT[d.getUTCMonth()] + ' ' + d.getUTCDate();
+}
+function renderTrends() {
+  const el = document.getElementById('trend-block');
+  if (!el) return;
+  const r = usStatesRanges();
+  // Daily: the period on screen vs the same days a year earlier.
+  const dCur = trendSeries(r.cur.start, r.cur.end, 'day');
+  const dLy = trendSeries(r.yoy.start, r.yoy.end, 'day');
+  // Monthly: 13 months ending with the period's last month, and the 13 before.
+  const lastDay = isoAddDays(r.cur.end, -1);
+  const mEnd = isoMonthStart(lastDay, 1), mStart = isoMonthStart(lastDay, -12), lyStart = isoMonthStart(lastDay, -24);
+  const mAll = trendSeries(lyStart, mEnd, 'month');
+  const box = (id, title, sub, legend) => `<div class="trend-card" id="${id}"><div class="trend-head"><span class="trend-title">${title}</span><span class="trend-legend">${legend}</span></div><div class="trend-sum">${sub}</div><div class="trend-body"></div></div>`;
+  const periodName = state.month === 'YTD' ? 'year to date' : isQuarter(state.month) ? state.month : monthLabelText();
+  el.innerHTML = box('trend-daily', 'Gross sales per day', '', '<span><i></i>' + escText(periodName) + '</span><span><i class="ly"></i>Last year</span>')
+    + box('trend-monthly', 'Gross sales per month', '', '<span><i class="bar"></i>Last 13 months</span><span><i class="ly"></i>Year before</span>');
+  const put = (id, html, sum) => { const c = document.getElementById(id); c.querySelector('.trend-body').innerHTML = html; c.querySelector('.trend-sum').innerHTML = sum || ''; };
+  const pending = (x) => x === 'loading';
+  const failed = (x) => x && x.error;
+  // Daily chart
+  if (pending(dCur) || pending(dLy)) put('trend-daily', '<div class="trend-msg">Loading daily sales from Shopify…</div>');
+  else if (failed(dCur)) put('trend-daily', `<div class="trend-msg">Couldn’t load daily sales (${escText(dCur.error)}) — retrying in a minute.</div>`);
+  else {
+    const ly = failed(dLy) ? [] : dLy;
+    const n = dCur.length;
+    const lyByIdx = ly.map(x => x.gross);
+    const pts = dCur.map((x, i) => ({ label: trendLabel(x.period, 'day'), v: x.gross, ly: i < lyByIdx.length ? lyByIdx[i] : null, orders: x.orders }));
+    const tot = dCur.reduce((t, x) => t + x.gross, 0), totLy = ly.slice(0, n).reduce((t, x) => t + x.gross, 0);
+    const chg = totLy ? (tot - totLy) / totLy : null;
+    put('trend-daily', trendSvg('trend-daily', pts, 'line'), `${fmtTile(tot, 'currency')} in ${n} day${n === 1 ? '' : 's'}${chg !== null ? ` · ${fmtYoY(chg)} vs the same days last year` : ''}`);
+  }
+  // Monthly chart
+  if (pending(mAll)) put('trend-monthly', '<div class="trend-msg">Loading monthly sales from Shopify…</div>');
+  else if (failed(mAll)) put('trend-monthly', `<div class="trend-msg">Couldn’t load monthly sales (${escText(mAll.error)}) — retrying in a minute.</div>`);
+  else {
+    const byP = new Map(mAll.map(x => [x.period, x]));
+    const pts = [];
+    for (let i = 0; i < 13; i++) {
+      const p = isoMonthStart(mStart, i), lp = isoMonthStart(mStart, i - 12);
+      const cur = byP.get(p), prev = byP.get(lp);
+      pts.push({ label: trendLabel(p, 'month'), v: cur ? cur.gross : 0, ly: prev ? prev.gross : null, orders: cur ? cur.orders : 0 });
+    }
+    const last = pts[pts.length - 1];
+    const inProgress = r.cur.end > new Date().toISOString().slice(0, 10);
+    // A month in progress isn't compared with last year's full month.
+    put('trend-monthly', trendSvg('trend-monthly', pts, 'bar'), `${last.label}${inProgress ? ' (in progress)' : ''}: ${fmtTile(last.v, 'currency')}${last.ly && !inProgress ? ` · ${fmtYoY((last.v - last.ly) / last.ly)} YoY` : ''}`);
+  }
+}
+// A small SVG chart: kind 'line' (this period vs last year) or 'bar' (bars +
+// last year as a dashed line). Hover shows the day / month's figures.
+function trendSvg(id, pts, kind) {
+  const W = 560, H = 190, L = 46, R = 8, T = 10, B = 22;
+  const n = pts.length;
+  if (!n) return '<div class="trend-msg">No sales in this period.</div>';
+  const maxV = Math.max(1, ...pts.map(p => Math.max(p.v || 0, p.ly || 0)));
+  const nice = (m) => { const e = Math.pow(10, Math.floor(Math.log10(m))); const f = m / e; return (f <= 1 ? 1 : f <= 2 ? 2 : f <= 2.5 ? 2.5 : f <= 5 ? 5 : 10) * e; };
+  const top = nice(maxV);
+  const y = v => T + (H - T - B) * (1 - v / top);
+  const step = (W - L - R) / (kind === 'bar' ? n : Math.max(1, n - 1));
+  const x = i => kind === 'bar' ? L + step * (i + 0.5) : L + step * i;
+  let g = '';
+  for (let k = 0; k <= 4; k++) {
+    const v = top * k / 4, yy = y(v);
+    g += `<line x1="${L}" x2="${W - R}" y1="${yy}" y2="${yy}" stroke="var(--gridline)" stroke-width="1"/>`;
+    g += `<text x="${L - 6}" y="${yy + 3}" text-anchor="end">${k === 0 ? '0' : sym() + fmtCompact(v)}</text>`;
+  }
+  const every = Math.max(1, Math.ceil(n / (kind === 'bar' ? 13 : 8)));
+  pts.forEach((p, i) => { if (i % every === 0 || (kind !== 'bar' && i === n - 1 && (n - 1) % every > every / 2)) g += `<text x="${x(i)}" y="${H - 6}" text-anchor="middle">${escText(p.label)}</text>`; });
+  const lyPts = pts.map((p, i) => p.ly === null || p.ly === undefined ? null : [x(i), y(p.ly)]);
+  const path = (arr) => { let d = '', pen = false; arr.forEach(a => { if (!a) { pen = false; return; } d += (pen ? 'L' : 'M') + a[0].toFixed(1) + ' ' + a[1].toFixed(1) + ' '; pen = true; }); return d; };
+  let body = '';
+  if (kind === 'bar') {
+    const bw = Math.max(2, step * 0.62);
+    pts.forEach((p, i) => { const yy = y(p.v || 0); body += `<rect x="${(x(i) - bw / 2).toFixed(1)}" y="${yy.toFixed(1)}" width="${bw.toFixed(1)}" height="${(H - B - yy).toFixed(1)}" rx="2" fill="var(--series-1)" opacity="${i === n - 1 ? 1 : 0.78}"/>`; });
+    body += `<path d="${path(lyPts)}" fill="none" stroke="var(--text-muted)" stroke-width="1.6" stroke-dasharray="4 3"/>`;
+  } else {
+    const cur = pts.map((p, i) => [x(i), y(p.v || 0)]);
+    const area = cur.length ? `M${cur[0][0]} ${H - B} ` + cur.map(a => `L${a[0].toFixed(1)} ${a[1].toFixed(1)}`).join(' ') + ` L${cur[cur.length - 1][0]} ${H - B} Z` : '';
+    body += `<path d="${area}" fill="var(--series-1)" opacity="0.10"/>`;
+    body += `<path d="${path(lyPts)}" fill="none" stroke="var(--text-muted)" stroke-width="1.6" stroke-dasharray="4 3"/>`;
+    body += `<path d="${path(cur)}" fill="none" stroke="var(--series-1)" stroke-width="2.2" stroke-linejoin="round" stroke-linecap="round"/>`;
+    const lastP = cur[cur.length - 1];
+    body += `<circle cx="${lastP[0]}" cy="${lastP[1]}" r="3.5" fill="var(--series-1)" stroke="var(--surface-1)" stroke-width="1.5"/>`;
+  }
+  const svgId = id + '-svg';
+  setTimeout(() => attachTrendHover(svgId, pts, { W, L, R, step, kind, x, y }), 0);
+  return `<svg class="trend-svg" id="${svgId}" viewBox="0 0 ${W} ${H}" preserveAspectRatio="none" role="img" aria-label="${kind === 'bar' ? 'Gross sales per month' : 'Gross sales per day'}">${g}${body}<line class="trend-guide" x1="0" x2="0" y1="${T}" y2="${H - B}" stroke="var(--text-secondary)" stroke-width="1" opacity="0"/><rect x="${L}" y="${T}" width="${W - L - R}" height="${H - T - B}" fill="transparent"/></svg>`;
+}
+function attachTrendHover(svgId, pts, geo) {
+  const svg = document.getElementById(svgId);
+  if (!svg) return;
+  const card = svg.closest('.trend-card');
+  let tip = card.querySelector('.trend-tip');
+  if (!tip) { tip = document.createElement('div'); tip.className = 'trend-tip'; tip.hidden = true; card.appendChild(tip); }
+  const guide = svg.querySelector('.trend-guide');
+  const show = (evt) => {
+    const rect = svg.getBoundingClientRect();
+    const vx = (evt.clientX - rect.left) / rect.width * geo.W;
+    let i = geo.kind === 'bar' ? Math.floor((vx - geo.L) / geo.step) : Math.round((vx - geo.L) / geo.step);
+    i = Math.max(0, Math.min(pts.length - 1, i));
+    const p = pts[i];
+    guide.setAttribute('x1', geo.x(i)); guide.setAttribute('x2', geo.x(i)); guide.setAttribute('opacity', geo.kind === 'bar' ? 0 : 0.5);
+    const chg = p.ly ? (p.v - p.ly) / p.ly : null;
+    tip.innerHTML = `<b>${escText(p.label)}</b><br>${fmtVal(p.v, 'currency-full')}${p.orders ? ' · ' + p.orders.toLocaleString('en-US') + ' orders' : ''}${p.ly !== null && p.ly !== undefined ? `<br>Last year ${fmtVal(p.ly, 'currency-full')}${chg !== null ? ' (' + fmtYoY(chg) + ')' : ''}` : ''}`;
+    const cardRect = card.getBoundingClientRect();
+    const px = rect.left - cardRect.left + geo.x(i) / geo.W * rect.width;
+    tip.style.left = Math.max(70, Math.min(cardRect.width - 70, px)) + 'px';
+    tip.style.top = (rect.top - cardRect.top + 4) + 'px';
+    tip.hidden = false;
+  };
+  svg.addEventListener('mousemove', show);
+  svg.addEventListener('mouseleave', () => { tip.hidden = true; guide.setAttribute('opacity', 0); });
+}
+function shareCell(v) {
+  if (v === null || v === undefined || !isFinite(v)) return '—';
+  return `<span class="share-cell"><span class="share-bar" aria-hidden="true"><i style="width:${Math.max(0, Math.min(100, v * 100)).toFixed(1)}%"></i></span>${fmtVal(v, 'percent')}</span>`;
+}
 function renderCountry(monthData) {
   if (!monthData.by_country) { renderPlaceholder('section-5'); return; }
   const cs = countrySessionsData();
@@ -5656,15 +5871,47 @@ function renderCountry(monthData) {
       <td>${fmtVal(c.net_sales, 'currency-full')}</td>
       <td>${c.aov !== null ? fmtVal(c.aov, 'currency-full') : '—'}</td>
       <td>${convCell(c.country)}</td>
-      <td>${grandTotalGross ? fmtVal(c.gross_sales / grandTotalGross, 'percent') : '—'}</td>
+      <td>${shareCell(grandTotalGross ? c.gross_sales / grandTotalGross : null)}</td>
       <td>${(c.return_rate !== undefined && c.return_rate !== null) ? fmtVal(c.return_rate, 'percent') : '—'}</td>
       <td>${yoyCell(c.yoy)}</td>
       <td>${yoyCell(c.mom)}</td>
     </tr>${isUsRow(c.country) ? usStateRows(key, monthData) : ''}`).join('');
 
+  // "Other countries" (UI pass 2): the countries past the top 5 in one line
+  // while the list is folded.
+  const rest = expanded ? [] : countries.slice(COUNTRY_PAGE_SIZE);
+  let otherRow = '';
+  if (rest.length) {
+    const oOrders = rest.reduce((t, c) => t + (c.orders || 0), 0);
+    const oGross = rest.reduce((t, c) => t + (c.gross_sales || 0), 0);
+    const oNet = rest.reduce((t, c) => t + (c.net_sales || 0), 0);
+    let oRrN = 0, oRrD = 0, oSes = 0, oCmp = 0;
+    rest.forEach(c => {
+      if (c.return_rate !== undefined && c.return_rate !== null && c.orders) { oRrN += c.return_rate * c.orders; oRrD += c.orders; }
+      const x = cs && cs !== 'loading' && !cs.error && cs.map ? cs.map.get(countryKey(c.country)) : null;
+      if (x) { oSes += x.sessions; oCmp += x.completed; }
+    });
+    const oChange = (field) => {
+      let cur = 0, prior = 0, any = false;
+      rest.forEach(c => { const v = c[field]; if (v === null || v === undefined || !c.gross_sales) return; any = true; cur += c.gross_sales; prior += c.gross_sales / (1 + v); });
+      return any && prior ? (cur - prior) / prior : null;
+    };
+    otherRow = `<tr class="other-row">
+      <td>Other countries (${rest.length})</td>
+      <td>${oOrders.toLocaleString('en-US')}</td>
+      <td>${fmtVal(oGross, 'currency-full')}</td>
+      <td>${fmtVal(oNet, 'currency-full')}</td>
+      <td>${oOrders ? fmtVal(oNet / oOrders, 'currency-full') : '—'}</td>
+      <td>${cs === 'loading' ? '<span style="color:var(--text-muted)">…</span>' : oSes ? fmtVal(oCmp / oSes, 'percent') : '—'}</td>
+      <td>${shareCell(grandTotalGross ? oGross / grandTotalGross : null)}</td>
+      <td>${oRrD ? fmtVal(oRrN / oRrD, 'percent') : '—'}</td>
+      <td>${yoyCell(oChange('yoy'))}</td>
+      <td>${yoyCell(oChange('mom'))}</td>
+    </tr>`;
+  }
   const showMoreRow = hiddenCount > 0 || expanded
     ? `<tr class="show-more-row"><td colspan="10">
-         <button type="button" class="show-more-btn" id="country-show-more-btn">${expanded ? 'Show less' : `Show ${hiddenCount} more`}</button>
+         <button type="button" class="show-more-btn" id="country-show-more-btn">${expanded ? '− Show top ' + COUNTRY_PAGE_SIZE : `+ Show all ${countries.length} countries`}</button>
        </td></tr>`
     : '';
 
@@ -5709,7 +5956,7 @@ function renderCountry(monthData) {
 
   document.getElementById('section-5').innerHTML = `<table class="dtable">
     <thead><tr><th style="text-align:left">Country</th><th>Orders</th><th>Gross Sales</th><th>Net Sales</th><th>AOV</th><th title="Triple Whale Conversion Rate: Pixel purchases ÷ Pixel sessions, by visitor country">Conversion Rate</th><th>% of Total</th><th>Return Rate</th><th>YoY</th><th>${momLabel()}</th></tr></thead>
-    <tbody>${rows}${showMoreRow}${totalRow}</tbody>
+    <tbody>${rows}${otherRow}${showMoreRow}${totalRow}</tbody>
   </table>
   <div style="margin-top:10px;font-size:11px;color:var(--text-muted)">${monthData.by_country_note || 'Pulled live from Shopify analytics, grouped by shipping country where Shopify supports it for this query (falls back to billing country otherwise), exact calendar-month-to-date range.'}</div>`;
 
@@ -6043,6 +6290,7 @@ function render() {
   document.getElementById('mtd-flag-tt').innerHTML = mtdBadge;
 
   renderKPIs(monthData);
+  renderTrends();
   renderTopProducts(monthData);
   renderReturns(monthData);
   renderChannels(monthData);
@@ -6149,7 +6397,11 @@ function renderMobileQuicknav() {
 //    a MutationObserver folds new notes as they appear).
 function setupPageChrome() {
   const bar = document.querySelector('.control-bar');
-  const setH = () => { if (bar) document.documentElement.style.setProperty('--ctl-h', bar.offsetHeight + 'px'); };
+  const qn = document.querySelector('.mobile-quicknav-wrap');
+  const setH = () => {
+    if (bar) document.documentElement.style.setProperty('--ctl-h', bar.offsetHeight + 'px');
+    if (qn) document.documentElement.style.setProperty('--qn-h', (qn.offsetHeight || 0) + 'px');
+  };
   setH();
   if (bar && 'ResizeObserver' in window) new ResizeObserver(setH).observe(bar);
   window.addEventListener('resize', setH);
