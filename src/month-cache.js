@@ -125,8 +125,65 @@ function pullAndStore(key, args, build) {
 // Wraps a live pull (`build`, a function returning a promise of the
 // /api/data payload) with the closed-month cache. Returns
 // { payload, cache: 'hit' | 'stale' | 'miss' | 'refresh' | 'bypass' }.
+// ---- The month in progress (2026-11-12, reliability pass) ----
+// Every page open used to start its own full pull of the current month for
+// all three stores (~30–60 s each, with YoY and MoM), so a few people opening
+// the dashboard together overloaded Shopify / Triple Whale and timed out.
+// Now a pull is shared for a short while, in memory:
+// - under OPEN_FRESH_MS old: served as is;
+// - under OPEN_MAX_STALE_MS old: served at once, and a new pull starts in the
+//   background for the next viewer;
+// - older (or none): a new pull, shared by everyone asking at that moment.
+// Sync (refresh=1) always gets a new pull, unless one started in the last
+// OPEN_JUST_PULLED_MS (someone else just pressed Sync) or is running now.
+// A pull that came back with a source missing (partial_sources) is only
+// kept for OPEN_JUST_PULLED_MS. `fetchedAt` tells the page how old it is.
+const OPEN_FRESH_MS = 5 * 60 * 1000;
+const OPEN_MAX_STALE_MS = 30 * 60 * 1000;
+const OPEN_JUST_PULLED_MS = 60 * 1000;
+const openCache = new Map(); // key -> { payload, at, partial }
+const openInFlight = new Map(); // key -> { promise, startedAt }
+function openPull(key, build) {
+  const running = openInFlight.get(key);
+  if (running) return running.promise;
+  const startedAt = Date.now();
+  const promise = build()
+    .then((payload) => {
+      const partial = !!(payload && Array.isArray(payload.partial_sources) && payload.partial_sources.length);
+      openCache.set(key, { payload, at: startedAt, partial });
+      if (openCache.size > 60) openCache.delete(openCache.keys().next().value);
+      return { payload, at: startedAt };
+    })
+    .finally(() => openInFlight.delete(key));
+  openInFlight.set(key, { promise, startedAt });
+  return promise;
+}
+async function getOpenPeriod({ site, start, end, compare, refresh }, build) {
+  const key = [site, start, end, [...compare].sort().join(',')].join('|');
+  const hit = openCache.get(key);
+  const age = hit ? Date.now() - hit.at : Infinity;
+  const running = openInFlight.get(key);
+  if (refresh) {
+    if (running) {
+      const r = await running.promise;
+      return { payload: r.payload, cache: 'open-shared', fetchedAt: r.at };
+    }
+    if (hit && age < OPEN_JUST_PULLED_MS) return { payload: hit.payload, cache: 'open-hit', fetchedAt: hit.at };
+    const r = await openPull(key, build);
+    return { payload: r.payload, cache: 'open-refresh', fetchedAt: r.at };
+  }
+  const maxFresh = hit && hit.partial ? OPEN_JUST_PULLED_MS : OPEN_FRESH_MS;
+  if (hit && age < maxFresh) return { payload: hit.payload, cache: 'open-hit', fetchedAt: hit.at };
+  if (hit && !hit.partial && age < OPEN_MAX_STALE_MS) {
+    openPull(key, build).catch((err) => console.error('month-cache: background refresh of open period failed:', err.message));
+    return { payload: hit.payload, cache: 'open-stale', fetchedAt: hit.at };
+  }
+  const r = await openPull(key, build);
+  return { payload: r.payload, cache: 'open-miss', fetchedAt: r.at };
+}
+
 async function getWithMonthCache({ site, start, end, compare, refresh }, build) {
-  if (!isClosedFullMonth(start, end)) return { payload: await build(), cache: 'bypass' };
+  if (!isClosedFullMonth(start, end)) return getOpenPeriod({ site, start, end, compare, refresh }, build);
 
   const compareKey = [...compare].sort().join(',');
   const key = [site, start, end, compareKey].join('|');
