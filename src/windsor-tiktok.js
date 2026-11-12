@@ -172,7 +172,29 @@ function todayISO() { return new Date().toISOString().slice(0, 10); }
 // maps to other statement days and whole statements go missing), so the
 // finance readers below use both and merge. There's only one TikTok Shop
 // account on this Windsor login.
-async function windsorQuery(fields, dateFrom, dateTo, filter, { account = true } = {}) {
+// At most WINDSOR_MAX_CONCURRENT Windsor requests in flight (QA 2026-11-12:
+// opening YTD / several periods fired dozens at once and Windsor answered
+// "429 Too Many Requests" to most of them).
+const WINDSOR_MAX_CONCURRENT = Math.max(1, Number(process.env.WINDSOR_MAX_CONCURRENT) || 6);
+let windsorActive = 0;
+const windsorWaiting = [];
+function windsorAcquire() {
+  if (windsorActive < WINDSOR_MAX_CONCURRENT) { windsorActive++; return Promise.resolve(); }
+  return new Promise((resolve) => windsorWaiting.push(resolve));
+}
+function windsorRelease() {
+  const next = windsorWaiting.shift();
+  if (next) next(); else windsorActive--;
+}
+async function windsorQuery(fields, dateFrom, dateTo, filter, opts) {
+  await windsorAcquire();
+  try {
+    return await windsorQueryOnce(fields, dateFrom, dateTo, filter, opts);
+  } finally {
+    windsorRelease();
+  }
+}
+async function windsorQueryOnce(fields, dateFrom, dateTo, filter, { account = true } = {}) {
   const key = process.env.WINDSOR_API_KEY;
   const qs = new URLSearchParams({
     api_key: key,
@@ -408,6 +430,10 @@ function sumRows(rows, field) { return rows.reduce((a, r) => a + num(r[field]), 
 // Any other error is returned as perfError — affiliate GMV and samples are
 // pulled separately and still load.
 const START_OF_OPS_RE = /start of operations/i;
+// QA 2026-11-12: for last year's periods (YoY) Windsor now answers "must stay
+// within the lookback window supported by this API version" — the same "no
+// data that far back" case, so it's reported as unavailable, not as an error.
+const LOOKBACK_RE = /lookback window/i;
 async function pullShopPerformance(start, dateTo, coreTo) {
   const tryFrom = async (from) => {
     // Fees / statements failing used to turn into $0 fees with no flag
@@ -422,8 +448,8 @@ async function pullShopPerformance(start, dateTo, coreTo) {
       // in mergeStoredDays, so the extra day is either the period's last real
       // day or dropped — right whichever way Windsor filters.
       windsorQuery(PERF_CORE_FIELDS, from, coreTo || dateTo),
-      windsorQuery(PERF_DETAIL_FIELDS, from, dateTo).catch((err) => { console.error('windsor-tiktok: shop performance details failed:', err.message); return []; }),
-      windsorQuery(PERF_FIELDS, from, dateTo).catch((err) => { console.error('windsor-tiktok: traffic breakdowns failed:', err.message); return []; }),
+      windsorQuery(PERF_DETAIL_FIELDS, from, dateTo).catch((err) => { if (!LOOKBACK_RE.test(err.message)) console.error('windsor-tiktok: shop performance details failed:', err.message); return []; }),
+      windsorQuery(PERF_FIELDS, from, dateTo).catch((err) => { if (!LOOKBACK_RE.test(err.message)) console.error('windsor-tiktok: traffic breakdowns failed:', err.message); return []; }),
       windsorQuery(['date', ...Object.keys(FEE_FIELDS)], from, dateTo).catch(feeCatch('fees')),
       windsorQuery(STATEMENT_FIELDS, from, dateTo).catch(feeCatch('statements')),
     ]);
@@ -434,6 +460,9 @@ async function pullShopPerformance(start, dateTo, coreTo) {
     try {
       return await tryFrom(from);
     } catch (err) {
+      if (LOOKBACK_RE.test(err.message)) {
+        return { perf: [], fees: [], statements: [], perfFrom: null, perfError: 'TikTok Shop performance data isn\'t available this far back (outside Windsor\'s lookback window).' };
+      }
       if (!START_OF_OPS_RE.test(err.message)) {
         console.error('windsor-tiktok: shop performance failed:', err.message);
         return { perf: [], fees: [], statements: [], perfFrom: null, perfError: err.message };
