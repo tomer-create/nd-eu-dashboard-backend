@@ -522,8 +522,23 @@ class LabelRows {
   }
 }
 
+// The row labels sit in column D on every tab — until a column is inserted
+// before them (2026-11-11: the IL P&L tab got a "GL Account" column D, which
+// moved its labels to column E and left ND.IL's Section 4 Email / SMS /
+// Collabs and its sheet costs empty). The label column is now found by
+// where "Revenue Breakdown" is written (column D when it can't be found).
+function labelColumn(rows) {
+  for (let i = 0; i < Math.min(rows.length, 80); i++) {
+    const r = rows[i] || [];
+    for (let c = 0; c < Math.min(r.length, 10); c++) {
+      if (r[c] != null && r[c].trim() === 'Revenue Breakdown') return c;
+    }
+  }
+  return 3;
+}
 function findRevenueAndCostRows(rows) {
-  const colD = (i) => (rows[i] && rows[i][3] != null ? rows[i][3].trim() : '');
+  const labelCol = labelColumn(rows);
+  const colD = (i) => (rows[i] && rows[i][labelCol] != null ? rows[i][labelCol].trim() : '');
   let revStart = -1;
   let revEnd = -1;
   let costStart = -1;
@@ -551,7 +566,7 @@ function findRevenueAndCostRows(rows) {
     }
   }
 
-  return { revenueRows, costRows, revStart };
+  return { revenueRows, costRows, revStart, labelCol };
 }
 
 // Parses a P&L sheet cell's displayed text into a number, or null if it's
@@ -1090,12 +1105,12 @@ async function fetchPnlSheetGoals(site) {
   const rows = await fetchSheetRows(site);
   if (!rows) return hit ? hit.value : null; // keep serving the last good copy
 
-  const { revenueRows, costRows, revStart } = findRevenueAndCostRows(rows);
+  const { revenueRows, costRows, revStart, labelCol } = findRevenueAndCostRows(rows);
   // Top-of-sheet KPI rows (above "Revenue Breakdown") and the bottom
   // Total Cost / Profit rows.
   const topRows = new LabelRows();
   for (let i = 0; i < (revStart === -1 ? rows.length : revStart); i++) {
-    const v = rows[i] && rows[i][3] != null ? rows[i][3].trim() : '';
+    const v = rows[i] && rows[i][labelCol] != null ? rows[i][labelCol].trim() : '';
     if (v && topRows.get(v) === undefined) topRows.set(v, i);
   }
   const header = rows[1] || [];
