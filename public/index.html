@@ -2658,7 +2658,11 @@ function renderTikTokShop(monthData, opts = {}) {
   const commRange = ttPeriodRange();
   const commApiOf = (r) => { const d = r ? ttCreatorApiOk(ttEnsureCreatorApi(r)) : null; return d && typeof d.est_commission === 'number' ? d.est_commission + (d.est_ads_commission || 0) : null; };
   const commApi = commApiOf(commRange);
-  const commission = commApi !== null ? commApi : (chan && !chan.no_data ? (chan.spend_actual || 0) : null);
+  // QA 2026-11-12: while TikTok's figure is still loading, show "loading"
+  // instead of flashing the P&L sheet's (often stale) number first.
+  const commE = commRange ? ttEnsureCreatorApi(commRange) : null;
+  const commPending = commApi === null && !!commE && commE.status === 'loading';
+  const commission = commApi !== null ? commApi : commPending ? null : (chan && !chan.no_data ? (chan.spend_actual || 0) : null);
   // Samples (TikTok Gifting) — 2026-10-26, Tomer: "take all the $0 orders
   // from Channel TikTok and take their product costs, add them together".
   // From /api/tiktok-shop/gifting (Shopify product cost of the $0 TikTok-
@@ -3089,7 +3093,7 @@ function renderTikTokShop(monthData, opts = {}) {
   const costRows = [
     { label: 'TikTok Ads spend', v: tt.ads_spend, yoy: tt.yoy ? tt.yoy.ads_spend : null, mom: tt.mom ? tt.mom.ads_spend : null, py: null, pm: null },
     { label: 'Affiliate commission', v: commission, yoy: commChg.yoy, mom: commChg.mom, pm: commApi === null && commChg.mom === null && sheetPrev ? sheetPrev.commission : null,
-      sub: commApi !== null ? 'TikTok Affiliate Center est. commission' : (commission !== null ? 'P&L sheet — TikTok’s figure unavailable' : '') },
+      sub: commApi !== null ? 'TikTok Affiliate Center est. commission' : commPending ? 'loading TikTok’s figure…' : (commission !== null ? 'P&L sheet — TikTok’s figure unavailable' : '') },
     { label: 'Samples (TikTok Gifting)', v: samples, yoy: giftChg.yoy, mom: giftChg.mom, pm: !giftCur && giftChg.mom === null && sheetPrev ? sheetPrev.gifting : null,
       sub: giftCur ? (giftCur.cost_pct === 1 ? `Retail price of the ${fmtVal(giftCur.units || 0, 'number')} products in ${fmtVal(giftCur.orders, 'number')} $0 TikTok orders${giftCur.units_no_price ? ` · ${fmtVal(giftCur.units_no_price, 'number')} without a price` : ''}` : giftCur.cost_pct ? `${Math.round(giftCur.cost_pct * 100)}% of the ${fmtVal(giftCur.retail_value || 0, 'currency-full')} price of the ${fmtVal(giftCur.units || 0, 'number')} products in ${fmtVal(giftCur.orders, 'number')} $0 TikTok orders${giftCur.units_no_price ? ` · ${fmtVal(giftCur.units_no_price, 'number')} without a price` : ''}` : `product cost of ${fmtVal(giftCur.orders, 'number')} $0 TikTok orders`) : giftFromSheet ? 'P&L sheet — $0-order figure unavailable' : '' },
     { label: 'Sample shipping cost', v: sampleShip, py: shipY, pm: shipM, sub: giftCur ? `${fmtVal(giftCur.orders,'number')} creators = ${fmtVal(giftCur.orders,'number')} $0 TikTok orders × $${SHIP_PER}` : '' },
@@ -3258,7 +3262,7 @@ function renderTikTokShop(monthData, opts = {}) {
   const adsOrders = typeof tt.ads_orders === 'number' ? tt.ads_orders : null;
   const affParts = [commission, samples, sampleShip];
   const affCost = affParts.some(v => v !== null && v !== undefined) ? affParts.reduce((a, v) => a + (v || 0), 0) : null;
-  const affCostMissing = [commission === null ? 'commission' : null, samples === null ? (giftPending ? 'samples (loading…)' : 'samples') : null, sampleShip === null ? (giftPending ? 'sample shipping (loading…)' : 'sample shipping') : null].filter(Boolean);
+  const affCostMissing = [commission === null ? (commPending ? 'commission (loading…)' : 'commission') : null, samples === null ? (giftPending ? 'samples (loading…)' : 'samples') : null, sampleShip === null ? (giftPending ? 'sample shipping (loading…)' : 'sample shipping') : null].filter(Boolean);
   const affCostSub = [commission !== null ? 'commission ' + fmtVal(commission, 'currency-full') : null, samples !== null ? 'samples ' + fmtVal(samples, 'currency-full') : null, sampleShip !== null ? 'sample shipping ' + fmtVal(sampleShip, 'currency-full') : null].filter(Boolean).join(' + ') + (affCostMissing.length ? ' · excl. ' + affCostMissing.join(', ') : '') + (aff ? '' : scPending ? ' · split loading…' : '');
   const ovlOrders = aff ? Math.min(aff.orders || 0, (aff.affiliate_with_ads_orders || 0) * (ovl.measured ? overlap / ovl.measured : 1)) : 0;
   const affOrdersShown = !aff ? null : creatorMode ? (aff.creator_orders || 0) : (aff.orders || 0) - ovlOrders;
