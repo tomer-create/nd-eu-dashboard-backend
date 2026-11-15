@@ -325,9 +325,8 @@
      MOBILE VIEW — added 2026-09-09 per Tomer: "the mobile version will
      be switch by a button from the top of the dashboard... everything
      should be visually mobile friendly and easy to navigate."
-     This is a MANUAL toggle (not a @media auto-detect) — a button flips
-     `mobile-mode` on <body>, remembered per-device via localStorage (see
-     setMobileMode() in the script). All rules below are scoped under
+     Since 2026-11-15 it follows the screen width (up to 760 px) instead of
+     a manual button — see setMobileMode() in the script. All rules below are scoped under
      body.mobile-mode so desktop rendering is completely untouched when
      the toggle is off. Data tables (table.dtable, sections 2-4/5/6/7/8)
      become stacked cards — one card per row, each column rendered as a
@@ -559,7 +558,6 @@
     </div>
     <div class="date-toggle-row">
       <span class="today-date" id="today-date"></span>
-      <button class="mobile-toggle-btn" id="mobile-toggle-btn" type="button">📱 Mobile View</button>
       <button class="mobile-toggle-btn install-app-btn" id="install-app-btn" type="button" hidden>⬇ Install app</button>
     </div>
    </div>
@@ -6771,23 +6769,20 @@ const mobileLabelObserver = new MutationObserver((mutations) => {
 });
 mobileLabelObserver.observe(document.querySelector('.wrap'), { childList: true, subtree: true });
 
-const MOBILE_MODE_KEY = 'nd_dashboard_mobile_view';
+// The layout follows the screen (UI pass 5, 2026-11-15 — the Mobile View /
+// Desktop View button is gone): phone-sized screens (up to 760 px wide) get
+// the mobile layout, everything wider the desktop one, and it switches by
+// itself when the window is resized or a tablet is turned. The old saved
+// per-device choice is cleared so it can't pin a phone to the desktop layout.
+const MOBILE_MQ = window.matchMedia('(max-width: 760px)');
 function setMobileMode(on) {
   document.body.classList.toggle('mobile-mode', on);
-  document.getElementById('mobile-toggle-btn').textContent = on ? '🖥️ Desktop View' : '📱 Mobile View';
-  try { localStorage.setItem(MOBILE_MODE_KEY, on ? '1' : '0'); } catch (e) { /* private browsing etc. — just won't remember next visit */ }
 }
-document.getElementById('mobile-toggle-btn').addEventListener('click', () => {
-  setMobileMode(!document.body.classList.contains('mobile-mode'));
-});
-let initialMobileMode = false;
-try {
-  const saved = localStorage.getItem(MOBILE_MODE_KEY);
-  // 2026-10-28: with no saved choice, a phone-sized screen (e.g. the
-  // installed app on a phone) opens in Mobile View.
-  initialMobileMode = saved === null ? window.matchMedia('(max-width: 760px)').matches : saved === '1';
-} catch (e) { /* private browsing etc. — defaults to desktop view */ }
-setMobileMode(initialMobileMode);
+try { localStorage.removeItem('nd_dashboard_mobile_view'); } catch (e) { /* storage unavailable */ }
+setMobileMode(MOBILE_MQ.matches);
+const onMobileMqChange = (e) => setMobileMode(e.matches);
+if (MOBILE_MQ.addEventListener) MOBILE_MQ.addEventListener('change', onMobileMqChange);
+else if (MOBILE_MQ.addListener) MOBILE_MQ.addListener(onMobileMqChange);
 
 /* ---------------- Install as an app (2026-10-28) ----------------
    Chrome / Edge (computer and Android) offer their own install prompt: the
