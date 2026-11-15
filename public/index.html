@@ -5840,7 +5840,7 @@ function trendSeries(start, end, grain) {
       const by = new Map();
       list.forEach(({ site, rows }) => {
         const fx = state.site === 'all' && FX_TO_USD[site] != null ? FX_TO_USD[site] : 1;
-        rows.forEach(r => { const a = by.get(r.period) || { period: r.period, gross: 0, net: 0, orders: 0 }; a.gross += r.gross_sales * fx; a.net += r.net_sales * fx; a.orders += r.orders; by.set(r.period, a); });
+        rows.forEach(r => { const a = by.get(r.period) || { period: r.period, gross: 0, net: 0, disc: 0, hasDisc: true, orders: 0 }; a.gross += r.gross_sales * fx; a.net += r.net_sales * fx; if (typeof r.discounts === 'number') a.disc += r.discounts * fx; else a.hasDisc = false; a.orders += r.orders; by.set(r.period, a); });
       });
       trendCache[ck] = Array.from(by.values()).sort((a, b) => a.period < b.period ? -1 : 1);
     })
@@ -5905,20 +5905,34 @@ function renderTrends() {
   renderHeadline(dCur, dLy);
 }
 // ---- Headline row (UI pass 3, 2026-11-15) ---------------------------------
-// Five numbers at the top of the page: Gross Sales, Net Sales, Orders,
-// Blended ROAS, Profit — the same figures, YoY and goal as their Goal Tracker
-// tiles. Gross, Net and Orders carry a small daily trend for the period on
-// screen (Shopify's daily figures, the same days last year faint behind it;
-// weekly points for periods over two months). ROAS and Profit only exist per
-// month (the P&L sheet), so they show their goal bar instead.
+// Five numbers at the top of the page: Gross Sales, Net Sales, Orders, AOV,
+// Profit — the same figures, YoY and goal as their Goal Tracker tiles. Gross,
+// Net, Orders and AOV carry a small daily trend for the period on screen
+// (Shopify's daily figures, the same days last year faint behind it; weekly
+// points for periods over two months). Profit only exists per month (the P&L
+// sheet), so it shows its goal bar instead. 2026-11-15 (Tomer): AOV took
+// Blended ROAS's place; ROAS is back in the Goal Tracker.
 const HEADLINE = [
   { label: 'Gross Sales', short: 'Gross Sales', series: 'gross' },
   { label: 'Net Sales', short: 'Net Sales', series: 'net' },
   { label: 'Number of Orders', short: 'Orders', series: 'orders' },
-  { label: 'Blended ROAS', short: 'Blended ROAS', series: null },
+  { label: 'AOV', short: 'AOV', series: 'aov' },
   { label: 'Profit', short: 'Profit', series: null },
 ];
 function headlineBins(rows, key) {
+  // AOV = (gross − discounts) ÷ orders, the dashboard's AOV — summed per
+  // day / week first, then divided.
+  if (key === 'aov') {
+    if (!rows.length || rows.some(x => !x.hasDisc)) return [];
+    const aov = (g, d, o) => (o > 0 ? (g - d) / o : 0);
+    if (rows.length <= 62) return rows.map(x => ({ label: trendLabel(x.period, 'day'), v: aov(x.gross, x.disc, x.orders) }));
+    const out = [];
+    for (let i = 0; i < rows.length; i += 7) {
+      const c = rows.slice(i, i + 7);
+      out.push({ label: 'Week of ' + trendLabel(c[0].period, 'day'), v: aov(c.reduce((t, x) => t + x.gross, 0), c.reduce((t, x) => t + x.disc, 0), c.reduce((t, x) => t + x.orders, 0)) });
+    }
+    return out;
+  }
   const vals = rows.map(x => ({ period: x.period, v: x[key] || 0 }));
   if (vals.length <= 62) return vals.map(x => ({ label: trendLabel(x.period, 'day'), v: x.v }));
   const out = [];
@@ -5967,10 +5981,12 @@ function renderHeadline(dCur, dLy) {
       } else goalTxt = `Goal ${fmtTile(k.goal, k.fmt)}`;
     }
     let chart;
-    if (h.series && curRows.length && !awaiting) {
-      const pts = headlineBins(curRows, h.series), ly = headlineBins(lyRows.slice(0, curRows.length), h.series);
+    const pts = h.series && curRows.length && !awaiting ? headlineBins(curRows, h.series) : [];
+    if (pts.length) {
+      const ly = headlineBins(lyRows.slice(0, curRows.length), h.series);
       headlineHoverData[idx] = { pts, ly };
-      chart = `<div class="hl-chart" data-idx="${idx}">${headlineSpark(pts, ly)}</div>`;
+      // AOV moves in a narrow band, so its line isn't drawn from $0.
+      chart = `<div class="hl-chart" data-idx="${idx}">${headlineSpark(pts, ly, h.series !== 'aov')}</div>`;
     } else if (h.series && !awaiting && dCur === 'loading') {
       chart = `<div class="hl-chart"><div class="hl-none">Loading daily figures…</div></div>`;
     } else {
@@ -5990,13 +6006,15 @@ function renderHeadline(dCur, dLy) {
 }
 // Sparkline: area + line for this period, last year dashed and faint, end
 // point marked (an HTML dot, so it stays round when the SVG stretches).
-function headlineSpark(pts, ly) {
+function headlineSpark(pts, ly, fromZero = true) {
   const n = pts.length;
   if (!n) return '<div class="hl-none">No sales in this period.</div>';
   const W = 200, H = 40, pad = 3;
-  const max = Math.max(1, ...pts.map(p => p.v), ...ly.map(p => p.v));
+  const all = pts.map(p => p.v).concat(ly.map(p => p.v)).filter(v => v > 0);
+  const max = Math.max(1, ...all);
+  const min = fromZero || !all.length ? 0 : Math.min(...all) * 0.9;
   const x = i => n === 1 ? W / 2 : (W * i) / (n - 1);
-  const y = v => pad + (H - 2 * pad) * (1 - v / max);
+  const y = v => pad + (H - 2 * pad) * (1 - (Math.max(v, min) - min) / ((max - min) || 1));
   const line = (arr) => arr.map((p, i) => (i ? 'L' : 'M') + x(i).toFixed(1) + ' ' + y(p.v).toFixed(1)).join(' ');
   const area = `${line(pts)} L${x(n - 1).toFixed(1)} ${H} L${x(0).toFixed(1)} ${H} Z`;
   const last = pts[n - 1];
@@ -6010,7 +6028,7 @@ function attachHeadlineHover(chartEl, h) {
   const data = headlineHoverData[+chartEl.dataset.idx];
   if (!data || !data.pts.length) return;
   const n = data.pts.length;
-  const fmt = h.series === 'orders' ? (v => Math.round(v).toLocaleString('en-US')) : (v => fmtVal(v, 'currency-full'));
+  const fmt = h.series === 'orders' ? (v => Math.round(v).toLocaleString('en-US')) : h.series === 'aov' ? (v => fmtVal(v, 'currency-cents')) : (v => fmtVal(v, 'currency-full'));
   let tip = null, guide = null;
   const show = (evt) => {
     const rect = chartEl.getBoundingClientRect();
