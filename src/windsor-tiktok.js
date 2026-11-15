@@ -194,7 +194,14 @@ async function windsorQuery(fields, dateFrom, dateTo, filter, opts) {
     windsorRelease();
   }
 }
+// TikTok's API refuses any time before 2025-01-01 ("SearchTimeGe is invalid
+// ... $this>=1735689600"), which made last-year reads that start a few days
+// early (Jan 2025 YoY: unsettled orders from Dec 25, 2024) fail outright —
+// QA 2026-11-15. Ranges are clipped to that day; one wholly before it is empty.
+const TIKTOK_MIN_DAY = '2025-01-01';
 async function windsorQueryOnce(fields, dateFrom, dateTo, filter, { account = true } = {}) {
+  if (dateTo && dateTo < TIKTOK_MIN_DAY) return [];
+  if (dateFrom && dateFrom < TIKTOK_MIN_DAY) dateFrom = TIKTOK_MIN_DAY;
   const key = process.env.WINDSOR_API_KEY;
   const qs = new URLSearchParams({
     api_key: key,
