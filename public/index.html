@@ -412,6 +412,7 @@
   .hl-label { font-size: 11px; font-weight: 650; color: var(--text-secondary); text-transform: uppercase; letter-spacing: .05em; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
   .hl-value { font-size: 26px; font-weight: 700; letter-spacing: -0.02em; line-height: 1.15; font-variant-numeric: tabular-nums; white-space: nowrap; }
   .hl-value.awaiting { font-size: 13px; font-weight: 500; color: var(--text-muted); line-height: 34px; }
+  .hl-chg { display: flex; gap: 6px; flex-wrap: wrap; min-height: 17px; }
   .hl-chart { position: relative; height: 40px; margin: 4px 0 2px; }
   .hl-spark { width: 100%; height: 100%; display: block; overflow: visible; }
   .hl-end { position: absolute; width: 7px; height: 7px; margin: -3.5px 0 0 -3.5px; border-radius: 50%; background: var(--series-1);
@@ -432,8 +433,6 @@
   body.mobile-mode .hl-card { padding: 11px 12px 9px; }
   body.mobile-mode .hl-value { font-size: 20px; }
   body.mobile-mode .hl-card:last-child:nth-child(odd) { grid-column: span 2; }
-  body.mobile-mode .hl-yoy-l { display: none; }
-  @media (max-width: 640px) { .hl-yoy-l { display: none; } }
   /* UI pass 2026-11-12: long "how it's calculated" notes fold away. */
   details.calc-note { margin-top: 10px; }
   details.calc-note > summary { cursor: pointer; font-size: 11.5px; font-weight: 600; color: var(--text-secondary);
@@ -898,6 +897,21 @@ const LIVE_KPI_MAP = {
 // live backend can't supply (top_returns, and anything about goals, which
 // live in the P&L Google Sheet, not Shopify) fall through to the embedded
 // values untouched.
+// A month in progress is compared with the same days of the prior month
+// (Nov 1–15 vs Oct 1–15), but the P&L sheet only has the prior month's full
+// marketing spend / Total Cost. Those are scaled to the same number of days
+// before Blended ROAS and Profit MoM are worked out (2026-11-15: they showed
+// ROAS ▲107% / Profit ▲188% from half a month of sales over a whole month of
+// costs). 1 for a full month.
+function momSheetCostFactor(live) {
+  if (!live || !/^\d{4}-\d{2}-\d{2}$/.test(live.start || '') || !/^\d{4}-\d{2}-\d{2}$/.test(live.end || '')) return 1;
+  const s = new Date(live.start + 'T00:00:00Z'), e = new Date(live.end + 'T00:00:00Z');
+  const days = Math.round((e - s) / 86400000);
+  const priorDays = new Date(Date.UTC(s.getUTCFullYear(), s.getUTCMonth(), 0)).getUTCDate();
+  const fullMonth = e.getUTCDate() === 1 && e.getUTCMonth() === (s.getUTCMonth() + 1) % 12;
+  if (!(days > 0) || s.getUTCDate() !== 1 || fullMonth || days >= priorDays) return 1;
+  return days / priorDays;
+}
 function mergeLiveIntoMonthData(monthData, live, site) {
   const merged = Object.assign({}, monthData);
 
@@ -995,7 +1009,7 @@ function mergeLiveIntoMonthData(monthData, live, site) {
     const roasNow = grossNow / spendNow;
     return (roasNow - roasPrior) / roasPrior;
   }
-  const blendedRoasMom = deriveRoasChange(live.mom, live.kpis.gross_sales, live.kpis.blended_marketing_spend, live.mom && live.mom.blended_marketing_spend_actual);
+  const blendedRoasMom = deriveRoasChange(live.mom, live.kpis.gross_sales, live.kpis.blended_marketing_spend, live.mom && live.mom.blended_marketing_spend_actual && live.mom.blended_marketing_spend_actual * momSheetCostFactor(live));
 
   const derivedRatioChanges = {
     '% Discount Ratio': { yoy: discountRatioYoy, mom: discountRatioMom },
@@ -1461,7 +1475,7 @@ function mergeLiveIntoMonthData(monthData, live, site) {
         && live.mom.pnl_total_cost_actual !== undefined && live.mom.pnl_total_cost_actual !== null) {
       const netSalesMomPrior = netSales / (1 + live.mom.net_sales_change);
       const grossSalesMomPrior = grossSales / (1 + live.mom.gross_sales_change);
-      const profitMomPrior = netSalesMomPrior - live.mom.pnl_total_cost_actual;
+      const profitMomPrior = netSalesMomPrior - live.mom.pnl_total_cost_actual * momSheetCostFactor(live);
       const marginMomPrior = grossSalesMomPrior ? profitMomPrior / grossSalesMomPrior : null;
       // profit/margin (this sync's actual) are computed just below — compute
       // them here too so this block doesn't depend on evaluation order.
@@ -2635,7 +2649,11 @@ function renderKPIs(monthData) {
     totalUsers = sum > 0 ? sum : null;
   }
 
-  monthData.kpis.forEach(k => {
+  // The five headline numbers (Gross Sales, Net Sales, Orders, Blended ROAS,
+  // Profit) are shown once, in the headline row above, with their YoY / MoM
+  // and goal — 2026-11-15, Tomer: "should be removed from the Goal tracker".
+  const inHeadline = new Set(HEADLINE.map(h => h.label));
+  monthData.kpis.filter(k => !inHeadline.has(k.label)).forEach(k => {
     const tile = document.createElement('div');
     // The snapshot's not-yet-synced months carry actual 0 with YoY −100%
     // (2026-11-05 code check: they showed "$0.00 · YoY −100%" until the sync
@@ -5873,6 +5891,9 @@ function renderHeadline(dCur, dLy) {
     const awaiting = monthAwaiting || isAwaiting(k);
     const yoyStr = awaiting ? null : fmtYoY(k.yoy);
     const yoyDir = !k || k.yoy === null || k.yoy === undefined ? 'flat' : (k.yoy >= 0 === k.higher_is_better ? 'up' : 'down');
+    const momVal = awaiting || k.mom === undefined ? null : k.mom;
+    const momStr = fmtYoY(momVal);
+    const momDir = momVal === null ? 'flat' : (momVal >= 0 === k.higher_is_better ? 'up' : 'down');
     const noGoal = !k || k.goal === null || k.goal === undefined || (k.goal === 0 && !/profit/i.test(k.label));
     let goalCls = 'info', goalTxt = '', goalPct = null;
     if (!awaiting && !noGoal) {
@@ -5898,8 +5919,9 @@ function renderHeadline(dCur, dLy) {
       chart = `<div class="hl-chart"><div class="hl-none">${goalPct !== null ? `<div class="hl-goalbar"><i class="${goalCls}" style="width:${w.toFixed(1)}%"></i></div>` : ''}<span>${h.series ? '' : 'Monthly figure (P&L sheet)'}</span></div></div>`;
     }
     return `<div class="hl-card">
-      <div class="hl-top"><span class="hl-label">${h.short}</span>${yoyStr === null ? '' : `<span class="kpi-yoy ${yoyDir}" title="Year over year"><span class="hl-yoy-l">YoY </span>${yoyStr}</span>`}</div>
+      <div class="hl-top"><span class="hl-label">${h.short}</span></div>
       ${awaiting ? '<div class="hl-value awaiting">Awaiting data</div>' : `<div class="hl-value" title="${escText(fmtTileExact(k.actual, k.fmt))}">${fmtTile(k.actual, k.fmt)}</div>`}
+      <div class="hl-chg">${yoyStr === null ? '' : `<span class="kpi-yoy ${yoyDir}" title="Year over year">YoY ${yoyStr}</span>`}${momStr === null ? '' : `<span class="kpi-yoy ${momDir}" title="${momLabel() === 'QoQ' ? 'Quarter over quarter' : 'Month over month'}">${momLabel()} ${momStr}</span>`}</div>
       ${chart}
       <div class="hl-foot">${goalTxt ? `<span class="hl-dot ${goalCls}" aria-hidden="true"></span>${escText(goalTxt)}` : (awaiting ? '' : 'No goal set')}</div>
     </div>`;
@@ -6266,7 +6288,7 @@ function renderDiscountSplit(monthData) {
     <thead><tr><th style="text-align:left">Bucket</th><th title="Gross sales of the whole orders that got a discount from this bucket / item">Gross Sales</th><th title="At each product's retail price in Shopify (compare-at price when set, otherwise its price)">Discount $</th><th title="Discount $ ÷ the gross sales of the items it was taken off (Pro Artist → 30%, samples and gifts → 100%)">Discount Ratio</th><th>% of Discounts</th><th title="Orders that got a discount from this bucket / item">Orders</th><th title="Discount $ ÷ the period's store-wide Gross Sales">% of Gross Sales</th></tr></thead>
     <tbody>${body}${totalRow}</tbody>
   </table>
-  <div style="margin-top:10px;font-size:11px;color:var(--text-muted)">${monthData.discounts_note ? escText(monthData.discounts_note) + ' ' : ''}Every product discount in Shopify for the period (TikTok Shop orders included; shipping discounts aren't part of Shopify's Discounts), read discount by discount — each discount counts in exactly one item, so the items add up to their bucket and the buckets to the Total. Click a bucket to open its items. Discount Ratio = Discount $ ÷ the gross sales of the items it was taken off (Pro Artist → 30%, samples and gifts → 100%). Orders: an order with discounts from two buckets is in both; the Total counts it once. Samples: Free Sample on site orders, one line per product given as a sample (months synced before 5 Nov show one “Free Sample” line until they re-sync). Gifts: GWP: free gifts and the free makeup bag. Gifts: TikTok creators: TikTok creator samples ("Free sample" on TikTok orders). Yotpo Loyalty: points redemptions (8-character upper-case fixed-amount codes in multiples of $0.10 — 10 points = $1), the Glow / Glam tier gifts, Birthday (any BDAY… code) and Refer a friend (REF…) codes. Sales: one line per sale in the "Evergreen Discounts Tags" sheet (the sale's discounts on orders carrying its tag)${sp.sale_tags_source === 'built-in' ? ' — the sheet couldn’t be read, so the sale list is the copy saved on 15 Nov 2026' : ''}; "Other % discounts" are percentage discounts on orders with no sale tag. Regular: TikTok seller discounts, Attentive's single-use codes, influencer / affiliate / campaign codes (incl. Collabs), Pro Artist, BA, bundles / sets, free shipping, manual discounts and other offers. Values are at each product's retail price in Shopify (its compare-at price when set, otherwise its price): when a discounted item came in below that on the order (e.g. a TikTok sample at $0), it's counted at retail. Gross Sales = the gross sales of the whole orders that got a discount from the bucket / item (an order in two buckets is in both; the Total counts it once). Discount Ratio = Discount $ ÷ the gross of the discounted items only. Total = Key Metrics' Discounts (Shopify's sales report, at order prices) + the retail value above the order prices; the small difference between Shopify's report and the orders is the "Shopify report adjustment" line.</div>`;
+  <div style="margin-top:10px;font-size:11px;color:var(--text-muted)">${monthData.discounts_note ? escText(monthData.discounts_note) + ' ' : ''}Every product discount in Shopify for the period (TikTok Shop orders included; shipping discounts aren't part of Shopify's Discounts), read discount by discount — each discount counts in exactly one item, so the items add up to their bucket and the buckets to the Total. Click a bucket to open its items. Discount Ratio = Discount $ ÷ the gross sales of the items it was taken off (Pro Artist → 30%, samples and gifts → 100%). Orders: an order with discounts from two buckets is in both; the Total counts it once. Samples: Free Sample on site orders, one line per product given as a sample (months synced before 5 Nov show one “Free Sample” line until they re-sync). Gifts: GWP: free gifts and the free makeup bag. Gifts: TikTok creators: TikTok creator samples ("Free sample" on TikTok orders). Yotpo Loyalty: points redemptions (8-character upper-case fixed-amount codes in multiples of $0.10 — 10 points = $1), the Glow / Glam tier gifts, Birthday (any BDAY… code) and Refer a friend (REF…) codes. Sales: one line per sale in the "Evergreen Discounts Tags" sheet (the sale's discounts on orders carrying its tag)${sp.sale_tags_source === 'built-in' ? ' — the sheet couldn’t be read, so the sale list is the copy saved on 15 Nov 2026' : ''}; "Other % discounts" are percentage discounts on orders with no sale tag. Regular: TikTok discounts split by who paid — seller discounts (ND pays) and platform vouchers (TikTok pays them back in its settlement); Shopify gets both as one discount per TikTok order, so the split follows TikTok's own order data for the period${sp.tiktok_funding && sp.tiktok_funding.source !== 'tiktok_orders' ? ' (not available for this period yet, so the line shows both together)' : ''}; Attentive's single-use codes, influencer / affiliate / campaign codes (incl. Collabs), Pro Artist, BA, bundles / sets, free shipping, manual discounts and other offers. Values are at each product's retail price in Shopify (its compare-at price when set, otherwise its price): when a discounted item came in below that on the order (e.g. a TikTok sample at $0), it's counted at retail. Gross Sales = the gross sales of the whole orders that got a discount from the bucket / item (an order in two buckets is in both; the Total counts it once). Discount Ratio = Discount $ ÷ the gross of the discounted items only. Total = Key Metrics' Discounts (Shopify's sales report, at order prices) + the retail value above the order prices; the small difference between Shopify's report and the orders is the "Shopify report adjustment" line.</div>`;
   el.querySelectorAll('.disc-toggle').forEach(btn => btn.addEventListener('click', () => {
     const k = btn.dataset.group;
     splitOpen[k] = !splitOpen[k];
