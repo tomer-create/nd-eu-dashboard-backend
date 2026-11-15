@@ -286,9 +286,11 @@ const ORDERS_QUERY = `
       edges {
         node {
           id
+          name
           createdAt
           tags
           sourceName
+          sourceIdentifier
           taxesIncluded
           totalTaxSet { shopMoney { amount } }
           presentmentCurrencyCode
