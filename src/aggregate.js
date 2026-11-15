@@ -391,6 +391,10 @@ function discountSplit(orders, owners, grossSales, discountTags) {
   const saleKeys = saleList.map((x) => 'sale:' + x.tag).concat('sale:other');
   saleKeys.forEach((k) => { bucketOf.set(k, 'sales'); itemAcc.set(k, { value: 0, orderValue: 0, orders: 0, discGross: 0 }); });
   let total = 0, totalOrders = 0, totalDiscGross = 0, totalOrderValue = 0, totalOrdersGross = 0;
+  // TikTok Shop discounts by Shopify discount title (2026-11-15, Tomer: split
+  // TikTok's seller- and platform-funded discounts) — what the TikTok channel
+  // writes on its orders, plus a few sample orders, to tell the two apart.
+  const ttTitles = new Map(); const ttSamples = [];
   for (const order of orders) {
     const nodes = (order.discountApplications && order.discountApplications.nodes) || [];
     const byIdx = new Map();
@@ -438,6 +442,11 @@ function discountSplit(orders, owners, grossSales, discountTags) {
         if (!v) continue;
         const a = byIdx.get(al.discountApplication && al.discountApplication.index);
         let item = a ? splitItemOf(a, isTikTok, owners, shopCur, ctx) : (isTikTok ? 'tiktok_seller' : 'offers');
+        if (isTikTok) {
+          const t = a ? `${a.__typename}|${a.title || a.code || ''}|${a.targetType || ''}` : '(none)';
+          const d = ttTitles.get(t) || { value: 0, allocations: 0 };
+          d.value += v * f; d.allocations += 1; ttTitles.set(t, d);
+        }
         // Samples by product (2026-11-05, Tomer: "for the samples on the
         // discount breakdown show all the samples breakdown by item"): each
         // free-sample discount goes to the product it was taken off.
@@ -459,6 +468,9 @@ function discountSplit(orders, owners, grossSales, discountTags) {
       });
     });
     if (!perItem.size) continue;
+    if (isTikTok && ttSamples.length < 4 && perItem.has('tiktok_seller')) {
+      ttSamples.push({ source_identifier: order.sourceIdentifier || null, name: order.name || null, apps: nodes.map((a) => a && { type: a.__typename, title: a.title || null, code: a.code || null, target: a.targetType || null, value: a.value || null }), lines: order.lineItems.edges.slice(0, 4).map((e) => ({ orig: amt(e.node.originalTotalSet), allocs: (e.node.discountAllocations || []).map((al) => [al.discountApplication && al.discountApplication.index, amt(al.allocatedAmountSet)]) })) });
+    }
     totalOrders += 1;
     // Gross Sales of the whole order (2026-11-04, Tomer: "the gross sales and
     // the discount … are the same, fix it" — for free items the discounted
@@ -483,6 +495,8 @@ function discountSplit(orders, owners, grossSales, discountTags) {
     // discounts at the order's own prices (what Shopify / Key Metrics count).
     total: { discount_value: total, order_value: totalOrderValue, orders: totalOrders, gross_sales: grossSales, discounted_gross: totalDiscGross, orders_gross: totalOrdersGross },
     valued_at: 'retail',
+    tiktok_titles: [...ttTitles.entries()].sort((x, y) => y[1].value - x[1].value).slice(0, 25).map(([k, d]) => ({ key: k, value: Math.round(d.value * 100) / 100, allocations: d.allocations })),
+    tiktok_samples: ttSamples,
     sale_tags_source: discountTags ? discountTags.source : 'built-in',
     buckets: SPLIT_BUCKETS.map((b) => ({
       key: b.key, label: b.label,
