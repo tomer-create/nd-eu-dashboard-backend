@@ -8,7 +8,7 @@ const { singleFlight } = require('./src/singleflight');
 const { fetchDiscountTags } = require('./src/discount-tags');
 const { fetchChannelPerformance, fetchAttentiveSplit, attentiveRevenueKeys, ATTENTIVE_LABEL_KEYS, fetchCountryConversion } = require('./src/triplewhale');
 const { fetchTikTokShop, fetchGmvEstimate, fetchGifting } = require('./src/tiktokshop');
-const { getSellerCenter, fetchPayouts } = require('./src/windsor-tiktok');
+const { getSellerCenter, fetchPayouts, fetchDiscountFunding } = require('./src/windsor-tiktok');
 const tiktokApi = require('./src/tiktok-api');
 const { fetchPnlSheetChannels, fetchPnlSheetOtherCosts, fetchPnlSheetTotalCost, fetchPnlSheetMarketingSpend, fetchPnlSheetShopPpc, fetchPnlSheetRtbHouseSpend, fetchPnlSheetGoals } = require('./src/googlesheets');
 const { VALID_SITES: YOTPO_VALID_SITES, ensureYotpoSchema, recordYotpoEvent, getYotpoSummary, getYotpoCustomerTierMap, getPool: getYotpoPool } = require('./src/yotpo');
@@ -989,6 +989,61 @@ async function applyAttentiveRevenue(payload, site, start, end) {
   }
 }
 
+// TikTok discounts split by who paid (2026-11-15, Tomer: "yes split the
+// TikTok discount"). The Discounts Breakdown's "TikTok seller discounts" item
+// holds every non-sample discount on TikTok orders in Shopify — ND's seller
+// discounts AND TikTok's platform vouchers, which Shopify receives as one
+// discount. TikTok's own order data (fetchDiscountFunding) says how much of
+// each the period had; the item is split in that proportion into "TikTok
+// seller discounts (ND pays)" and "TikTok platform discounts (TikTok pays)".
+// Orders and gross follow TikTok's share of orders / product price with each
+// kind of discount. The bucket and the Total don't change. Applied on every
+// response (closed months from the month cache too); if TikTok's data isn't
+// back within FUNDING_WAIT_MS the line stays whole, labelled as both.
+const FUNDING_WAIT_MS = 12000;
+const TT_COMBINED_LABEL = 'TikTok discounts (seller + platform)';
+async function applyTikTokFunding(payload, site, start, end) {
+  try {
+    const sp = payload && payload.discount_split;
+    if (!sp || !Array.isArray(sp.buckets) || site !== 'com') return payload;
+    const bi = sp.buckets.findIndex((b) => Array.isArray(b.items) && b.items.some((i) => i.key === 'tiktok_seller'));
+    if (bi < 0) return payload;
+    const bucket = sp.buckets[bi];
+    const ii = bucket.items.findIndex((i) => i.key === 'tiktok_seller');
+    const item = bucket.items[ii];
+    let f = null;
+    if (Math.abs(item.discount_value || 0) >= 0.005 && US_STATES_DATE.test(start || '') && US_STATES_DATE.test(end || '')) {
+      const pending = fetchDiscountFunding(start, end).catch((err) => { console.error(`tiktok funding ${start}..${end} failed:`, err.message); return null; });
+      f = await Promise.race([pending, new Promise((r) => setTimeout(() => r('timeout'), FUNDING_WAIT_MS))]);
+    }
+    const ok = f && f !== 'timeout' && (f.seller + f.platform) > 0;
+    let items;
+    if (!ok) {
+      items = bucket.items.map((i, k) => (k === ii ? { ...i, label: TT_COMBINED_LABEL } : i));
+    } else {
+      const share = f.seller / (f.seller + f.platform);
+      const part = (sh, oSh, gSh) => ({
+        discount_value: (item.discount_value || 0) * sh,
+        order_value: typeof item.order_value === 'number' ? item.order_value * sh : undefined,
+        orders: Math.round((item.orders || 0) * oSh),
+        discounted_gross: typeof item.discounted_gross === 'number' ? item.discounted_gross * gSh : item.discounted_gross,
+        orders_gross: typeof item.orders_gross === 'number' ? item.orders_gross * gSh : item.orders_gross,
+      });
+      const oS = f.any_orders ? f.seller_orders / f.any_orders : share, oP = f.any_orders ? f.platform_orders / f.any_orders : 1 - share;
+      const gS = f.any_original ? f.seller_original / f.any_original : share, gP = f.any_original ? f.platform_original / f.any_original : 1 - share;
+      const seller = { ...item, ...part(share, oS, gS), label: 'TikTok seller discounts (ND pays)' };
+      const platform = { ...item, ...part(1 - share, oP, gP), key: 'tiktok_platform', label: 'TikTok platform discounts (TikTok pays)' };
+      items = bucket.items.slice(0, ii).concat([seller, platform], bucket.items.slice(ii + 1));
+    }
+    const buckets = sp.buckets.map((b, k) => (k === bi ? { ...b, items } : b));
+    const funding = ok ? { source: 'tiktok_orders', seller: f.seller, platform: f.platform, orders: f.orders } : { source: f === 'timeout' ? 'pending' : 'unavailable' };
+    return { ...payload, discount_split: { ...sp, buckets, tiktok_funding: funding } };
+  } catch (err) {
+    console.error(`applyTikTokFunding (site=${site}) failed:`, err.message);
+    return payload;
+  }
+}
+
 // GET /api/data?site=com&start=2026-08-01&end=2026-08-21&compare=yoy,mom
 // Optional &refresh=1 forces a fresh Shopify pull for a closed month instead
 // of the cached copy (see src/month-cache.js — added 2026-10-04 so a month
@@ -1006,7 +1061,7 @@ app.get('/api/data', async (req, res) => {
     );
     res.set('X-Month-Cache', cache);
     if (fetchedAt) res.set('X-Month-Cache-Fetched-At', new Date(fetchedAt).toISOString());
-    res.json(await applyAttentiveRevenue(payload, req.query.site, req.query.start, req.query.end));
+    res.json(await applyTikTokFunding(await applyAttentiveRevenue(payload, req.query.site, req.query.start, req.query.end), req.query.site, req.query.start, req.query.end));
   } catch (err) {
     console.error(err);
     res.status(err.status || 502).json({ error: err.message });
@@ -1019,7 +1074,7 @@ app.post('/api/sync', async (req, res) => {
   const { site, start, end, compare = [] } = req.body || {};
   try {
     const result = await buildDataResponse({ site, start, end, compare });
-    res.json(await applyAttentiveRevenue(result, site, start, end));
+    res.json(await applyTikTokFunding(await applyAttentiveRevenue(result, site, start, end), site, start, end));
   } catch (err) {
     console.error(err);
     res.status(err.status || 502).json({ error: err.message });
