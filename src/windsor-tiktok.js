@@ -1241,4 +1241,53 @@ async function pullPayouts(start, end) {
   return value;
 }
 
-module.exports = { getSellerCenter, pullSellerCenter, fetchPayouts };
+// ---- Who paid for TikTok's order discounts (2026-11-15) -------------------
+// Tomer: "split the TikTok discount". TikTok orders reach Shopify with one
+// discount per order ("Seller discount", or "Discounts in total" when TikTok
+// also put in a platform voucher), so Shopify can't tell the seller-funded
+// part (ND pays) from the platform-funded part (TikTok pays it back in the
+// settlement). TikTok's own order data has both per order:
+// order_payment_seller_discount and order_payment_platform_discount. This
+// sums them for the period (non-sample orders, by the order's New York day,
+// like the rest of the TikTok figures) — the Discounts Breakdown then splits
+// Shopify's TikTok discount line in the same proportion. Checked 1–7 Nov
+// 2026: seller $13,770 + platform $19,098 = $32,868 vs Shopify's $36,837.
+const FUNDING_FIELDS = ['order_id', 'order_create_datetime', 'order_is_sample_order', 'order_payment_original_total_product_price', 'order_payment_seller_discount', 'order_payment_platform_discount'];
+const fundingCache = new Map(); // start|end -> { at, ttl, promise }
+function fetchDiscountFunding(start, end) {
+  if (!process.env.WINDSOR_API_KEY) return Promise.resolve(null);
+  if (!isoOk(start) || !isoOk(end) || end <= start) return Promise.resolve(null);
+  const key = `${start}|${end}`;
+  const hit = fundingCache.get(key);
+  if (hit && Date.now() - hit.at < hit.ttl) return hit.promise;
+  const closed = end <= addDays(todayISO(), -3);
+  const promise = pullDiscountFunding(start, end);
+  fundingCache.set(key, { at: Date.now(), ttl: closed ? 12 * 3600 * 1000 : 15 * 60 * 1000, promise });
+  promise.then((v) => { if (!v) fundingCache.delete(key); }, () => fundingCache.delete(key));
+  if (fundingCache.size > 200) fundingCache.delete(fundingCache.keys().next().value);
+  return promise;
+}
+async function pullDiscountFunding(start, end) {
+  const rows = await windsorQuery(FUNDING_FIELDS, start, end);
+  const seen = new Set();
+  const out = { start, end, orders: 0, seller: 0, platform: 0, original: 0, seller_orders: 0, platform_orders: 0, any_orders: 0, seller_original: 0, platform_original: 0, any_original: 0 };
+  rows.forEach((r) => {
+    const id = String(r.order_id || '');
+    if (!id || seen.has(id)) return;
+    seen.add(id);
+    if (truthy(r.order_is_sample_order)) return;
+    const day = orderDay(r.order_create_datetime);
+    if (!day || day < start || day >= end) return;
+    const sd = Math.abs(num(r.order_payment_seller_discount)), pd = Math.abs(num(r.order_payment_platform_discount));
+    const orig = num(r.order_payment_original_total_product_price);
+    out.orders++; out.original += orig; out.seller += sd; out.platform += pd;
+    if (sd > 0) { out.seller_orders++; out.seller_original += orig; }
+    if (pd > 0) { out.platform_orders++; out.platform_original += orig; }
+    if (sd > 0 || pd > 0) { out.any_orders++; out.any_original += orig; }
+  });
+  if (!out.orders) return null;
+  console.log(`windsor-tiktok discount funding ${start}..${end}: ${out.orders} orders, seller $${out.seller.toFixed(2)}, platform $${out.platform.toFixed(2)}`);
+  return out;
+}
+
+module.exports = { getSellerCenter, pullSellerCenter, fetchPayouts, fetchDiscountFunding };
