@@ -7,7 +7,8 @@
 //
 // The backend reads the tab's CSV export, which only works while the sheet is
 // shared as "Anyone with the link — Viewer". Until then (or if Google is
-// down) it falls back to the copy below, taken from the sheet on 2026-11-04,
+// down) it falls back to the copy below, taken from the sheet on 2026-11-04
+// and refreshed on 2026-11-15 (read through Tomer's Google account),
 // so the section never breaks — it just won't pick up new rows.
 
 const { parseCsv } = require('./googlesheets');
@@ -65,6 +66,7 @@ const FALLBACK = {
     ['Free Shipping', 'Free shipping'],
     ['Elaction Sale 15%', 'DISCOUNT-OBWY5'],
     ['Shopping IL', 'DISCOUNT-KQEWI'],
+    ['15% Students', 'col15'], // added to the sheet after 4 Nov (copy refreshed 2026-11-15)
   ],
 };
 
