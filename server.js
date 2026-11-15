@@ -2,7 +2,7 @@ require('dotenv').config();
 const path = require('path');
 const express = require('express');
 const cors = require('cors');
-const { fetchSalesTimeseries, fetchRefundSplitByProduct, fetchCountrySessions, fetchOrders, fetchVoidedOrders, fetchOrdersLight, fetchOrdersForTierRevenue, fetchSalesReversals, fetchCostOfGoodsSold, fetchTopReturnsByProduct, fetchCountryBreakdown, fetchUsStateBreakdown, fetchSalesSummary, fetchCustomerAcquisition, fetchProductRetailPrices, fetchCollabsCodeSales, fetchTopProductsAnalytics, getAuthorizeUrl, exchangeCodeForToken } = require('./src/shopify');
+const { fetchProductImages, fetchSalesTimeseries, fetchRefundSplitByProduct, fetchCountrySessions, fetchOrders, fetchVoidedOrders, fetchOrdersLight, fetchOrdersForTierRevenue, fetchSalesReversals, fetchCostOfGoodsSold, fetchTopReturnsByProduct, fetchCountryBreakdown, fetchUsStateBreakdown, fetchSalesSummary, fetchCustomerAcquisition, fetchProductRetailPrices, fetchCollabsCodeSales, fetchTopProductsAnalytics, getAuthorizeUrl, exchangeCodeForToken } = require('./src/shopify');
 const { aggregate } = require('./src/aggregate');
 const { singleFlight } = require('./src/singleflight');
 const { fetchDiscountTags } = require('./src/discount-tags');
@@ -1392,6 +1392,27 @@ app.get('/api/refund-split', async (req, res) => {
     res.json(payload);
   } catch (err) {
     console.error(`refund-split (site=${site}) failed:`, err.message);
+    res.status(502).json({ error: err.message });
+  }
+});
+
+// GET /api/product-images?site=com — { images: { product title: small image
+// URL } } for the product tables (UI pass 4, 2026-11-15). Cached 12 h; a
+// failed pull is retried on the next request.
+const productImagesCache = new Map(); // site -> { at, payload }
+app.get('/api/product-images', async (req, res) => {
+  const { site } = req.query;
+  if (!['com', 'eu', 'il'].includes(site)) return res.status(400).json({ error: `Unknown or missing site "${site}"` });
+  const hit = productImagesCache.get(site);
+  if (hit && Date.now() - hit.at < 12 * 3600 * 1000) { res.set('Cache-Control', 'public, max-age=3600'); return res.json(hit.payload); }
+  try {
+    const images = await fetchProductImages(site);
+    const payload = { site, images };
+    productImagesCache.set(site, { at: Date.now(), payload });
+    res.set('Cache-Control', 'public, max-age=3600');
+    res.json(payload);
+  } catch (err) {
+    console.error(`product-images (site=${site}) failed:`, err.message);
     res.status(502).json({ error: err.message });
   }
 });
