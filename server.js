@@ -1000,7 +1000,7 @@ async function applyAttentiveRevenue(payload, site, start, end) {
 // kind of discount. The bucket and the Total don't change. Applied on every
 // response (closed months from the month cache too); if TikTok's data isn't
 // back within FUNDING_WAIT_MS the line stays whole, labelled as both.
-const FUNDING_WAIT_MS = 12000;
+const FUNDING_WAIT_MS = 25000;
 const TT_COMBINED_LABEL = 'TikTok discounts (seller + platform)';
 async function applyTikTokFunding(payload, site, start, end) {
   try {
