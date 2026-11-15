@@ -252,6 +252,10 @@
   table.tt-rc-table td { vertical-align: top; }
   table.tt-rc-table { margin-bottom: 4px; }
   .tt-title { max-width: 360px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  /* Product images (UI pass 4, 2026-11-15) */
+  .pcell { display: inline-flex; align-items: center; gap: 10px; min-width: 0; max-width: 100%; vertical-align: middle; }
+  .pcell .pname { min-width: 0; overflow: hidden; text-overflow: ellipsis; }
+  .pthumb { width: 30px; height: 30px; border-radius: 6px; object-fit: cover; background: var(--track); border: 1px solid var(--border); flex: none; display: inline-block; }
   .tt-pending { border: 1px dashed var(--border); border-radius: 10px; padding: 12px 14px; font-size: 12px; color: var(--text-secondary); background: var(--page-plane); }
   .tt-note { margin-top: 10px; font-size: 11px; color: var(--text-muted); }
   .tt-sc-stats { display: grid; grid-template-columns: repeat(auto-fit, minmax(150px, 1fr)); gap: 10px; margin-bottom: 12px; }
@@ -2603,6 +2607,61 @@ function prettyTitle(t) {
     return out;
   });
 }
+// Product images (UI pass 4, 2026-11-15): a small picture next to each
+// product name in Top Selling, the Return / Refunded tables and TikTok's top
+// products, from /api/product-images (Shopify's main image per product, by
+// title). Loaded once per store; the tables repaint when it arrives. A name
+// with no match (e.g. a TikTok listing titled differently) gets an empty tile.
+const productImages = {}; // site -> 'loading' | { byTitle, byKey, keys } | { error }
+const productImgMatch = new Map(); // 'sites|title' -> url | null
+const pimgKey = t => String(t || '').toLowerCase().replace(/[^a-z0-9\u0590-\u05ff]+/g, ' ').trim();
+function productImageSites() { return state.site === 'all' ? Object.keys(DATA.sites) : [state.site]; }
+function loadProductImages(site) {
+  if (productImages[site]) return;
+  productImages[site] = 'loading';
+  fetch(`${BACKEND_URL}/api/product-images?site=${encodeURIComponent(site)}`)
+    .then(res => res.json().then(b => { if (!res.ok || b.error) throw new Error(b.error || ('Backend returned ' + res.status)); return b; }))
+    .then(b => {
+      const byTitle = new Map(Object.entries(b.images || {}));
+      const byKey = new Map();
+      byTitle.forEach((url, t) => { const k = pimgKey(t); if (k && !byKey.has(k)) byKey.set(k, url); });
+      productImages[site] = { byTitle, byKey, keys: [...byKey.keys()].sort((x, y) => y.length - x.length) };
+      productImgMatch.clear();
+      render();
+    })
+    .catch(err => { console.error('product-images fetch failed:', err); productImages[site] = { error: String(err.message || err) }; });
+}
+function productImageUrl(title) {
+  const sites = productImageSites();
+  const ck = sites.join(',') + '|' + title;
+  if (productImgMatch.has(ck)) return productImgMatch.get(ck);
+  sites.forEach(loadProductImages);
+  const ready = sites.map(s => productImages[s]).filter(x => x && x.byTitle);
+  if (!ready.length) return null;
+  const k = pimgKey(title);
+  let url = null;
+  for (const x of ready) { url = x.byTitle.get(title) || x.byKey.get(k) || null; if (url) break; }
+  // Names that carry extra words (TikTok listings, "… - Shade"): the longest
+  // Shopify product name found inside it.
+  if (!url && k) for (const x of ready) { const m = x.keys.find(c => c.length >= 8 && (' ' + k + ' ').includes(' ' + c + ' ')); if (m) { url = x.byKey.get(m); break; } }
+  // ND.IL's tables show the English half of a two-language name ("HY-GLAM
+  // CONCEALER" for "HY-GLAM CONCEALER - היי-גלאם קונסילר"): the shortest
+  // Shopify name that starts or ends with it.
+  if (!url && k.length >= 6) for (const x of ready) {
+    let best = null;
+    x.keys.forEach(c => { if ((c.startsWith(k + ' ') || c.endsWith(' ' + k)) && (!best || c.length < best.length)) best = c; });
+    if (best) { url = x.byKey.get(best); break; }
+  }
+  if (sites.every(s => productImages[s] && productImages[s] !== 'loading')) productImgMatch.set(ck, url);
+  return url;
+}
+function productThumb(title) {
+  const url = productImageUrl(title);
+  return url ? `<img class="pthumb" src="${escText(url)}" alt="" loading="lazy" decoding="async" width="30" height="30">` : '<span class="pthumb" aria-hidden="true"></span>';
+}
+function productCell(title, n) {
+  return `<span class="pcell">${productThumb(title)}<span class="pname">${n}. ${escText(prettyTitle(title))}</span></span>`;
+}
 function pctLabel(p) {
   if (p === null || p === undefined) return '—';
   return Math.round(p*100) + '%';
@@ -3556,7 +3615,7 @@ function renderTikTokShop(monthData, opts = {}) {
   const prodTable = prods.length ? `
     <table class="dtable">
       <thead><tr><th style="text-align:left">Product</th><th>Gross sales</th><th>Units</th><th>% of gross</th><th>YoY</th><th>${mLabel}</th></tr></thead>
-      <tbody>${prods.map((p, i) => `<tr><td><div class="tt-title" title="${escText(p.title)}">${i+1}. ${escText(prettyTitle(p.title))}</div></td><td>${fmtVal(p.gross_sales,'currency-full')}</td><td>${fmtVal(p.units,'number')}</td><td>${gmv ? fmtVal(p.gross_sales/gmv,'percent') : '—'}</td><td>${pCell(p.gross_sales, p.yoy_gross)}</td><td>${pCell(p.gross_sales, multi ? (qoqOk ? p.prev3_gross : undefined) : p.prev_gross)}</td></tr>`).join('')}</tbody>
+      <tbody>${prods.map((p, i) => `<tr><td><div class="tt-title" title="${escText(p.title)}">${productCell(p.title, i + 1)}</div></td><td>${fmtVal(p.gross_sales,'currency-full')}</td><td>${fmtVal(p.units,'number')}</td><td>${gmv ? fmtVal(p.gross_sales/gmv,'percent') : '—'}</td><td>${pCell(p.gross_sales, p.yoy_gross)}</td><td>${pCell(p.gross_sales, multi ? (qoqOk ? p.prev3_gross : undefined) : p.prev_gross)}</td></tr>`).join('')}</tbody>
     </table>${tt.top_products_note ? `<div class="tt-note">${tt.top_products_note}</div>` : ''}` : `<div class="tt-pending">No product-level TikTok Shop data for this period.</div>`;
 
   const partial = tt.months_with_data && tt.months_total && tt.months_with_data < tt.months_total
@@ -5322,7 +5381,7 @@ function renderTopProducts(monthData) {
     ? `<tr class="show-more-row"><td colspan="7"><button type="button" class="show-more-btn" id="top-products-more" aria-expanded="${tpOpen}">${tpOpen ? '− Show top ' + TOP_PRODUCTS_PAGE : '+ ' + (tpAll.length - TOP_PRODUCTS_PAGE) + ' more products'}</button></td></tr>`
     : '';
   const rows = tpShown.map((p, i) => `<tr>
-      <td title="${escText(p.title)}">${i+1}. ${escText(prettyTitle(p.title))}</td>
+      <td title="${escText(p.title)}">${productCell(p.title, i + 1)}</td>
       <td>${fmtVal(p.gross_sales, 'currency-full')}</td>
       <td>${p.net_sales_est !== null ? fmtVal(p.net_sales_est, 'currency-full') : '—'}</td>
       <td>${p.units_sold !== null && p.units_sold !== undefined ? p.units_sold.toLocaleString('en-US') : '—'}</td>
@@ -5575,7 +5634,7 @@ function renderReturnTable(elId, kind, data) {
   const ratio = (v, g) => (g ? v / g : null);
   const pct = v => (v === null || v === undefined ? '—' : fmtVal(v, 'percent'));
   const rows = shown.map((p, i) => `<tr>
-      <td title="${escText(p.title)}">${i + 1}. ${escText(prettyTitle(p.title))}</td>
+      <td title="${escText(p.title)}">${productCell(p.title, i + 1)}</td>
       <td>${p._g ? fmtVal(p.gross_sales, 'currency-full') : '—'}</td>
       <td>${fmtVal(p.value, 'currency-full')}</td>
       <td>${p.units.toLocaleString('en-US')}</td>
