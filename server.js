@@ -5,7 +5,7 @@ const cors = require('cors');
 const { fetchProductImages, fetchSalesTimeseries, fetchRefundSplitByProduct, fetchCountrySessions, fetchOrders, fetchVoidedOrders, fetchOrdersLight, fetchOrdersForTierRevenue, fetchSalesReversals, fetchCostOfGoodsSold, fetchTopReturnsByProduct, fetchCountryBreakdown, fetchUsStateBreakdown, fetchSalesSummary, fetchCustomerAcquisition, fetchProductRetailPrices, fetchCollabsCodeSales, fetchTopProductsAnalytics, getAuthorizeUrl, exchangeCodeForToken } = require('./src/shopify');
 const { aggregate } = require('./src/aggregate');
 const { singleFlight } = require('./src/singleflight');
-const { fetchDiscountTags } = require('./src/discount-tags');
+const { fetchDiscountTags, classify: classifyDiscountTags, FALLBACK: DISCOUNT_TAGS_COPY } = require('./src/discount-tags');
 const { fetchChannelPerformance, fetchAttentiveSplit, attentiveRevenueKeys, ATTENTIVE_LABEL_KEYS, fetchCountryConversion } = require('./src/triplewhale');
 const { fetchTikTokShop, fetchGmvEstimate, fetchGifting } = require('./src/tiktokshop');
 const { getSellerCenter, fetchPayouts, fetchDiscountFunding } = require('./src/windsor-tiktok');
@@ -1000,6 +1000,30 @@ async function applyAttentiveRevenue(payload, site, start, end) {
 // kind of discount. The bucket and the Total don't change. Applied on every
 // response (closed months from the month cache too); if TikTok's data isn't
 // back within FUNDING_WAIT_MS the line stays whole, labelled as both.
+// Months stored while the "Evergreen Discounts Tags" sheet couldn't be read
+// were split with the built-in copy of the tags (sale_tags_source
+// 'built-in'), so the page said "the sheet couldn't be read". Once the sheet
+// reads again and its sales / bundles are exactly the copy's, those months'
+// numbers are what the sheet gives — they're marked as from the sheet
+// (2026-11-15 QA, after the sheet was shared). If the sheet has changed, the
+// label stays and the log says which store to re-sync.
+const tagSig = (t) => t ? JSON.stringify([(t.sales || []).map((x) => x.tag), (t.bundles || []).map((x) => x.tag)]) : '';
+async function applySaleTagsSource(payload, site) {
+  try {
+    const sp = payload && payload.discount_split;
+    if (!sp || sp.sale_tags_source !== 'built-in' || !DISCOUNT_TAGS_COPY[site]) return payload;
+    const tags = await fetchDiscountTags(site).catch(() => null);
+    if (!tags || tags.source !== 'sheet') return payload;
+    if (tagSig(tags) !== tagSig(classifyDiscountTags(DISCOUNT_TAGS_COPY[site], 'built-in'))) {
+      console.error(`discount-tags: the sheet's sales / bundles for site=${site} differ from the built-in copy — Sync the stored months to split them with the sheet`);
+      return payload;
+    }
+    return { ...payload, discount_split: { ...sp, sale_tags_source: 'sheet' } };
+  } catch (err) {
+    return payload;
+  }
+}
+
 const FUNDING_WAIT_MS = 25000;
 const TT_COMBINED_LABEL = 'TikTok discounts (seller + platform)';
 async function applyTikTokFunding(payload, site, start, end) {
@@ -1061,7 +1085,7 @@ app.get('/api/data', async (req, res) => {
     );
     res.set('X-Month-Cache', cache);
     if (fetchedAt) res.set('X-Month-Cache-Fetched-At', new Date(fetchedAt).toISOString());
-    res.json(await applyTikTokFunding(await applyAttentiveRevenue(payload, req.query.site, req.query.start, req.query.end), req.query.site, req.query.start, req.query.end));
+    res.json(await applySaleTagsSource(await applyTikTokFunding(await applyAttentiveRevenue(payload, req.query.site, req.query.start, req.query.end), req.query.site, req.query.start, req.query.end), req.query.site));
   } catch (err) {
     console.error(err);
     res.status(err.status || 502).json({ error: err.message });
@@ -1074,7 +1098,7 @@ app.post('/api/sync', async (req, res) => {
   const { site, start, end, compare = [] } = req.body || {};
   try {
     const result = await buildDataResponse({ site, start, end, compare });
-    res.json(await applyTikTokFunding(await applyAttentiveRevenue(result, site, start, end), site, start, end));
+    res.json(await applySaleTagsSource(await applyTikTokFunding(await applyAttentiveRevenue(result, site, start, end), site, start, end), site));
   } catch (err) {
     console.error(err);
     res.status(err.status || 502).json({ error: err.message });
@@ -1702,7 +1726,14 @@ app.get('/api/tiktok-shop/payouts', async (req, res) => {
   try {
     const start = String(req.query.start || ''), end = String(req.query.end || '');
     if (!US_STATES_DATE.test(start) || !US_STATES_DATE.test(end) || end <= start) return res.status(400).json({ error: 'start and end (YYYY-MM-DD) are required' });
-    const out = await fetchPayouts(start, end);
+    // A cold pull of a whole month can take longer than Render's 100 s
+    // request limit (QA 2026-11-15: 502s on Jan 2025/2026 and Nov 2025). After
+    // 80 s the page gets 202 "still working" and asks again; the pull carries
+    // on and is shared by the next request (fetchPayouts keeps it in flight).
+    const pull = fetchPayouts(start, end);
+    pull.catch(() => {});
+    const out = await Promise.race([pull, new Promise((r) => setTimeout(() => r('pending'), 80000))]);
+    if (out === 'pending') return res.status(202).json({ pending: true, start, end });
     if (!out) return res.status(503).json({ error: 'Windsor isn\'t configured' });
     res.json(out);
   } catch (err) {
