@@ -403,6 +403,37 @@
     font-variant-numeric: tabular-nums; }
   .trend-msg { font-size: 12px; color: var(--text-muted); padding: 40px 0; text-align: center; }
   body.mobile-mode .trend-block { grid-template-columns: 1fr; }
+  /* Headline row (UI pass 3, 2026-11-15): the five numbers that answer "how
+     are we doing?" above the Goal Tracker, each with its daily trend. */
+  .headline-row { display:grid; grid-template-columns: repeat(5, minmax(0, 1fr)); gap: 12px; margin-bottom: 16px; }
+  .hl-card { background: var(--surface-1); border: 1px solid var(--border); border-radius: 12px; padding: 13px 15px 11px;
+    position: relative; min-width: 0; display: flex; flex-direction: column; gap: 3px; }
+  .hl-top { display:flex; justify-content:space-between; align-items:center; gap: 8px; min-height: 18px; }
+  .hl-label { font-size: 11px; font-weight: 650; color: var(--text-secondary); text-transform: uppercase; letter-spacing: .05em; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+  .hl-value { font-size: 26px; font-weight: 700; letter-spacing: -0.02em; line-height: 1.15; font-variant-numeric: tabular-nums; white-space: nowrap; }
+  .hl-value.awaiting { font-size: 13px; font-weight: 500; color: var(--text-muted); line-height: 34px; }
+  .hl-chart { position: relative; height: 40px; margin: 4px 0 2px; }
+  .hl-spark { width: 100%; height: 100%; display: block; overflow: visible; }
+  .hl-end { position: absolute; width: 7px; height: 7px; margin: -3.5px 0 0 -3.5px; border-radius: 50%; background: var(--series-1);
+    box-shadow: 0 0 0 2px var(--surface-1); pointer-events: none; }
+  .hl-guide { position: absolute; top: 0; bottom: 0; width: 1px; background: var(--text-secondary); opacity: .45; pointer-events: none; }
+  .hl-none { height: 100%; display: flex; flex-direction: column; justify-content: center; gap: 5px; font-size: 10.5px; color: var(--text-muted); }
+  .hl-goalbar { height: 6px; border-radius: 3px; background: var(--track); overflow: hidden; }
+  .hl-goalbar > i { display: block; height: 100%; border-radius: 3px; background: var(--series-1); }
+  .hl-goalbar > i.good { background: var(--status-good); } .hl-goalbar > i.warn { background: var(--status-warn); } .hl-goalbar > i.crit { background: var(--status-crit); }
+  .hl-foot { font-size: 11px; color: var(--text-muted); display: flex; align-items: center; gap: 6px; font-variant-numeric: tabular-nums; min-height: 15px; white-space: nowrap; overflow: hidden; }
+  .hl-dot { width: 7px; height: 7px; border-radius: 50%; flex: none; background: var(--series-1); }
+  .hl-dot.good { background: var(--status-good); } .hl-dot.warn { background: var(--status-warn); } .hl-dot.crit { background: var(--status-crit); }
+  .hl-tip { position: absolute; top: calc(100% + 4px); transform: translateX(-50%); background: var(--text-primary); color: var(--page-plane);
+    font-size: 11px; line-height: 1.45; padding: 5px 8px; border-radius: 6px; white-space: nowrap; pointer-events: none; z-index: 6; font-variant-numeric: tabular-nums; }
+  @media (max-width: 1100px) { .headline-row { grid-template-columns: repeat(3, minmax(0, 1fr)); } }
+  @media (max-width: 640px) { .headline-row { grid-template-columns: 1fr 1fr; gap: 8px; } }
+  body.mobile-mode .headline-row { grid-template-columns: 1fr 1fr; gap: 8px; margin-bottom: 12px; }
+  body.mobile-mode .hl-card { padding: 11px 12px 9px; }
+  body.mobile-mode .hl-value { font-size: 20px; }
+  body.mobile-mode .hl-card:last-child:nth-child(odd) { grid-column: span 2; }
+  body.mobile-mode .hl-yoy-l { display: none; }
+  @media (max-width: 640px) { .hl-yoy-l { display: none; } }
   /* UI pass 2026-11-12: long "how it's calculated" notes fold away. */
   details.calc-note { margin-top: 10px; }
   details.calc-note > summary { cursor: pointer; font-size: 11.5px; font-weight: 600; color: var(--text-secondary);
@@ -544,6 +575,8 @@
     <div class="mobile-quicknav-title">Jump to Section</div>
     <div class="mobile-quicknav" id="mobile-quicknav"></div>
   </div>
+
+  <section class="headline-row" id="headline-row" aria-label="Headline numbers"></section>
 
   <div class="card" id="card-1">
     <div class="section-title"><span class="section-num">1</span>Goal Tracker<span id="mtd-flag-1"></span></div>
@@ -5791,6 +5824,128 @@ function renderTrends() {
     // A month in progress isn't compared with last year's full month.
     put('trend-monthly', trendSvg('trend-monthly', pts, 'bar'), `${last.label}${inProgress ? ' (in progress)' : ''}: ${fmtTile(last.v, 'currency')}${last.ly && !inProgress ? ` · ${fmtYoY((last.v - last.ly) / last.ly)} YoY` : ''}`);
   }
+  // The headline row shares the daily series above (no extra requests).
+  renderHeadline(dCur, dLy);
+}
+// ---- Headline row (UI pass 3, 2026-11-15) ---------------------------------
+// Five numbers at the top of the page: Gross Sales, Net Sales, Orders,
+// Blended ROAS, Profit — the same figures, YoY and goal as their Goal Tracker
+// tiles. Gross, Net and Orders carry a small daily trend for the period on
+// screen (Shopify's daily figures, the same days last year faint behind it;
+// weekly points for periods over two months). ROAS and Profit only exist per
+// month (the P&L sheet), so they show their goal bar instead.
+const HEADLINE = [
+  { label: 'Gross Sales', short: 'Gross Sales', series: 'gross' },
+  { label: 'Net Sales', short: 'Net Sales', series: 'net' },
+  { label: 'Number of Orders', short: 'Orders', series: 'orders' },
+  { label: 'Blended ROAS', short: 'Blended ROAS', series: null },
+  { label: 'Profit', short: 'Profit', series: null },
+];
+function headlineBins(rows, key) {
+  const vals = rows.map(x => ({ period: x.period, v: x[key] || 0 }));
+  if (vals.length <= 62) return vals.map(x => ({ label: trendLabel(x.period, 'day'), v: x.v }));
+  const out = [];
+  for (let i = 0; i < vals.length; i += 7) {
+    const chunk = vals.slice(i, i + 7);
+    out.push({ label: 'Week of ' + trendLabel(chunk[0].period, 'day'), v: chunk.reduce((t, x) => t + x.v, 0) });
+  }
+  return out;
+}
+const headlineHoverData = [];
+function renderHeadline(dCur, dLy) {
+  const el = document.getElementById('headline-row');
+  if (!el) return;
+  const monthData = getMonthData();
+  const kpis = (monthData && monthData.kpis) || [];
+  const haveDaily = Array.isArray(dCur) && dCur.length > 0;
+  const lyRows = Array.isArray(dLy) ? dLy : [];
+  const periodSuffix = state.month === 'YTD' ? ' YTD' : isQuarter(state.month) ? ' QTD' : ' MTD';
+  // A month whose sales haven't loaded yet shows every card as awaiting (its
+  // costs and orders would otherwise read 0 / −$950 for a moment).
+  const isAwaiting = (k) => !k || k.no_data || (k.actual === 0 && k.yoy === -1);
+  const monthAwaiting = isAwaiting(kpis.find(x => x.label === 'Gross Sales'));
+  // Today is still filling up, so the trend stops at yesterday (the number
+  // above still includes today).
+  const today = isoDate(new Date(Date.UTC(new Date().getFullYear(), new Date().getMonth(), new Date().getDate())));
+  const curRows = haveDaily ? dCur.filter(x => x.period < today) : [];
+  const cards = HEADLINE.map((h, idx) => {
+    const k = kpis.find(x => x.label === h.label);
+    const awaiting = monthAwaiting || isAwaiting(k);
+    const yoyStr = awaiting ? null : fmtYoY(k.yoy);
+    const yoyDir = !k || k.yoy === null || k.yoy === undefined ? 'flat' : (k.yoy >= 0 === k.higher_is_better ? 'up' : 'down');
+    const noGoal = !k || k.goal === null || k.goal === undefined || (k.goal === 0 && !/profit/i.test(k.label));
+    let goalCls = 'info', goalTxt = '', goalPct = null;
+    if (!awaiting && !noGoal) {
+      if (typeof k.goal === 'number' && k.goal <= 0 && typeof k.actual === 'number') {
+        const met = k.higher_is_better === false ? k.actual <= k.goal : k.actual >= k.goal;
+        goalCls = met ? 'good' : 'crit';
+        goalTxt = `Goal ${fmtTile(k.goal, k.fmt)} · ${met ? 'met' : 'below'}`;
+      } else if (k.pct_of_goal !== null && k.pct_of_goal !== undefined) {
+        goalPct = k.pct_of_goal;
+        goalCls = pbarClass(k.pct_of_goal, k.higher_is_better, monthData.is_current);
+        goalTxt = `Goal ${fmtTile(k.goal, k.fmt)} · ${pctLabel(k.pct_of_goal)}${monthData.is_current ? periodSuffix : ''}`;
+      } else goalTxt = `Goal ${fmtTile(k.goal, k.fmt)}`;
+    }
+    let chart;
+    if (h.series && curRows.length && !awaiting) {
+      const pts = headlineBins(curRows, h.series), ly = headlineBins(lyRows.slice(0, curRows.length), h.series);
+      headlineHoverData[idx] = { pts, ly };
+      chart = `<div class="hl-chart" data-idx="${idx}">${headlineSpark(pts, ly)}</div>`;
+    } else if (h.series && !awaiting && dCur === 'loading') {
+      chart = `<div class="hl-chart"><div class="hl-none">Loading daily figures…</div></div>`;
+    } else {
+      const w = goalPct === null ? 0 : Math.max(0, Math.min(goalPct * 100, 100));
+      chart = `<div class="hl-chart"><div class="hl-none">${goalPct !== null ? `<div class="hl-goalbar"><i class="${goalCls}" style="width:${w.toFixed(1)}%"></i></div>` : ''}<span>${h.series ? '' : 'Monthly figure (P&L sheet)'}</span></div></div>`;
+    }
+    return `<div class="hl-card">
+      <div class="hl-top"><span class="hl-label">${h.short}</span>${yoyStr === null ? '' : `<span class="kpi-yoy ${yoyDir}" title="Year over year"><span class="hl-yoy-l">YoY </span>${yoyStr}</span>`}</div>
+      ${awaiting ? '<div class="hl-value awaiting">Awaiting data</div>' : `<div class="hl-value" title="${escText(fmtTileExact(k.actual, k.fmt))}">${fmtTile(k.actual, k.fmt)}</div>`}
+      ${chart}
+      <div class="hl-foot">${goalTxt ? `<span class="hl-dot ${goalCls}" aria-hidden="true"></span>${escText(goalTxt)}` : (awaiting ? '' : 'No goal set')}</div>
+    </div>`;
+  });
+  el.innerHTML = cards.join('');
+  el.querySelectorAll('.hl-chart[data-idx]').forEach(c => attachHeadlineHover(c, HEADLINE[+c.dataset.idx]));
+}
+// Sparkline: area + line for this period, last year dashed and faint, end
+// point marked (an HTML dot, so it stays round when the SVG stretches).
+function headlineSpark(pts, ly) {
+  const n = pts.length;
+  if (!n) return '<div class="hl-none">No sales in this period.</div>';
+  const W = 200, H = 40, pad = 3;
+  const max = Math.max(1, ...pts.map(p => p.v), ...ly.map(p => p.v));
+  const x = i => n === 1 ? W / 2 : (W * i) / (n - 1);
+  const y = v => pad + (H - 2 * pad) * (1 - v / max);
+  const line = (arr) => arr.map((p, i) => (i ? 'L' : 'M') + x(i).toFixed(1) + ' ' + y(p.v).toFixed(1)).join(' ');
+  const area = `${line(pts)} L${x(n - 1).toFixed(1)} ${H} L${x(0).toFixed(1)} ${H} Z`;
+  const last = pts[n - 1];
+  return `<svg class="hl-spark" viewBox="0 0 ${W} ${H}" preserveAspectRatio="none" aria-hidden="true">`
+    + `<path d="${area}" fill="var(--series-1)" opacity="0.10"/>`
+    + (ly.length > 1 ? `<path d="${line(ly)}" fill="none" stroke="var(--text-muted)" stroke-width="1.2" stroke-dasharray="3 3" vector-effect="non-scaling-stroke"/>` : '')
+    + `<path d="${line(pts)}" fill="none" stroke="var(--series-1)" stroke-width="1.8" stroke-linejoin="round" stroke-linecap="round" vector-effect="non-scaling-stroke"/>`
+    + `</svg><span class="hl-end" style="left:${(x(n - 1) / W * 100).toFixed(2)}%;top:${(y(last.v) / H * 100).toFixed(2)}%"></span>`;
+}
+function attachHeadlineHover(chartEl, h) {
+  const data = headlineHoverData[+chartEl.dataset.idx];
+  if (!data || !data.pts.length) return;
+  const n = data.pts.length;
+  const fmt = h.series === 'orders' ? (v => Math.round(v).toLocaleString('en-US')) : (v => fmtVal(v, 'currency-full'));
+  let tip = null, guide = null;
+  const show = (evt) => {
+    const rect = chartEl.getBoundingClientRect();
+    const i = n === 1 ? 0 : Math.max(0, Math.min(n - 1, Math.round((evt.clientX - rect.left) / rect.width * (n - 1))));
+    const p = data.pts[i], l = data.ly[i];
+    if (!tip) { tip = document.createElement('div'); tip.className = 'hl-tip'; chartEl.appendChild(tip); }
+    if (!guide) { guide = document.createElement('div'); guide.className = 'hl-guide'; chartEl.appendChild(guide); }
+    const pos = n === 1 ? 50 : (i / (n - 1)) * 100;
+    guide.style.left = pos + '%';
+    tip.style.left = Math.max(18, Math.min(82, pos)) + '%';
+    const chg = l && l.v ? (p.v - l.v) / l.v : null;
+    tip.innerHTML = `<b>${escText(p.label)}</b> ${fmt(p.v)}${l ? `<br>Last year ${fmt(l.v)}${chg !== null ? ' (' + fmtYoY(chg) + ')' : ''}` : ''}`;
+    tip.hidden = false; guide.hidden = false;
+  };
+  chartEl.addEventListener('mousemove', show);
+  chartEl.addEventListener('mouseleave', () => { if (tip) tip.hidden = true; if (guide) guide.hidden = true; });
 }
 // A small SVG chart: kind 'line' (this period vs last year) or 'bar' (bars +
 // last year as a dashed line). Hover shows the day / month's figures.
