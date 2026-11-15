@@ -1261,11 +1261,48 @@ function fetchDiscountFunding(start, end) {
   const hit = fundingCache.get(key);
   if (hit && Date.now() - hit.at < hit.ttl) return hit.promise;
   const closed = end <= addDays(todayISO(), -3);
-  const promise = pullDiscountFunding(start, end);
+  // A closed period is kept in the database (it doesn't change), so a restart
+  // or a new deploy doesn't have to ask Windsor again (~15–60 s a month).
+  const promise = closed
+    ? readFunding(start, end).then((stored) => stored || pullDiscountFunding(start, end).then((v) => { if (v) writeFunding(start, end, v); return v; }))
+    : pullDiscountFunding(start, end);
   fundingCache.set(key, { at: Date.now(), ttl: closed ? 12 * 3600 * 1000 : 15 * 60 * 1000, promise });
   promise.then((v) => { if (!v) fundingCache.delete(key); }, () => fundingCache.delete(key));
   if (fundingCache.size > 200) fundingCache.delete(fundingCache.keys().next().value);
   return promise;
+}
+let fundingSchema = null;
+async function fundingTable() {
+  const p = getPool();
+  if (!p) return null;
+  if (!fundingSchema) {
+    fundingSchema = p.query(`CREATE TABLE IF NOT EXISTS tiktok_discount_funding (
+        start_date DATE NOT NULL, end_date DATE NOT NULL, payload JSONB NOT NULL,
+        fetched_at TIMESTAMPTZ NOT NULL DEFAULT now(), PRIMARY KEY (start_date, end_date));`)
+      .then(() => true).catch((err) => { console.error('tiktok funding: schema failed:', err.message); fundingSchema = null; return false; });
+  }
+  return (await fundingSchema) ? p : null;
+}
+async function readFunding(start, end) {
+  try {
+    const p = await fundingTable();
+    if (!p) return null;
+    const { rows } = await p.query('SELECT payload FROM tiktok_discount_funding WHERE start_date = $1 AND end_date = $2', [start, end]);
+    return rows[0] ? rows[0].payload : null;
+  } catch (err) {
+    console.error('tiktok funding: read failed:', err.message);
+    return null;
+  }
+}
+async function writeFunding(start, end, payload) {
+  try {
+    const p = await fundingTable();
+    if (!p) return;
+    await p.query(`INSERT INTO tiktok_discount_funding (start_date, end_date, payload, fetched_at) VALUES ($1, $2, $3, now())
+      ON CONFLICT (start_date, end_date) DO UPDATE SET payload = EXCLUDED.payload, fetched_at = now()`, [start, end, JSON.stringify(payload)]);
+  } catch (err) {
+    console.error('tiktok funding: write failed:', err.message);
+  }
 }
 async function pullDiscountFunding(start, end) {
   const rows = await windsorQuery(FUNDING_FIELDS, start, end);
