@@ -3749,11 +3749,15 @@ function ttEnsurePayouts(range) {
     payoutsCache[key] = { status: 'loading' };
     (async () => {
       let lastErr = null;
+      let pendingWaits = 0;
       for (let attempt = 0; attempt < 3; attempt++) {
         if (attempt) await new Promise(r => setTimeout(r, 5000 * attempt));
         try {
           const res = await fetch(`${BACKEND_URL}/api/tiktok-shop/payouts?start=${range.start}&end=${range.end}`);
           const body = await res.json().catch(() => null);
+          // 202 = the server is still pulling from TikTok (QA 2026-11-15): ask
+          // again in 10 s without using up a try (up to ~5 more minutes).
+          if (res.status === 202 && pendingWaits < 30) { pendingWaits++; attempt--; await new Promise(r => setTimeout(r, 10000)); continue; }
           if (res.ok && body && typeof body.net_sales === 'number') return body;
           lastErr = new Error((body && body.error) || ('Backend returned ' + res.status));
           if (res.status === 400 || res.status === 503) break;
@@ -6130,6 +6134,19 @@ function renderCountry(monthData) {
     .filter(c => !isUnknownCountry(c.country))
     .slice()
     .sort((a, b) => (b.gross_sales || 0) - (a.gross_sales || 0));
+  // QA 2026-11-15: orders with no shipping country (gift cards, pickup —
+  // ND.IL Feb: ₪5,723 of ₪222,015) weren't
+  // in the list, so the countries added up to a little less than Gross Sales
+  // (COM Mar: $500). Months stored before the backend kept them get the
+  // difference as its own row, so the table adds up to Key Metrics.
+  {
+    const gk = (monthData.kpis || []).find(k => k.label === 'Gross Sales');
+    const listed = countries.reduce((s, c) => s + (c.gross_sales || 0), 0);
+    const gap = gk && !gk.no_data && typeof gk.actual === 'number' ? gk.actual - listed : 0;
+    if (gap >= 1 && !countries.some(c => c.country === 'No shipping country')) {
+      countries.push({ country: 'No shipping country', orders: 0, gross_sales: gap, net_sales: 0, aov: null, return_rate: null, yoy: null, mom: null, _gap: true });
+    }
+  }
 
   // Grand total across ALL countries (not just the ones currently shown) —
   // used both for the Total row and for each row's "% of Total", so that
@@ -6142,10 +6159,10 @@ function renderCountry(monthData) {
   const hiddenCount = countries.length - shown.length;
 
   const rows = shown.map(c => `<tr>
-      <td>${usStateToggleCell(c.country, key)}</td>
-      <td>${c.orders.toLocaleString('en-US')}</td>
+      <td${c._gap ? ' title="Gross Sales not in any country (stored months): orders without a shipping address, e.g. gift cards or pickup"' : ''}>${usStateToggleCell(c.country, key)}</td>
+      <td>${c._gap ? '—' : c.orders.toLocaleString('en-US')}</td>
       <td>${fmtVal(c.gross_sales, 'currency-full')}</td>
-      <td>${fmtVal(c.net_sales, 'currency-full')}</td>
+      <td>${c._gap ? '—' : fmtVal(c.net_sales, 'currency-full')}</td>
       <td>${c.aov !== null ? fmtVal(c.aov, 'currency-full') : '—'}</td>
       <td>${convCell(c.country)}</td>
       <td>${shareCell(grandTotalGross ? c.gross_sales / grandTotalGross : null)}</td>
