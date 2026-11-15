@@ -1025,9 +1025,10 @@ async function fetchCountryBreakdown(site, startISO, endISOExclusive, limit = 10
         colNames.forEach((name, i) => { obj[name] = values[i]; });
         return obj;
       })
-      .filter((r) => r[dimension])
+      // Orders with no shipping country (gift cards, pickup) are kept as their
+      // own row (QA 2026-11-15: COM Mar was $500 short of Gross Sales).
       .map((r) => ({
-        country: r[dimension],
+        country: r[dimension] || 'No shipping country',
         gross_sales: Number(r.gross_sales) || 0,
         net_sales: Number(r.net_sales) || 0,
         orders: Number(r.orders) || 0,
