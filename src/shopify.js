@@ -1489,7 +1489,7 @@ async function fetchSalesTimeseries(site, startISO, endISOExclusive, grain) {
   const untilDate = new Date(endISOExclusive + 'T00:00:00Z');
   untilDate.setUTCDate(untilDate.getUTCDate() - 1);
   const untilISO = untilDate.toISOString().slice(0, 10);
-  const q = `FROM sales SHOW gross_sales, net_sales, orders TIMESERIES ${g} SINCE ${startISO} UNTIL ${untilISO}`;
+  const q = `FROM sales SHOW gross_sales, net_sales, discounts, orders TIMESERIES ${g} SINCE ${startISO} UNTIL ${untilISO}`;
   const data = await graphql(site, `query SalesTrend($q: String!) { shopifyqlQuery(query: $q) { parseErrors tableData { columns { name } rows } } }`, { q });
   const result = data.shopifyqlQuery;
   if (result.parseErrors && result.parseErrors.length) throw new Error(`ShopifyQL parse error for "${site}" (query: ${q}): ${result.parseErrors.join('; ')}`);
@@ -1497,7 +1497,8 @@ async function fetchSalesTimeseries(site, startISO, endISOExclusive, grain) {
   return (result.tableData.rows || []).map((row) => {
     const values = Array.isArray(row) ? row : cols.map((n) => row[n]);
     const o = {}; cols.forEach((n, i) => { o[n] = values[i]; });
-    return { period: String(o[g] || '').slice(0, 10), gross_sales: Number(o.gross_sales) || 0, net_sales: Number(o.net_sales) || 0, orders: Number(o.orders) || 0 };
+    // discounts (2026-11-15): for the headline AOV trend ((gross − discounts) ÷ orders).
+    return { period: String(o[g] || '').slice(0, 10), gross_sales: Number(o.gross_sales) || 0, net_sales: Number(o.net_sales) || 0, discounts: Math.abs(Number(o.discounts) || 0), orders: Number(o.orders) || 0 };
   }).filter((r) => r.period);
 }
 
