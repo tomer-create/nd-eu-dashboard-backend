@@ -1121,6 +1121,34 @@ async function fetchProductRetailPrices(site) {
   return prices;
 }
 
+// Product images (UI pass 4, 2026-11-15): each product's main image, small
+// (Shopify's CDN resized to 96 px), keyed by product title — the product
+// tables show it next to the name. Returns { title: url }.
+const PRODUCT_IMAGES_QUERY = `
+  query ProductImages($cursor: String) {
+    products(first: 250, after: $cursor) {
+      pageInfo { hasNextPage endCursor }
+      edges { node { title featuredMedia { preview { image { url(transform: { maxWidth: 96, maxHeight: 96 }) } } } } }
+    }
+  }
+`;
+async function fetchProductImages(site) {
+  const out = {};
+  let cursor = null;
+  for (let page = 0; page < 40; page++) {
+    const data = await graphql(site, PRODUCT_IMAGES_QUERY, { cursor });
+    const { edges, pageInfo } = data.products;
+    for (const { node } of edges) {
+      const m = node.featuredMedia;
+      const url = m && m.preview && m.preview.image && m.preview.image.url;
+      if (node.title && url && !out[node.title]) out[node.title] = url;
+    }
+    if (!pageInfo.hasNextPage) break;
+    cursor = pageInfo.endCursor;
+  }
+  return out;
+}
+
 // US sales by state (shipping address) — added 2026-10-08 per Tomer: "on
 // ND.COM under Sales by Country under United States add breakdown by state".
 // Same ShopifyQL source and columns as fetchCountryBreakdown above, filtered
@@ -1493,6 +1521,7 @@ async function fetchCountrySessions(site, startISO, endISOExclusive) {
 }
 
 module.exports = {
+  fetchProductImages,
   fetchSalesTimeseries,
   fetchRefundSplitByProduct,
   fetchCountrySessions,
