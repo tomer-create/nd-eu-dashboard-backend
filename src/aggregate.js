@@ -393,8 +393,10 @@ function discountSplit(orders, owners, grossSales, discountTags) {
   let total = 0, totalOrders = 0, totalDiscGross = 0, totalOrderValue = 0, totalOrdersGross = 0;
   // TikTok Shop discounts by Shopify discount title (2026-11-15, Tomer: split
   // TikTok's seller- and platform-funded discounts) — what the TikTok channel
-  // writes on its orders, plus a few sample orders, to tell the two apart.
-  const ttTitles = new Map(); const ttSamples = [];
+  // writes on its orders: "Seller discount", "Discounts in total" (seller +
+  // platform voucher together) and "Free sample". The split itself is done in
+  // server.js (applyTikTokFunding) from TikTok's own order data.
+  const ttTitles = new Map();
   for (const order of orders) {
     const nodes = (order.discountApplications && order.discountApplications.nodes) || [];
     const byIdx = new Map();
@@ -468,9 +470,6 @@ function discountSplit(orders, owners, grossSales, discountTags) {
       });
     });
     if (!perItem.size) continue;
-    if (isTikTok && ttSamples.length < 4 && perItem.has('tiktok_seller')) {
-      ttSamples.push({ source_identifier: order.sourceIdentifier || null, name: order.name || null, apps: nodes.map((a) => a && { type: a.__typename, title: a.title || null, code: a.code || null, target: a.targetType || null, value: a.value || null }), lines: order.lineItems.edges.slice(0, 4).map((e) => ({ orig: amt(e.node.originalTotalSet), allocs: (e.node.discountAllocations || []).map((al) => [al.discountApplication && al.discountApplication.index, amt(al.allocatedAmountSet)]) })) });
-    }
     totalOrders += 1;
     // Gross Sales of the whole order (2026-11-04, Tomer: "the gross sales and
     // the discount … are the same, fix it" — for free items the discounted
@@ -496,7 +495,6 @@ function discountSplit(orders, owners, grossSales, discountTags) {
     total: { discount_value: total, order_value: totalOrderValue, orders: totalOrders, gross_sales: grossSales, discounted_gross: totalDiscGross, orders_gross: totalOrdersGross },
     valued_at: 'retail',
     tiktok_titles: [...ttTitles.entries()].sort((x, y) => y[1].value - x[1].value).slice(0, 25).map(([k, d]) => ({ key: k, value: Math.round(d.value * 100) / 100, allocations: d.allocations })),
-    tiktok_samples: ttSamples,
     sale_tags_source: discountTags ? discountTags.source : 'built-in',
     buckets: SPLIT_BUCKETS.map((b) => ({
       key: b.key, label: b.label,
