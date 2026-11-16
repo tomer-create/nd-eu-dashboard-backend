@@ -7012,14 +7012,13 @@ function renderDiscountSplit(monthData) {
   // order-price figures tied to Key Metrics; the Total = Key Metrics + the
   // retail value above the order prices.
   const splitSum = sp.total.discount_value || 0;
-  const splitOrder = typeof sp.total.order_value === 'number' ? sp.total.order_value : splitSum;
-  const uplift = splitSum - splitOrder;
   const km = typeof monthData.discounts_total_abs === 'number' ? Math.abs(monthData.discounts_total_abs) : null;
   // Total = Key Metrics' Discounts exactly (2026-11-16, Tomer: "the total is
-  // not equal to the total discount"): the buckets are at retail prices, so
-  // the retail value above the order prices is its own (negative) line next
-  // to the Shopify report adjustment — buckets + the two lines = the Total.
-  const adj = km !== null ? km - splitOrder : 0;
+  // not equal to the total discount"). The buckets are at retail prices; the
+  // retail value above the order prices had its own line until Tomer asked
+  // the same day to "hide the Retail value above the order prices" — it's now
+  // inside the Shopify report adjustment, so buckets + that line = the Total.
+  const adj = km !== null ? km - splitSum : 0;
   const tot = km !== null ? km : splitSum;
   const gross = monthData.discounts_total_gross || sp.total.gross_sales || 0;
   const pct = v => fmtVal(v, 'percent');
@@ -7057,7 +7056,7 @@ function renderDiscountSplit(monthData) {
     </tr>`).join('');
   });
   const adjRow = Math.abs(adj) >= 0.5 ? `<tr class="disc-group">
-      <td><strong>Shopify report adjustment</strong><div style="font-size:10px;color:var(--text-muted);font-weight:500;padding-left:0">Shopify’s sales report vs. the orders: orders voided before payment, order edits, sale-date timing</div></td>
+      <td><strong>Shopify report adjustment</strong><div style="font-size:10px;color:var(--text-muted);font-weight:500;padding-left:0">Shopify’s sales report vs. the orders: orders voided before payment, order edits, sale-date timing, and the buckets’ retail-price values</div></td>
       <td>—</td>
       <td><strong>${fmtVal(adj, 'currency-full')}</strong></td>
       <td>—</td>
@@ -7065,16 +7064,7 @@ function renderDiscountSplit(monthData) {
       <td>—</td>
       <td><strong>${ofGross(adj)}</strong></td>
     </tr>` : '';
-  const upRow = km !== null && Math.abs(uplift) >= 0.5 ? `<tr class="disc-group">
-      <td><strong>Retail value above the order prices</strong><div style="font-size:10px;color:var(--text-muted);font-weight:500;padding-left:0">The buckets are at each product’s retail price; Key Metrics counts the discounts at the order’s own prices (e.g. a TikTok sample recorded at $0)</div></td>
-      <td>—</td>
-      <td><strong>${fmtVal(-uplift, 'currency-full')}</strong></td>
-      <td>—</td>
-      <td><strong>${ofDisc(-uplift)}</strong></td>
-      <td>—</td>
-      <td><strong>${ofGross(-uplift)}</strong></td>
-    </tr>` : '';
-  const totalRow = adjRow + upRow + `<tr class="total-row">
+  const totalRow = adjRow + `<tr class="total-row">
       <td>Total<div style="font-size:10px;color:var(--text-muted);font-weight:500">${km === null ? '' : '= Discounts in Key Metrics · '}each order once</div></td>
       <td>${gs(sp.total)}</td>
       <td>${fmtVal(tot, 'currency-full')}</td>
@@ -7087,7 +7077,7 @@ function renderDiscountSplit(monthData) {
     <thead><tr><th style="text-align:left">Bucket</th><th title="Gross sales of the whole orders that got a discount from this bucket / item">Gross Sales</th><th title="At each product's retail price in Shopify (compare-at price when set, otherwise its price)">Discount $</th><th title="Discount $ ÷ the gross sales of the items it was taken off (Pro Artist → 30%, samples and gifts → 100%)">Discount Ratio</th><th>% of Discounts</th><th title="Orders that got a discount from this bucket / item">Orders</th><th title="Discount $ ÷ the period's store-wide Gross Sales">% of Gross Sales</th></tr></thead>
     <tbody>${body}${totalRow}</tbody>
   </table>
-  <div style="margin-top:10px;font-size:11px;color:var(--text-muted)">${monthData.discounts_note ? escText(monthData.discounts_note) + ' ' : ''}Every product discount in Shopify for the period (TikTok Shop orders included; shipping discounts aren't part of Shopify's Discounts), read discount by discount — each discount counts in exactly one item, so the items add up to their bucket and the buckets to the Total. Click a bucket to open its items. Discount Ratio = Discount $ ÷ the gross sales of the items it was taken off (Pro Artist → 30%, samples and gifts → 100%). Orders: an order with discounts from two buckets is in both; the Total counts it once. Samples: Free Sample on site orders, one line per product given as a sample (months synced before 5 Nov show one “Free Sample” line until they re-sync). Gifts: GWP: free gifts and the free makeup bag. Gifts: TikTok creators: TikTok creator samples ("Free sample" on TikTok orders). Yotpo Loyalty: points redemptions (8-character upper-case fixed-amount codes in multiples of $0.10 — 10 points = $1), the Glow / Glam tier gifts, Birthday (any BDAY… code) and Refer a friend (REF…) codes. Sales: one line per sale in the "Evergreen Discounts Tags" sheet (the sale's discounts on orders carrying its tag)${sp.sale_tags_source === 'built-in' ? ' — the sheet couldn’t be read, so the sale list is the copy saved on 15 Nov 2026' : ''}; "Other % discounts" are percentage discounts on orders with no sale tag. Regular: TikTok seller discounts (ND pays); TikTok's platform vouchers (TikTok pays them back in its settlement) are their own bucket, "TikTok platform discounts (TikTok pays)" — Shopify gets both as one discount per TikTok order, so the split follows TikTok's own order data for the period${sp.tiktok_funding && sp.tiktok_funding.source !== 'tiktok_orders' ? ' (not available for this period yet, so Regular still shows both together)' : ''}; Attentive's single-use codes, influencer / affiliate / campaign codes (incl. Collabs), Pro Artist, BA, bundles / sets, free shipping, manual discounts and other offers. Values are at each product's retail price in Shopify (its compare-at price when set, otherwise its price): when a discounted item came in below that on the order (e.g. a TikTok sample at $0), it's counted at retail. Gross Sales = the gross sales of the whole orders that got a discount from the bucket / item (an order in two buckets is in both; the Total counts it once). Discount Ratio = Discount $ ÷ the gross of the discounted items only. Total = Key Metrics' Discounts (Shopify's sales report, at order prices): the buckets + the "Shopify report adjustment" line (the small difference between Shopify's report and the orders) − the "Retail value above the order prices" line add up to it.</div>`;
+  <div style="margin-top:10px;font-size:11px;color:var(--text-muted)">${monthData.discounts_note ? escText(monthData.discounts_note) + ' ' : ''}Every product discount in Shopify for the period (TikTok Shop orders included; shipping discounts aren't part of Shopify's Discounts), read discount by discount — each discount counts in exactly one item, so the items add up to their bucket and the buckets to the Total. Click a bucket to open its items. Discount Ratio = Discount $ ÷ the gross sales of the items it was taken off (Pro Artist → 30%, samples and gifts → 100%). Orders: an order with discounts from two buckets is in both; the Total counts it once. Samples: Free Sample on site orders, one line per product given as a sample (months synced before 5 Nov show one “Free Sample” line until they re-sync). Gifts: GWP: free gifts and the free makeup bag. Gifts: TikTok creators: TikTok creator samples ("Free sample" on TikTok orders). Yotpo Loyalty: points redemptions (8-character upper-case fixed-amount codes in multiples of $0.10 — 10 points = $1), the Glow / Glam tier gifts, Birthday (any BDAY… code) and Refer a friend (REF…) codes. Sales: one line per sale in the "Evergreen Discounts Tags" sheet (the sale's discounts on orders carrying its tag)${sp.sale_tags_source === 'built-in' ? ' — the sheet couldn’t be read, so the sale list is the copy saved on 15 Nov 2026' : ''}; "Other % discounts" are percentage discounts on orders with no sale tag. Regular: TikTok seller discounts (ND pays); TikTok's platform vouchers (TikTok pays them back in its settlement) are their own bucket, "TikTok platform discounts (TikTok pays)" — Shopify gets both as one discount per TikTok order, so the split follows TikTok's own order data for the period${sp.tiktok_funding && sp.tiktok_funding.source !== 'tiktok_orders' ? ' (not available for this period yet, so Regular still shows both together)' : ''}; Attentive's single-use codes, influencer / affiliate / campaign codes (incl. Collabs), Pro Artist, BA, bundles / sets, free shipping, manual discounts and other offers. Values are at each product's retail price in Shopify (its compare-at price when set, otherwise its price): when a discounted item came in below that on the order (e.g. a TikTok sample at $0), it's counted at retail. Gross Sales = the gross sales of the whole orders that got a discount from the bucket / item (an order in two buckets is in both; the Total counts it once). Discount Ratio = Discount $ ÷ the gross of the discounted items only. Total = Key Metrics' Discounts (Shopify's sales report, at order prices): the buckets + the "Shopify report adjustment" line (the difference between Shopify's report and the orders, and between the retail prices and the order prices) add up to it.</div>`;
   el.querySelectorAll('.disc-toggle').forEach(btn => btn.addEventListener('click', () => {
     const k = btn.dataset.group;
     splitOpen[k] = !splitOpen[k];
