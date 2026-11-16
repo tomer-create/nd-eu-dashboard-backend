@@ -842,7 +842,10 @@ async function fetchSalesByProductForTags(site, startISO, endISOExclusive, tags,
   const untilDate = new Date(endISOExclusive + 'T00:00:00Z');
   untilDate.setUTCDate(untilDate.getUTCDate() - 1);
   const untilISO = untilDate.toISOString().slice(0, 10);
-  const where = `(${safe.map((t) => `order_tags CONTAINS '${t}'`).join(' OR ')})` + notTags.map((t) => ` AND NOT order_tags CONTAINS '${t}'`).join('');
+  // One NOT (… OR …): ShopifyQL ignores a chain of "AND NOT order_tags CONTAINS"
+  // (checked live 2026-11-16 — a single NOT around the OR list works).
+  const any = (list) => `(${list.map((t) => `order_tags CONTAINS '${t}'`).join(' OR ')})`;
+  const where = any(safe) + (notTags.length ? ` AND NOT ${any(notTags)}` : '');
   const q = `FROM sales SHOW gross_sales, discounts, net_sales, quantity_ordered GROUP BY product_title, discount_title WHERE ${where} SINCE ${startISO} UNTIL ${untilISO} ORDER BY gross_sales DESC LIMIT 1000`;
   const data = await graphql(site, `
     query BundleProducts($q: String!) {
