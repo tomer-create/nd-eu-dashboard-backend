@@ -266,6 +266,46 @@ async function fetchGmvEstimate(site, start, end) {
   return { start, end, gmv: num(r.gmv), orders: num(r.orders) };
 }
 
+// Cancelled and refunded orders (2026-11-16, Tomer: TikTok Shop boxes for
+// "number of orders − canceled orders and refunded orders", the AOV on those
+// orders, and the number of canceled and refunded orders). TikTok's own order
+// records (orders_table, platform 'tiktok-shops') placed in [start, end), by
+// the same New York day as the section's other Triple Whale figures:
+//   unpaid    = TikTok's auto-cancel of an unpaid order (exactly 1 hour after
+//               it was placed) — TikTok doesn't count these as orders at all;
+//   cancelled = cancelled orders that were paid;
+//   refunded  = orders (not cancelled) with any refund in refunds_table, by
+//               any refund date from the period start until today.
+// paid_orders = orders − unpaid; net_orders = paid − cancelled − refunded.
+const orderStatusCache = new Map(); // key -> { at, value }
+async function fetchOrderStatus(site, start, end) {
+  if (!SITES_WITH_TIKTOK_SHOP.includes(site) || !process.env.TRIPLEWHALE_API_KEY) return null;
+  if (!isoOk(start) || !isoOk(end) || end <= start) return null;
+  const key = `${site}|${start}|${end}`;
+  const hit = orderStatusCache.get(key);
+  // Refunds keep arriving after a period ends, so even closed periods are
+  // only kept for 6 hours; a period still running for 10 minutes.
+  const ttl = isSettled(end) ? PAST_TTL_MS : 10 * 60 * 1000;
+  if (hit && Date.now() - hit.at < ttl) return hit.value;
+  const tomorrow = new Date(Date.now() + 86400000).toISOString().slice(0, 10);
+  const unpaid = `(fulfillment_status = 'CANCELLED' AND toInt64(toUnixTimestamp(cancelled_at)) - toInt64(toUnixTimestamp(created_at)) BETWEEN 3590 AND 3620)`;
+  const refundedIds = `SELECT order_id FROM refunds_table WHERE event_date >= '${start}' AND event_date < '${tomorrow}' AND platform = 'tiktok-shops'`;
+  const rows = await twSql(TW_SHOP_ID[site], `
+    SELECT uniq(order_id) AS orders,
+           uniqIf(order_id, ${unpaid}) AS unpaid,
+           uniqIf(order_id, fulfillment_status = 'CANCELLED' AND NOT ${unpaid}) AS cancelled,
+           uniqIf(order_id, fulfillment_status != 'CANCELLED' AND order_id IN (${refundedIds})) AS refunded
+    FROM orders_table
+    WHERE event_date >= '${start}' AND event_date < '${end}' AND platform = 'tiktok-shops'`.trim(), start, end);
+  const r = rows[0] || {};
+  const orders = num(r.orders), unpaidN = num(r.unpaid), cancelled = num(r.cancelled), refunded = num(r.refunded);
+  const paid = orders - unpaidN;
+  const value = { start, end, orders, unpaid: unpaidN, paid_orders: paid, cancelled, refunded, net_orders: Math.max(0, paid - cancelled - refunded) };
+  orderStatusCache.set(key, { at: Date.now(), value });
+  if (orderStatusCache.size > 200) orderStatusCache.delete(orderStatusCache.keys().next().value);
+  return value;
+}
+
 // TikTok Gifting cost (2026-10-26, Tomer: "take all the $0 orders from
 // Channel TikTok and take their product costs, add them together"). The $0
 // orders are the creator samples TikTok sends out; they sync into Shopify
@@ -364,4 +404,4 @@ async function fetchGifting(site, start, end) {
   });
 }
 
-module.exports = { fetchTikTokShop, fetchGmvEstimate, fetchGifting, SITES_WITH_TIKTOK_SHOP };
+module.exports = { fetchTikTokShop, fetchGmvEstimate, fetchGifting, fetchOrderStatus, SITES_WITH_TIKTOK_SHOP };
