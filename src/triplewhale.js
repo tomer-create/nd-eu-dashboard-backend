@@ -509,8 +509,10 @@ const ATTENTIVE_LABEL_KEYS = { 'Attentive - SMS Journey': 'sms_journey', 'Attent
 // so the TikTok Affiliates / Organic rows get TikTok Shop's own refund rate.
 // Also product gross sales and product discounts, for the Organic row's
 // discounts (its revenue is Gross Sales − the other channels, before
-// discounts). Returns { by_label: { label: { orders, revenue, refunds, gross,
-// discounts } }, tiktok_shop, store } or null when Triple Whale fails.
+// discounts), and taxes (sales tax / VAT is inside Triple Whale's order
+// revenue, so it comes off before profit). Returns { by_label: { label: {
+// orders, revenue, refunds, gross, discounts, taxes } }, tiktok_shop, store }
+// or null when Triple Whale fails.
 const REFUND_LABEL_IDS = {
   ...Object.fromEntries(CHANNEL_MAP.filter((c) => !c.hidden).map((c) => [c.label, c.ids])),
   Attentive: ['attentive', 'attentive_campaign'],
@@ -530,7 +532,8 @@ async function fetchChannelRefunds(site, start, end) {
       SUM(order_revenue) AS revenue,
       SUM(refund_money) AS refunds,
       SUM(gross_product_sales) AS gross,
-      SUM(discount_amount_for_product) AS discounts
+      SUM(discount_amount_for_product) AS discounts,
+      SUM(taxes) AS taxes
     FROM pixel_orders_table
     WHERE event_date >= '${start}' AND event_date < '${end}'
       AND model = 'Last Click'
@@ -551,8 +554,8 @@ async function fetchChannelRefunds(site, start, end) {
   }
   const rows = Array.isArray(json) ? json : json.rows || json.data || [];
   if (!Array.isArray(rows)) return null;
-  const F = ['orders', 'revenue', 'refunds', 'gross', 'discounts'];
-  const zero = () => ({ orders: 0, revenue: 0, refunds: 0, gross: 0, discounts: 0 });
+  const F = ['orders', 'revenue', 'refunds', 'gross', 'discounts', 'taxes'];
+  const zero = () => ({ orders: 0, revenue: 0, refunds: 0, gross: 0, discounts: 0, taxes: 0 });
   const add = (acc, r) => { F.forEach((f) => { acc[f] += Number(r[f] || 0); }); };
   const labelOf = new Map(Object.entries(REFUND_LABEL_IDS).flatMap(([label, ids]) => ids.map((id) => [id, label])));
   const byLabel = {};
