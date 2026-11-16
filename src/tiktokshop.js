@@ -296,7 +296,7 @@ async function fetchOrderStatus(site, start, end) {
            uniqIf(order_id, fulfillment_status = 'CANCELLED' AND NOT ${unpaid}) AS cancelled,
            uniqIf(order_id, fulfillment_status != 'CANCELLED' AND order_id IN (${refundedIds})) AS refunded
     FROM orders_table
-    WHERE event_date >= '${start}' AND event_date < '${end}' AND platform = 'tiktok-shops'`.trim(), start, end);
+    WHERE event_date >= '${start}' AND event_date < '${end}' AND platform = 'tiktok-shops'`.trim(), start, end > tomorrow ? end : tomorrow); // the API's period must reach today for the refunds after the period
   const r = rows[0] || {};
   const orders = num(r.orders), unpaidN = num(r.unpaid), cancelled = num(r.cancelled), refunded = num(r.refunded);
   const paid = orders - unpaidN;
