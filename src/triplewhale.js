@@ -500,6 +500,77 @@ function attentiveRevenueKeys(site, split) {
 }
 const ATTENTIVE_LABEL_KEYS = { 'Attentive - SMS Journey': 'sms_journey', 'Attentive - Email Journey': 'email_journey', 'Attentive - SMS Campaign': 'sms_campaign', 'Attentive - Email Campaign (Newsletter)': 'email_campaign' };
 
+// Refunds by channel (2026-11-16, Tomer: channel profitability in Section 4 —
+// "all the orders that came from Meta channel after all the costs"; he chose
+// "Actual refunds per channel"). Triple Whale's orders (pixel_orders_table,
+// Last Click — the same model as the channels' revenue) by channel: order
+// revenue, refunds (refund_money: refunded sales + shipping + tax, by order
+// date) and orders. TikTok Shop orders (source_name 'tiktok') are kept apart
+// so the TikTok Affiliates / Organic rows get TikTok Shop's own refund rate.
+// Also product gross sales and product discounts, for the Organic row's
+// discounts (its revenue is Gross Sales − the other channels, before
+// discounts). Returns { by_label: { label: { orders, revenue, refunds, gross,
+// discounts } }, tiktok_shop, store } or null when Triple Whale fails.
+const REFUND_LABEL_IDS = {
+  ...Object.fromEntries(CHANNEL_MAP.filter((c) => !c.hidden).map((c) => [c.label, c.ids])),
+  Attentive: ['attentive', 'attentive_campaign'],
+  'Collabs Affiliate': ['Collabs_affiliates'],
+  Organic: ['organic_and_social', 'Direct'],
+};
+async function fetchChannelRefunds(site, start, end) {
+  if (!process.env.TRIPLEWHALE_API_KEY) return null;
+  if (!ISO_DAY.test(String(start)) || !ISO_DAY.test(String(end))) return null;
+  const shopId = TW_SHOP_ID[site];
+  if (!shopId) return null;
+  const query = `
+    SELECT
+      channel,
+      source_name = 'tiktok' AS tt,
+      uniq(order_id) AS orders,
+      SUM(order_revenue) AS revenue,
+      SUM(refund_money) AS refunds,
+      SUM(gross_product_sales) AS gross,
+      SUM(discount_amount_for_product) AS discounts
+    FROM pixel_orders_table
+    WHERE event_date >= '${start}' AND event_date < '${end}'
+      AND model = 'Last Click'
+    GROUP BY channel, tt
+  `.trim();
+  let json;
+  try {
+    const res = await twSqlRequest(shopId, query, start, end);
+    if (!res.ok) {
+      const body = await res.text().catch(() => '');
+      console.error(`Triple Whale channel refunds failed for site=${site} (${res.status}): ${body.slice(0, 500)}`);
+      return null;
+    }
+    json = await res.json();
+  } catch (err) {
+    console.error(`Triple Whale channel refunds errored for site=${site}:`, err.message);
+    return null;
+  }
+  const rows = Array.isArray(json) ? json : json.rows || json.data || [];
+  if (!Array.isArray(rows)) return null;
+  const F = ['orders', 'revenue', 'refunds', 'gross', 'discounts'];
+  const zero = () => ({ orders: 0, revenue: 0, refunds: 0, gross: 0, discounts: 0 });
+  const add = (acc, r) => { F.forEach((f) => { acc[f] += Number(r[f] || 0); }); };
+  const labelOf = new Map(Object.entries(REFUND_LABEL_IDS).flatMap(([label, ids]) => ids.map((id) => [id, label])));
+  const byLabel = {};
+  const tiktokShop = zero();
+  const store = zero();
+  rows.forEach((r) => {
+    add(store, r);
+    const isTt = Number(r.tt) === 1 || r.tt === true;
+    if (isTt) add(tiktokShop, r);
+    const label = labelOf.get(r.channel);
+    // TikTok Shop orders count for TikTok Ads (Triple Whale files them all
+    // there) but not for Organic.
+    if (!label || (isTt && label === 'Organic')) return;
+    add(byLabel[label] || (byLabel[label] = zero()), r);
+  });
+  return { by_label: byLabel, tiktok_shop: tiktokShop, store };
+}
+
 // Conversion rate by country (2026-11-11, Tomer: "for the conversion rate
 // use this Conversion rate breakdown from triple whale"): Triple Whale's own
 // Conversion Rate = Pixel purchases ÷ Pixel sessions (web_analytics_table),
@@ -527,4 +598,4 @@ async function fetchCountryConversion(site, start, endExclusive) {
     .filter((r) => r.country && r.sessions > 0);
 }
 
-module.exports = { fetchCountryConversion, fetchChannelPerformance, fetchAttentiveSplit, attentiveBucket, attentiveRevenueKeys, ATTENTIVE_LABEL_KEYS, CHANNEL_MAP, TW_SHOP_ID, twSqlRequest };
+module.exports = { fetchChannelRefunds, fetchCountryConversion, fetchChannelPerformance, fetchAttentiveSplit, attentiveBucket, attentiveRevenueKeys, ATTENTIVE_LABEL_KEYS, CHANNEL_MAP, TW_SHOP_ID, twSqlRequest };
