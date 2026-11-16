@@ -649,7 +649,7 @@
 
   <div class="card" id="card-2b">
     <div class="section-title"><span class="section-num">4</span>Bundle Products</div>
-    <div class="section-sub">Products bought with a bundle / set discount (the Evergreen Discounts Tags sheet’s bundle tags) — gross sales, discounts, net sales, units, YoY &amp; MoM — from Shopify. Press + for every product.</div>
+    <div class="section-sub">Shopify bundles sold — bundles sold, orders, gross sales, discounts, net sales, YoY &amp; MoM — from Shopify orders. Press + for every bundle.</div>
     <div id="section-bundles"></div>
   </div>
 
@@ -1230,6 +1230,12 @@ function mergeLiveIntoMonthData(monthData, live, site) {
     : 'billing country (Shopify rejected the shipping-country grouping for this query, so this fell back to billing address — ask me to look into why if this persists)';
   merged.by_country_note = `Pulled live via the Sync button (real-time Shopify analytics, grouped by ${groupedByPhrase}, exact selected date range). Return Rate = |sales reversals| ÷ gross sales for that country; YoY/MoM compare gross sales for the same country against the comparison period, matched by exact country name — a country with no orders in that comparison period shows —.`;
 
+  // Bundle Products (2026-11-16): Shopify bundles sold, by bundle.
+  if (Array.isArray(live.bundle_sales)) {
+    merged.bundle_sales = live.bundle_sales;
+    merged.bundle_sales_yoy = live.bundle_sales_yoy || null;
+    merged.bundle_sales_mom = live.bundle_sales_mom || null;
+  }
   if (live.discounts) {
     merged.discounts = live.discounts;
     merged.discount_groups = live.discount_groups;
@@ -2251,6 +2257,7 @@ function combineMonthDatas(entries, opts) {
   if (discGroups) discGroups.forEach(g => { g.discount_pct = g.discounted_gross ? g.discount_value / g.discounted_gross : (g.discount_value ? null : 0); g.pct_of_total_discounts = discTotalAbs ? g.discount_value / discTotalAbs : null; });
 
   const ttCombined = combineTikTokShop(entries);
+  const bsCombined = combineBundleSales(entries, !!opts.isYTD);
   const label = opts.label || '';
   const combinedTail = ' Figures are summed from the underlying periods/sites client-side (not a fresh backend query); ratios such as AOV, ROAS, and the discount/return/margin percentages are recalculated from those summed totals rather than averaged.';
   const partialTail = partialLabels.length
@@ -2271,6 +2278,7 @@ function combineMonthDatas(entries, opts) {
     discounts: dd.list, discount_groups: discGroups, discounts_yotpo_cover: discYotpoCover, discounts_total_gross: discTotalGross, discounts_total_abs: discTotalAbs, discounts_total_orders: discTotalOrders, discounts_programs_total: discTableTotal, discount_split: discSplit,
     discounts_note: dd.list ? ('Combined for ' + label + '.' + combinedTail + (dd.partial ? ' Only ' + dd.sourcesCount + ' of ' + dd.totalSources + ' site/period combination(s) had discount-level data to merge.' : '')) : undefined,
     tiktok_shop: ttCombined,
+    bundle_sales: bsCombined.list, bundle_sales_yoy: bsCombined.yoy, bundle_sales_mom: bsCombined.mom, bundle_sales_missing: bsCombined.missing,
     combined_label: label,
     combined_footer_note: 'Section 1 goals/actuals, Section 4 channels, and Section 7 other costs are true sums across ' + label + (entries.length > 1 && entries.some(e => e.fx !== 1) ? ', converted to USD. ' + FX_NOTE : '.') + combinedTail + partialTail + (opts.periodKind === 'quarter'
       ? ' Click Sync above to pull live Shopify numbers for ' + (isQuarter(state.month) && isQuarterInProgress(state.month) ? 'the current month (' + DATA.meta.current_month_full + ')' : 'this quarter\'s months') + ' across ND.COM, ND.EU, and ND.IL.'
@@ -5814,132 +5822,109 @@ const TOP_PRODUCTS_PAGE = 10;
 const topProductsOpen = {};
 
 /* ---------------- Bundle Products (2026-11-16) ---------------- */
-// Tomer: "create new section under best selling products section and add the
-// bundles products to that section" — he chose products "bought with a bundle
-// discount": /api/bundle-products (Shopify's sales by product for the orders
-// carrying one of the Evergreen sheet's bundle / set tags, the lines with the
-// bundle's own discount — the Discounts Breakdown's "Bundles & sets" rule).
-const bundleProductsCache = {};
-const bundleProductsOpen = {};
-function bundleProductsData() {
-  const r = usStatesRanges();
-  const sites = state.site === 'all' ? Object.keys(DATA.sites) : [state.site];
-  const ck = [state.site, r.cur.start, r.cur.end, r.prev ? r.prev.start : ''].join('|');
-  let entry = bundleProductsCache[ck];
-  if (entry && entry.error && Date.now() - (entry.at || 0) > 60000) { delete bundleProductsCache[ck]; entry = null; }
-  if (entry && entry !== 'loading') return entry;
-  if (!entry) {
-    bundleProductsCache[ck] = 'loading';
-    const view = state.site + '|' + state.month;
-    Promise.all(sites.map(site => {
-      const q = new URLSearchParams({ site, start: r.cur.start, end: r.cur.end, yoy_start: r.yoy.start, yoy_end: r.yoy.end });
-      if (r.prev) { q.set('prev_start', r.prev.start); q.set('prev_end', r.prev.end); }
-      return fetch(`${BACKEND_URL}/api/bundle-products?${q}`).then(res => res.json().then(body => { if (!res.ok) throw new Error(body.error || ('Backend returned ' + res.status)); return { site, body }; }));
-    })).then(results => {
-      const map = new Map(), progs = new Map();
-      let storeGross = 0, storeKnown = true, hasYoy = true, hasPrev = true;
-      results.forEach(({ site, body }) => {
-        const fx = state.site === 'all' && FX_TO_USD[site] != null ? FX_TO_USD[site] : 1;
-        if (body.total_gross === null || body.total_gross === undefined) storeKnown = false; else storeGross += body.total_gross * fx;
-        hasYoy = hasYoy && body.has_yoy; hasPrev = hasPrev && body.has_prev;
-        (body.products || []).forEach(p => {
-          const name = String(p.title).replace(/\s+-\s+[^\x00-\x7F].*$/, '').trim();
-          const key = name.toUpperCase();
-          const a = map.get(key) || { title: name, gross_sales: 0, discounts: 0, net_sales: 0, units_sold: 0, yoy_gross: 0, prev_gross: 0 };
-          a.gross_sales += p.gross_sales * fx; a.discounts += (p.discounts || 0) * fx; a.net_sales += p.net_sales * fx; a.units_sold += p.units_sold;
-          a.yoy_gross += (p.yoy_gross || 0) * fx; a.prev_gross += (p.prev_gross || 0) * fx;
-          map.set(key, a);
-        });
-        (body.bundles || []).forEach(b => {
-          const key = String(b.name).trim().toUpperCase();
-          const a = progs.get(key) || { name: b.name, gross_sales: 0, discounts: 0, net_sales: 0, units_sold: 0, error: false };
-          if (b.error) a.error = true;
-          else { a.gross_sales += (b.gross_sales || 0) * fx; a.discounts += (b.discounts || 0) * fx; a.net_sales += (b.net_sales || 0) * fx; a.units_sold += b.units_sold || 0; }
-          progs.set(key, a);
-        });
-      });
-      const chg = (c, p) => p ? (c - p) / p : null;
-      const list = Array.from(map.values()).sort((a, b) => b.gross_sales - a.gross_sales);
-      const bundleGross = list.reduce((t, p) => t + p.gross_sales, 0);
-      list.forEach(p => {
-        p.share = bundleGross ? p.gross_sales / bundleGross : null;
-        p.yoy = hasYoy ? chg(p.gross_sales, p.yoy_gross) : null;
-        p.mom = hasPrev ? chg(p.gross_sales, p.prev_gross) : null;
-      });
-      const sumPrior = k => list.reduce((t, p) => t + (p[k] || 0), 0);
-      bundleProductsCache[ck] = {
-        list, programs: Array.from(progs.values()).sort((a, b) => b.gross_sales - a.gross_sales),
-        storeGross: storeKnown ? storeGross : null, hasYoy, hasPrev,
-        totalYoy: hasYoy ? chg(bundleGross, sumPrior('yoy_gross')) : null, totalMom: hasPrev ? chg(bundleGross, sumPrior('prev_gross')) : null,
-      };
-    }).catch(err => {
-      console.error('bundle-products fetch failed:', err);
-      bundleProductsCache[ck] = { error: String(err.message || err), at: Date.now() };
-    }).finally(() => { if (state.site + '|' + state.month === view) renderBundleProducts(getMonthData()); });
-  }
-  return 'loading';
+// Several months / sites added up (USD for All Sites). A comparison map is
+// kept only when every part has it; `missing` = parts stored before bundle
+// data existed (they're re-pulled in the background).
+function combineBundleSales(entries, multiMonth) {
+  const withData = entries.filter(e => Array.isArray(e.monthData.bundle_sales));
+  if (!withData.length) return { list: undefined, yoy: null, mom: null, missing: entries.length };
+  const map = new Map();
+  withData.forEach(e => e.monthData.bundle_sales.forEach(b => {
+    const a = map.get(b.title) || { title: b.title, bundles: 0, orders: 0, units: 0, gross_sales: 0, gross_plain: 0, discounts: 0, net_sales: 0 };
+    a.bundles += b.bundles || 0; a.orders += b.orders || 0; a.units += b.units || 0;
+    ['gross_sales', 'gross_plain', 'discounts', 'net_sales'].forEach(k => { a[k] += (b[k] || 0) * e.fx; });
+    map.set(b.title, a);
+  }));
+  const cmpMap = (key) => {
+    if (!withData.every(e => e.monthData[key])) return null;
+    const out = {};
+    withData.forEach(e => Object.entries(e.monthData[key]).forEach(([t, v]) => { out[t] = (out[t] || 0) + (v || 0) * e.fx; }));
+    return out;
+  };
+  // Months added up (Year to Date / quarters): the per-month MoM maps don't
+  // add up to a quarter-on-quarter figure, so only YoY is kept there.
+  return { list: [...map.values()].sort((x, y) => y.gross_sales - x.gross_sales), yoy: cmpMap('bundle_sales_yoy'), mom: multiMonth ? null : cmpMap('bundle_sales_mom'), missing: entries.length - withData.length };
 }
-function renderBundleProducts() {
+// Tomer: "create new section under best selling products section and add the
+// bundles products to that section"; then (same day) "there is only 1 bundle
+// and the rest are regular products … show only bundles": Shopify bundles —
+// the order lines Shopify marks as part of a bundle (lineItemGroup), grouped
+// by the bundle's name, from the period's own orders (/api/data bundle_sales,
+// src/aggregate.js bundleSales; combined for quarters / YTD / All Sites).
+const bundleProductsOpen = {};
+function renderBundleProducts(monthData) {
   const el = document.getElementById('section-bundles');
   if (!el) return;
-  const d = bundleProductsData();
-  if (d === 'loading') {
-    el.innerHTML = `<div class="tt-pending"><span class="tt-loading" aria-hidden="true"></span>Loading bundle products from Shopify for this period…</div>`;
+  const md = monthData || getMonthData();
+  const list = md && Array.isArray(md.bundle_sales) ? md.bundle_sales : null;
+  if (!list) {
+    el.innerHTML = `<div class="tt-pending">${md && md.bundle_sales_missing ? '<span class="tt-loading" aria-hidden="true"></span>' : ''}Bundle sales for this period aren’t loaded yet — they come with the period’s Shopify orders${md && md.bundle_sales_missing ? ' (the stored months are being refreshed in the background — check back in a few minutes)' : ' — click Sync'}.</div>`;
     return;
   }
-  if (d.error) {
-    el.innerHTML = `<div class="tt-pending">Bundle products couldn’t be loaded (${escText(d.error)}). They’ll be tried again on the next refresh.</div>`;
+  if (!list.length) {
+    el.innerHTML = `<div class="tt-pending">No bundles were sold in this period.</div>`;
     return;
   }
-  if (!d.list.length) {
-    el.innerHTML = `<div class="tt-pending">No products were bought with a bundle / set discount in this period.</div>`;
-    return;
-  }
-  const tot = d.list.reduce((t, p) => ({ g: t.g + p.gross_sales, x: t.x + p.discounts, n: t.n + p.net_sales, u: t.u + p.units_sold }), { g: 0, x: 0, n: 0, u: 0 });
-  const progTiles = d.programs.filter(b => b.error || b.gross_sales > 0).map(b => `<div class="kpi-tile bp-tile">
-      <div class="kpi-top"><span class="kpi-label">${escText(b.name)}</span></div>
-      <div class="kpi-value">${b.error ? '—' : fmtVal(b.gross_sales, 'currency-full')}</div>
-      <div class="kpi-goal-line">${b.error ? 'Couldn’t be loaded' : `Net ${fmtVal(b.net_sales, 'currency-full')} · ${fmtVal(b.units_sold, 'number')} units · ${fmtVal(b.discounts, 'currency-full')} off`}</div>
-    </div>`).join('');
-  const sumTile = `<div class="kpi-tile bp-tile bp-total">
-      <div class="kpi-top"><span class="kpi-label">All bundles</span>${d.totalYoy !== null ? `<span class="kpi-yoy ${d.totalYoy >= 0 ? 'up' : 'down'}">YoY ${fmtYoY(d.totalYoy)}</span>` : ''}</div>
+  const yoyMap = md.bundle_sales_yoy || null, momMap = md.bundle_sales_mom || null;
+  const chg = (c, p) => p ? (c - p) / p : null;
+  const tot = list.reduce((t, b) => ({ g: t.g + b.gross_sales, gp: t.gp + (b.gross_plain || 0), x: t.x + b.discounts, n: t.n + b.net_sales, q: t.q + b.bundles, o: t.o + b.orders, u: t.u + b.units }), { g: 0, gp: 0, x: 0, n: 0, q: 0, o: 0, u: 0 });
+  const sumMap = (m) => m ? Object.values(m).reduce((t, v) => t + (v || 0), 0) : null;
+  const totYoy = yoyMap ? chg(tot.gp, sumMap(yoyMap)) : null;
+  const totMom = momMap ? chg(tot.gp, sumMap(momMap)) : null;
+  const grossK = (md.kpis || []).find(k => k.label === 'Gross Sales');
+  const storeGross = grossK && !grossK.no_data && typeof grossK.actual === 'number' ? grossK.actual : null;
+  const chip = (v) => v === null || v === undefined ? '' : `<span class="kpi-yoy ${v >= 0 ? 'up' : 'down'}">YoY ${fmtYoY(v)}</span>`;
+  const tiles = `<div class="bp-tiles">
+    <div class="kpi-tile bp-tile bp-total"><div class="kpi-top"><span class="kpi-label">Bundle sales</span>${chip(totYoy)}</div>
       <div class="kpi-value">${fmtVal(tot.g, 'currency-full')}</div>
-      <div class="kpi-goal-line">${d.storeGross ? fmtVal(tot.g / d.storeGross, 'percent') + ' of Gross Sales · ' : ''}${fmtVal(tot.u, 'number')} units</div>
-    </div>`;
+      <div class="kpi-goal-line">Gross sales${storeGross ? ' · ' + fmtVal(tot.g / storeGross, 'percent') + ' of Gross Sales' : ''}</div></div>
+    <div class="kpi-tile bp-tile"><div class="kpi-top"><span class="kpi-label">Net Sales</span></div>
+      <div class="kpi-value">${fmtVal(tot.n, 'currency-full')}</div>
+      <div class="kpi-goal-line">After ${fmtVal(tot.x, 'currency-full')} discounts</div></div>
+    <div class="kpi-tile bp-tile"><div class="kpi-top"><span class="kpi-label">Bundles sold</span></div>
+      <div class="kpi-value">${fmtVal(tot.q, 'number')}</div>
+      <div class="kpi-goal-line">${fmtVal(tot.o, 'number')} orders · ${list.length} bundle${list.length === 1 ? '' : 's'}</div></div>
+    <div class="kpi-tile bp-tile"><div class="kpi-top"><span class="kpi-label">Avg bundle price</span></div>
+      <div class="kpi-value">${tot.q ? fmtVal(tot.n / tot.q, 'currency') : '—'}</div>
+      <div class="kpi-goal-line">Net sales ÷ bundles sold</div></div>
+  </div>`;
   const bpKey = state.site + '|' + state.month;
   const open = !!bundleProductsOpen[bpKey];
-  const shown = open ? d.list : d.list.slice(0, TOP_PRODUCTS_PAGE);
-  const more = d.list.length > TOP_PRODUCTS_PAGE
-    ? `<tr class="show-more-row"><td colspan="8"><button type="button" class="show-more-btn" id="bundle-products-more" aria-expanded="${open}">${open ? '− Show top ' + TOP_PRODUCTS_PAGE : '+ ' + (d.list.length - TOP_PRODUCTS_PAGE) + ' more products'}</button></td></tr>`
+  const shown = open ? list : list.slice(0, TOP_PRODUCTS_PAGE);
+  const more = list.length > TOP_PRODUCTS_PAGE
+    ? `<tr class="show-more-row"><td colspan="9"><button type="button" class="show-more-btn" id="bundle-products-more" aria-expanded="${open}">${open ? '− Show top ' + TOP_PRODUCTS_PAGE : '+ ' + (list.length - TOP_PRODUCTS_PAGE) + ' more bundles'}</button></td></tr>`
     : '';
-  const rows = shown.map((p, i) => `<tr>
-      <td title="${escText(p.title)}">${productCell(p.title, i + 1)}</td>
-      <td>${fmtVal(p.gross_sales, 'currency-full')}</td>
-      <td>${fmtVal(p.discounts, 'currency-full')}</td>
-      <td>${fmtVal(p.net_sales, 'currency-full')}</td>
-      <td>${p.units_sold.toLocaleString('en-US')}</td>
-      <td>${p.share !== null ? fmtVal(p.share, 'percent') : '—'}</td>
-      <td>${yoyCell(p.yoy)}</td>
-      <td>${yoyCell(p.mom)}</td>
+  const rows = shown.map((b, i) => `<tr>
+      <td title="${escText(b.title)}">${productCell(b.title, i + 1)}</td>
+      <td>${fmtVal(b.bundles, 'number')}</td>
+      <td>${fmtVal(b.orders, 'number')}</td>
+      <td>${fmtVal(b.gross_sales, 'currency-full')}</td>
+      <td>${fmtVal(b.discounts, 'currency-full')}</td>
+      <td>${fmtVal(b.net_sales, 'currency-full')}</td>
+      <td>${tot.g ? fmtVal(b.gross_sales / tot.g, 'percent') : '—'}</td>
+      <td>${yoyCell(yoyMap ? chg(b.gross_plain || 0, yoyMap[b.title] || 0) : null)}</td>
+      <td>${yoyCell(momMap ? chg(b.gross_plain || 0, momMap[b.title] || 0) : null)}</td>
     </tr>`).join('');
   const totalRow = `<tr class="total-row">
-      <td>Total (all bundle products)</td>
+      <td>Total (all bundles)</td>
+      <td>${fmtVal(tot.q, 'number')}</td>
+      <td>${fmtVal(tot.o, 'number')}</td>
       <td>${fmtVal(tot.g, 'currency-full')}</td>
       <td>${fmtVal(tot.x, 'currency-full')}</td>
       <td>${fmtVal(tot.n, 'currency-full')}</td>
-      <td>${tot.u.toLocaleString('en-US')}</td>
       <td>100.0%</td>
-      <td>${yoyCell(d.totalYoy)}</td>
-      <td>${yoyCell(d.totalMom)}</td>
+      <td>${yoyCell(totYoy)}</td>
+      <td>${yoyCell(totMom)}</td>
     </tr>`;
-  el.innerHTML = `<div class="bp-tiles">${sumTile}${progTiles}</div>
+  const multi = state.month === 'YTD' || isQuarter(state.month);
+  el.innerHTML = `${tiles}
   <table class="dtable">
-    <thead><tr><th style="text-align:left">Product</th><th>Gross Sales</th><th>Discounts</th><th>Net Sales</th><th>Units Sold</th><th>% of Bundle Sales</th><th>YoY</th><th>${momLabel()}</th></tr></thead>
+    <thead><tr><th style="text-align:left">Bundle</th><th>Bundles Sold</th><th>Orders</th><th>Gross Sales</th><th>Discounts</th><th>Net Sales</th><th>% of Bundle Sales</th><th>YoY</th><th>${momLabel()}</th></tr></thead>
     <tbody>${rows}${more}${totalRow}</tbody>
   </table>
-  <div style="margin-top:10px;font-size:11px;color:var(--text-muted)">Shopify analytics for the period${state.site === 'all' ? ', the three sites added up in USD' : ''}: the products in orders tagged with one of the Evergreen Discounts Tags sheet’s bundle / set tags, on the lines that got the bundle’s own discount — the same orders and lines as “Bundles &amp; sets” in the Discounts Breakdown (orders with a sale tag count as the sale there, so they’re left out here too). Gross Sales before discounts; Discounts = every discount on those lines (the bundle’s own plus any code used with it — the Discounts Breakdown counts the bundle’s own discount only); Net Sales after discounts and returns. A product can be in more than one bundle, so the bundle boxes can add up to slightly more than All bundles. YoY / ${momLabel()} compare the same products’ bundle sales in the comparison period.</div>`;
+  <div style="margin-top:10px;font-size:11px;color:var(--text-muted)">Shopify bundles only — every order line that Shopify marks as part of a bundle, grouped by the bundle’s name (the bundle as the customer bought it, e.g. “MINI EYE SCULPT DUO”), from the period’s Shopify orders${state.site === 'all' ? ', the three sites added up in USD' : ''}. Bundles Sold = how many of each bundle were bought; Gross Sales = the bundle’s products at their order prices${state.site === 'il' || state.site === 'all' ? ' (VAT out, as in Gross Sales)' : ''}; Discounts = every discount on those lines (the bundle’s own and any code used with it); Net Sales = gross − discounts (returns aren’t taken off). Single products and sets sold as one product aren’t bundles here, so they stay in Top Selling Products only. YoY / ${momLabel()} compare each bundle’s gross sales with the same bundle in the comparison period${multi ? ' (YoY only for a quarter / Year to Date)' : ''}.${md.bundle_sales_missing ? ` ${md.bundle_sales_missing} of the months / sites in this view are still being refreshed, so they aren’t included yet.` : ''}</div>`;
   const btn = document.getElementById('bundle-products-more');
-  if (btn) btn.addEventListener('click', () => { bundleProductsOpen[bpKey] = !open; renderBundleProducts(); });
+  if (btn) btn.addEventListener('click', () => { bundleProductsOpen[bpKey] = !open; renderBundleProducts(getMonthData()); });
   if (typeof applyMobileTableLabels === 'function') applyMobileTableLabels(el);
 }
 
