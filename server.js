@@ -6,7 +6,7 @@ const { fetchProductImages, fetchSalesTimeseries, fetchRefundSplitByProduct, fet
 const { aggregate } = require('./src/aggregate');
 const { singleFlight } = require('./src/singleflight');
 const { fetchDiscountTags, classify: classifyDiscountTags, FALLBACK: DISCOUNT_TAGS_COPY } = require('./src/discount-tags');
-const { fetchChannelPerformance, fetchChannelRefunds, fetchAttentiveSplit, attentiveRevenueKeys, ATTENTIVE_LABEL_KEYS, fetchCountryConversion } = require('./src/triplewhale');
+const { fetchRetention, fetchChannelPerformance, fetchChannelRefunds, fetchAttentiveSplit, attentiveRevenueKeys, ATTENTIVE_LABEL_KEYS, fetchCountryConversion } = require('./src/triplewhale');
 const { fetchTikTokShop, fetchGmvEstimate, fetchGifting, fetchOrderStatus } = require('./src/tiktokshop');
 const { getSellerCenter, fetchPayouts, fetchDiscountFunding } = require('./src/windsor-tiktok');
 const tiktokApi = require('./src/tiktok-api');
@@ -1061,6 +1061,14 @@ async function applyTikTokFunding(payload, site, start, end) {
       const gS = f.any_original ? f.seller_original / f.any_original : share, gP = f.any_original ? f.platform_original / f.any_original : 1 - share;
       const seller = { ...item, ...part(share, oS, gS), label: 'TikTok seller discounts (ND pays)' };
       const platform = { ...item, ...part(1 - share, oP, gP), key: 'tiktok_platform', label: 'TikTok platform discounts (TikTok pays)' };
+      // Orders with a platform voucher only (no seller discount) — 2026-11-16,
+      // Tomer: the Discounts Breakdown leaves the platform discounts out, so
+      // these orders (and their gross) come off the Regular bucket and Total.
+      const oOnly = f.any_orders ? Math.max(0, f.any_orders - (f.seller_orders || 0)) / f.any_orders : 1 - share;
+      const gOnly = f.any_original ? Math.max(0, f.any_original - (f.seller_original || 0)) / f.any_original : 1 - share;
+      platform.only_orders = Math.round((item.orders || 0) * oOnly);
+      platform.only_orders_gross = typeof item.orders_gross === 'number' ? item.orders_gross * gOnly : null;
+      platform.only_discounted_gross = typeof item.discounted_gross === 'number' ? item.discounted_gross * gOnly : null;
       items = bucket.items.slice(0, ii).concat([seller, platform], bucket.items.slice(ii + 1));
     }
     const buckets = sp.buckets.map((b, k) => (k === bi ? { ...b, items } : b));
@@ -1549,6 +1557,41 @@ app.get('/api/sales-trend', async (req, res) => {
     res.json(payload);
   } catch (err) {
     console.error(`sales-trend (site=${site}) failed:`, err.message);
+    res.status(502).json({ error: err.message });
+  }
+});
+
+// GET /api/retention?site=com|eu|il|all&start=&end= — the Goal Tracker's
+// Retention Rate (2026-11-16, see fetchRetention): customers of the 12 months
+// before the period who bought again in it. All Sites adds the three stores'
+// customers up (a customer of two stores counts in each). Cached 12 h for an
+// ended range, 30 min otherwise.
+const retentionCache = new Map();
+const retentionPending = new Map();
+app.get('/api/retention', async (req, res) => {
+  const { site, start, end } = req.query;
+  if (!['com', 'eu', 'il', 'all'].includes(site)) return res.status(400).json({ error: `Unknown or missing site "${site}"` });
+  if (!US_STATES_DATE.test(start || '') || !US_STATES_DATE.test(end || '') || end <= start) return res.status(400).json({ error: 'Invalid date range' });
+  const one = (s) => {
+    const key = [s, start, end].join('|');
+    const hit = retentionCache.get(key);
+    if (hit && hit.expires > Date.now()) return Promise.resolve(hit.payload);
+    if (retentionPending.has(key)) return retentionPending.get(key);
+    const p = fetchRetention(s, start, end).then((payload) => {
+      const ended = new Date(`${end}T00:00:00Z`).getTime() + 86400000 <= Date.now();
+      retentionCache.set(key, { payload, expires: Date.now() + (ended ? 12 * 3600 : 30 * 60) * 1000 });
+      if (retentionCache.size > 400) retentionCache.delete(retentionCache.keys().next().value);
+      return payload;
+    }).finally(() => retentionPending.delete(key));
+    retentionPending.set(key, p);
+    return p;
+  };
+  try {
+    const parts = await Promise.all((site === 'all' ? ['com', 'eu', 'il'] : [site]).map(one));
+    const base = parts.reduce((a, p) => a + p.base_customers, 0), retained = parts.reduce((a, p) => a + p.retained, 0);
+    res.json({ site, start, end, base_start: parts[0].base_start, base_customers: base, period_customers: parts.reduce((a, p) => a + p.period_customers, 0), retained, rate: base ? retained / base : null, sites: site === 'all' ? parts : undefined });
+  } catch (err) {
+    console.error(`retention (site=${site}) failed:`, err.message);
     res.status(502).json({ error: err.message });
   }
 });
