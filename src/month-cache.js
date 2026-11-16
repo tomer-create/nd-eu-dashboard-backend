@@ -221,7 +221,8 @@ async function getWithMonthCache({ site, start, end, compare, refresh }, build) 
       // 16 (2026-11-04): Gross Sales of the whole orders in the split.
       // 17 (2026-11-05): whole prior month in MoM; more outages flagged.
       // 18 (2026-11-05): Samples broken down by product.
-      const outdated = !(row.payload && row.payload.discounts_version >= 18) || partial;
+      // 19 (2026-11-16): bundle_sales (Bundle Products section).
+      const outdated = !(row.payload && row.payload.discounts_version >= 19) || partial;
       if (recentlyClosed && ageHours > STALE_AFTER_HOURS) {
         pullAndStore(key, args, build).catch((err) => console.error('month-cache: background refresh failed:', err.message));
         return { payload: row.payload, cache: 'stale', fetchedAt: row.fetched_at };
