@@ -7,7 +7,7 @@ const { aggregate } = require('./src/aggregate');
 const { singleFlight } = require('./src/singleflight');
 const { fetchDiscountTags, classify: classifyDiscountTags, FALLBACK: DISCOUNT_TAGS_COPY } = require('./src/discount-tags');
 const { fetchRetention, fetchChannelPerformance, fetchChannelRefunds, fetchAttentiveSplit, attentiveRevenueKeys, ATTENTIVE_LABEL_KEYS, fetchCountryConversion } = require('./src/triplewhale');
-const { fetchTikTokShop, fetchGmvEstimate, fetchGifting, fetchOrderStatus } = require('./src/tiktokshop');
+const { fetchTikTokShop, fetchGmvEstimate, fetchGifting, fetchOrderStatus, fetchAllProducts } = require('./src/tiktokshop');
 const { getSellerCenter, fetchPayouts, fetchDiscountFunding } = require('./src/windsor-tiktok');
 const tiktokApi = require('./src/tiktok-api');
 const { fetchPnlSheetChannels, fetchPnlSheetOtherCosts, fetchPnlSheetTotalCost, fetchPnlSheetMarketingSpend, fetchPnlSheetShopPpc, fetchPnlSheetRtbHouseSpend, fetchPnlSheetGoals } = require('./src/googlesheets');
@@ -1870,6 +1870,21 @@ app.get('/api/tiktok-shop/payouts', async (req, res) => {
     res.status(502).json({ error: err.message });
   }
 });
+// GET /api/tiktok-shop/products?start=&end= (ND.COM) — every TikTok Shop
+// product of the period, bundles flagged (2026-11-16, see fetchAllProducts).
+app.get('/api/tiktok-shop/products', async (req, res) => {
+  const { start, end } = req.query;
+  if (!US_STATES_DATE.test(start || '') || !US_STATES_DATE.test(end || '') || end <= start) return res.status(400).json({ error: 'Invalid date range' });
+  try {
+    const out = await fetchAllProducts('com', start, end);
+    if (!out) return res.status(503).json({ error: 'TikTok Shop data isn\'t configured' });
+    res.json(out);
+  } catch (err) {
+    console.error('tiktok products failed:', err.message);
+    res.status(502).json({ error: err.message });
+  }
+});
+
 // GET /api/tiktok-shop/order-status?start=&end= (ND.COM) — cancelled and
 // refunded TikTok Shop orders of the period (2026-11-16, see fetchOrderStatus).
 app.get('/api/tiktok-shop/order-status', async (req, res) => {
