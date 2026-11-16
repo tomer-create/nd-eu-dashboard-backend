@@ -825,6 +825,42 @@ async function fetchTopProductsAnalytics(site, startISO, endISOExclusive, limit 
   }).filter((p) => p.title);
 }
 
+// Bundle products (2026-11-16, Tomer: "create new section under best selling
+// products section and add the bundles products to that section"; he chose
+// "bought with a bundle discount"). Shopify's own sales report by product and
+// discount title for the orders carrying one of the given order tags (the
+// Evergreen sheet's bundle / set tags) — the dashboard keeps the lines whose
+// discount is the bundle's own "-15%"-style discount, the same rule the
+// Discounts Breakdown uses for "Bundles & sets".
+const QL_TAG_RE = /^[A-Za-z0-9_\-\u0590-\u05FF ]{1,60}$/;
+async function fetchSalesByProductForTags(site, startISO, endISOExclusive, tags) {
+  const safe = (tags || []).filter((t) => QL_TAG_RE.test(t));
+  if (!safe.length) return [];
+  const untilDate = new Date(endISOExclusive + 'T00:00:00Z');
+  untilDate.setUTCDate(untilDate.getUTCDate() - 1);
+  const untilISO = untilDate.toISOString().slice(0, 10);
+  const where = safe.map((t) => `order_tags CONTAINS '${t}'`).join(' OR ');
+  const q = `FROM sales SHOW gross_sales, discounts, net_sales, quantity_ordered GROUP BY product_title, discount_title WHERE ${where} SINCE ${startISO} UNTIL ${untilISO} ORDER BY gross_sales DESC LIMIT 1000`;
+  const data = await graphql(site, `
+    query BundleProducts($q: String!) {
+      shopifyqlQuery(query: $q) {
+        parseErrors
+        tableData { columns { name } rows }
+      }
+    }`, { q });
+  const result = data.shopifyqlQuery;
+  if (result.parseErrors && result.parseErrors.length) {
+    throw new Error(`ShopifyQL parse error for "${site}" (query: ${q}): ${result.parseErrors.join('; ')}`);
+  }
+  const colNames = (result.tableData.columns || []).map((c) => c.name);
+  return (result.tableData.rows || []).map((row) => {
+    const values = Array.isArray(row) ? row : colNames.map((name) => row[name]);
+    const o = {};
+    colNames.forEach((name, i) => { o[name] = values[i]; });
+    return { title: o.product_title, discount_title: o.discount_title || '', gross_sales: Number(o.gross_sales) || 0, discounts: Math.abs(Number(o.discounts) || 0), net_sales: Number(o.net_sales) || 0, units_sold: Number(o.quantity_ordered) || 0 };
+  }).filter((p) => p.title);
+}
+
 async function fetchSalesSummary(site, startISO, endISOExclusive) {
   // Same UNTIL-is-inclusive conversion as the other shopifyqlQuery helpers above.
   const untilDate = new Date(endISOExclusive + 'T00:00:00Z');
@@ -1523,6 +1559,7 @@ async function fetchCountrySessions(site, startISO, endISOExclusive) {
 }
 
 module.exports = {
+  fetchSalesByProductForTags,
   fetchProductImages,
   fetchSalesTimeseries,
   fetchRefundSplitByProduct,
