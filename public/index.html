@@ -3779,7 +3779,7 @@ function renderTikTokShop(monthData, opts = {}) {
     else if (priorLines[kind]) p = priorLines[kind].find(x => x.name === line.name) || null;
     if (!p) return {};
     const a = lineMetrics(line), b = lineMetrics(p);
-    return { rev: chgOf(a.rev, b.rev), cost: chgOf(a.cost, b.cost), roas: chgOf(a.roas, b.roas), aov: chgOf(aovNet(line, 'cur'), line.name === 'Total' ? aovNetTotalPrior(kind) : aovNet(p, kind)) };
+    return { rev: chgOf(a.rev, b.rev), cost: chgOf(a.cost, b.cost), roas: chgOf(a.roas, b.roas), aov: line.name === 'Total' ? chgOf(payCur && netAovBase ? netAovBase : aovNet(line, 'cur'), aovNetTotalPrior(kind)) : chgOf(aovNet(line, 'cur'), aovNet(p, kind)) };
   };
   // Figures-only mode (see opts.dry): the Affiliate line for Section 4's
   // TikTok Affiliates row — Avg order (2026-10-21) and, since 2026-10-26,
