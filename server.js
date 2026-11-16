@@ -2,12 +2,12 @@ require('dotenv').config();
 const path = require('path');
 const express = require('express');
 const cors = require('cors');
-const { fetchProductImages, fetchSalesTimeseries, fetchRefundSplitByProduct, fetchCountrySessions, fetchOrders, fetchVoidedOrders, fetchOrdersLight, fetchOrdersForTierRevenue, fetchSalesReversals, fetchCostOfGoodsSold, fetchTopReturnsByProduct, fetchCountryBreakdown, fetchUsStateBreakdown, fetchSalesSummary, fetchCustomerAcquisition, fetchProductRetailPrices, fetchCollabsCodeSales, fetchTopProductsAnalytics, getAuthorizeUrl, exchangeCodeForToken } = require('./src/shopify');
+const { fetchProductImages, fetchSalesTimeseries, fetchRefundSplitByProduct, fetchCountrySessions, fetchOrders, fetchVoidedOrders, fetchOrdersLight, fetchOrdersForTierRevenue, fetchSalesReversals, fetchCostOfGoodsSold, fetchTopReturnsByProduct, fetchCountryBreakdown, fetchUsStateBreakdown, fetchSalesSummary, fetchCustomerAcquisition, fetchProductRetailPrices, fetchCollabsCodeSales, fetchTopProductsAnalytics, fetchSalesByProductForTags, getAuthorizeUrl, exchangeCodeForToken } = require('./src/shopify');
 const { aggregate } = require('./src/aggregate');
 const { singleFlight } = require('./src/singleflight');
 const { fetchDiscountTags, classify: classifyDiscountTags, FALLBACK: DISCOUNT_TAGS_COPY } = require('./src/discount-tags');
 const { fetchChannelPerformance, fetchChannelRefunds, fetchAttentiveSplit, attentiveRevenueKeys, ATTENTIVE_LABEL_KEYS, fetchCountryConversion } = require('./src/triplewhale');
-const { fetchTikTokShop, fetchGmvEstimate, fetchGifting } = require('./src/tiktokshop');
+const { fetchTikTokShop, fetchGmvEstimate, fetchGifting, fetchOrderStatus } = require('./src/tiktokshop');
 const { getSellerCenter, fetchPayouts, fetchDiscountFunding } = require('./src/windsor-tiktok');
 const tiktokApi = require('./src/tiktok-api');
 const { fetchPnlSheetChannels, fetchPnlSheetOtherCosts, fetchPnlSheetTotalCost, fetchPnlSheetMarketingSpend, fetchPnlSheetShopPpc, fetchPnlSheetRtbHouseSpend, fetchPnlSheetGoals } = require('./src/googlesheets');
@@ -1315,6 +1315,79 @@ app.get('/api/top-products', async (req, res) => {
   }
 });
 
+// GET /api/bundle-products?site=com&start=&end=[&yoy_start=&yoy_end=][&prev_start=&prev_end=]
+// Bundle products (2026-11-16, Tomer: "create new section under best selling
+// products section and add the bundles products to that section"; he chose
+// products "bought with a bundle discount"). The Evergreen Discounts Tags
+// sheet's bundle / set tags (HY-GLAM Collection Bundle, Natasha's
+// Recommended Sets, Collection Bundles …): Shopify's sales report by product
+// for the orders carrying one of those tags, keeping the lines whose discount
+// is the bundle's own "-15%"-style discount (or titled bundle / set) — the
+// same rule as the Discounts Breakdown's "Bundles & sets". Per product: gross
+// sales, bundle discount, net sales, units, and gross sales in the comparison
+// periods; per bundle (tag): the same totals. Cached like /api/top-products.
+const BUNDLE_LINE_RE = /^\s*-?\s*\d+(\.\d+)?\s*%\s*(off)?\s*$|bundle|\bsets?\b/i;
+const bundleProductsCache = new Map();
+app.get('/api/bundle-products', async (req, res) => {
+  const { site, start, end, yoy_start, yoy_end, prev_start, prev_end } = req.query;
+  if (!['com', 'eu', 'il'].includes(site)) return res.status(400).json({ error: `Unknown or missing site "${site}"` });
+  const ok = (a, b) => US_STATES_DATE.test(a || '') && US_STATES_DATE.test(b || '');
+  if (!ok(start, end) || ((yoy_start || yoy_end) && !ok(yoy_start, yoy_end)) || ((prev_start || prev_end) && !ok(prev_start, prev_end))) {
+    return res.status(400).json({ error: 'Invalid date range' });
+  }
+  const key = [site, start, end, yoy_start, yoy_end, prev_start, prev_end].join('|');
+  const hit = bundleProductsCache.get(key);
+  if (hit && hit.expires > Date.now()) return res.json(hit.payload);
+  try {
+    const tagInfo = (await fetchDiscountTags(site).catch(() => null)) || classifyDiscountTags(DISCOUNT_TAGS_COPY[site] || [], 'built-in');
+    const bundles = (tagInfo.bundles || []).filter((b) => b && b.tag);
+    const tags = [...new Set(bundles.map((b) => b.tag))];
+    const keep = (rows) => (rows || []).filter((r) => BUNDLE_LINE_RE.test(r.discount_title || ''));
+    const byProduct = (rows) => {
+      const m = new Map();
+      keep(rows).forEach((r) => {
+        const a = m.get(r.title) || { title: r.title, gross_sales: 0, discounts: 0, net_sales: 0, units_sold: 0 };
+        a.gross_sales += r.gross_sales; a.discounts += r.discounts; a.net_sales += r.net_sales; a.units_sold += r.units_sold;
+        m.set(r.title, a);
+      });
+      return m;
+    };
+    const sumRows = (rows) => keep(rows).reduce((t, r) => ({ gross_sales: t.gross_sales + r.gross_sales, discounts: t.discounts + r.discounts, net_sales: t.net_sales + r.net_sales, units_sold: t.units_sold + r.units_sold }), { gross_sales: 0, discounts: 0, net_sales: 0, units_sold: 0 });
+    const prior = (s, e) => (s && tags.length ? fetchSalesByProductForTags(site, s, e, tags).catch((err) => {
+      console.error(`bundle-products prior (site=${site} ${s}..${e}) failed:`, err.message);
+      return null;
+    }) : Promise.resolve(s ? [] : null));
+    const [cur, summary, yoy, prev, perTag] = await Promise.all([
+      tags.length ? fetchSalesByProductForTags(site, start, end, tags) : Promise.resolve([]),
+      fetchSalesSummary(site, start, end).catch(() => null),
+      prior(yoy_start, yoy_end),
+      prior(prev_start, prev_end),
+      Promise.all(bundles.map((b) => fetchSalesByProductForTags(site, start, end, [b.tag]).then((rows) => ({ name: b.name, tag: b.tag, ...sumRows(rows) })).catch(() => ({ name: b.name, tag: b.tag, error: true })))),
+    ]);
+    const curMap = byProduct(cur);
+    const yMap = yoy ? byProduct(yoy) : null, pMap = prev ? byProduct(prev) : null;
+    const products = [...curMap.values()].sort((a, b) => b.gross_sales - a.gross_sales).map((p) => ({
+      ...p,
+      yoy_gross: yMap ? ((yMap.get(p.title) || {}).gross_sales || 0) : null,
+      prev_gross: pMap ? ((pMap.get(p.title) || {}).gross_sales || 0) : null,
+    }));
+    const total = products.reduce((t, p) => ({ gross_sales: t.gross_sales + p.gross_sales, discounts: t.discounts + p.discounts, net_sales: t.net_sales + p.net_sales, units_sold: t.units_sold + p.units_sold }), { gross_sales: 0, discounts: 0, net_sales: 0, units_sold: 0 });
+    const sumMap = (m) => (m ? [...m.values()].reduce((t, p) => t + p.gross_sales, 0) : null);
+    const payload = {
+      site, start, end, source: 'shopify_analytics', tags_source: tagInfo.source || null,
+      bundles: perTag, products, total, total_gross: summary ? summary.gross_sales : null,
+      yoy_total_gross: sumMap(yMap), prev_total_gross: sumMap(pMap), has_yoy: !!yMap, has_prev: !!pMap,
+    };
+    const ended = new Date(`${end}T00:00:00Z`).getTime() + 86400000 <= Date.now();
+    if (!((yoy_start && !yMap) || (prev_start && !pMap) || !summary || perTag.some((b) => b.error))) bundleProductsCache.set(key, { payload, expires: Date.now() + (ended ? 6 * 3600 : 15 * 60) * 1000 });
+    if (bundleProductsCache.size > 300) bundleProductsCache.delete(bundleProductsCache.keys().next().value);
+    res.json(payload);
+  } catch (err) {
+    console.error(`bundle-products (site=${site}) failed:`, err.message);
+    res.status(502).json({ error: err.message });
+  }
+});
+
 // GET /api/returns-change?site=com&start=&end=[&yoy_start=&yoy_end=][&prev_start=&prev_end=]
 // YoY / MoM (QoQ) for Section 3's Top 15 Return Products — added 2026-10-08
 // per Tomer ("on the Top 15 Return Products sections add YOY and MOM").
@@ -1744,6 +1817,20 @@ app.get('/api/tiktok-shop/payouts', async (req, res) => {
     res.json(out);
   } catch (err) {
     console.error('tiktok payouts failed:', err.message);
+    res.status(502).json({ error: err.message });
+  }
+});
+// GET /api/tiktok-shop/order-status?start=&end= (ND.COM) — cancelled and
+// refunded TikTok Shop orders of the period (2026-11-16, see fetchOrderStatus).
+app.get('/api/tiktok-shop/order-status', async (req, res) => {
+  try {
+    const start = String(req.query.start || ''), end = String(req.query.end || '');
+    if (!US_STATES_DATE.test(start) || !US_STATES_DATE.test(end) || end <= start) return res.status(400).json({ error: 'start and end (YYYY-MM-DD) are required' });
+    const out = await fetchOrderStatus('com', start, end);
+    if (!out) return res.status(503).json({ error: 'Triple Whale isn\'t configured' });
+    res.json(out);
+  } catch (err) {
+    console.error('tiktok order-status failed:', err.message);
     res.status(502).json({ error: err.message });
   }
 });
