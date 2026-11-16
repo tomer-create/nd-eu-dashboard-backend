@@ -509,6 +509,54 @@ function discountSplit(orders, owners, grossSales, discountTags) {
   };
 }
 
+// Bundle sales (2026-11-16, Tomer: "on the Bundle Products section there is
+// only 1 bundle and the rest are regular products … show only bundles").
+// Shopify bundles are sold as their component products; each component line
+// carries the bundle it belongs to (lineItemGroup: the bundle's title and how
+// many were bought). Per bundle title: bundles sold (each group's quantity),
+// orders, units (component units), gross sales (component lines at order
+// prices, VAT out line by line for VAT-inclusive stores — as Gross Sales),
+// discounts on those lines, net sales (gross − discounts). gross_plain = the
+// same gross with VAT left in, for YoY / MoM against the lighter comparison
+// query (which has no tax lines). undefined when the orders were fetched
+// without lineItemGroup (older payloads).
+function bundleSales(orders) {
+  let seen = false;
+  const acc = new Map();
+  for (const order of orders) {
+    const groups = new Map(); // group id -> title
+    for (const e of (order.lineItems && order.lineItems.edges) || []) {
+      const node = e.node || {};
+      if ('lineItemGroup' in node) seen = true;
+      const g = node.lineItemGroup;
+      if (!g || !g.title) continue;
+      const title = String(g.title).trim();
+      const a = acc.get(title) || { title, bundles: 0, orders: 0, units: 0, gross_sales: 0, gross_plain: 0, discounts: 0, net_sales: 0, _orders: new Set() };
+      const orig = amt(node.originalTotalSet);
+      let f = 1;
+      if (order.taxesIncluded) {
+        const tl = node.taxLines || [];
+        const rate = tl.reduce((x, t) => x + (Number(t.rate) || 0), 0);
+        const tax = tl.reduce((x, t) => x + amt(t.priceSet), 0);
+        f = tax > 0 && rate > 0 ? 1 / (1 + rate) : 1;
+      }
+      const disc = (node.discountAllocations || []).reduce((x, al) => x + amt(al.allocatedAmountSet), 0);
+      a.units += Number(node.quantity) || 0;
+      a.gross_sales += orig * f;
+      a.gross_plain += orig;
+      a.discounts += disc * f;
+      a._orders.add(order.id || order.name || order);
+      if (!groups.has(g.id || title)) { groups.set(g.id || title, title); a.bundles += Number(g.quantity) || 1; }
+      acc.set(title, a);
+    }
+  }
+  if (!seen) return undefined;
+  return [...acc.values()].map((a) => {
+    const { _orders, ...rest } = a;
+    return { ...rest, orders: _orders.size, net_sales: a.gross_sales - a.discounts };
+  }).sort((x, y) => y.gross_sales - x.gross_sales);
+}
+
 function aggregate(orders, { tagLabels = DEFAULT_TAG_LABELS, discountTags = null, splitExtraOrders = null } = {}) {
   let grossSales = 0;
   let discountsTotal = 0;
@@ -769,6 +817,7 @@ function aggregate(orders, { tagLabels = DEFAULT_TAG_LABELS, discountTags = null
       returns_total: returnsTotal,
     },
     top_products: topProducts,
+    bundle_sales: bundleSales(orders),
     by_country: byCountry,
     discounts,
     discounts_total_gross: discountsTotalGross,
@@ -814,7 +863,8 @@ function aggregate(orders, { tagLabels = DEFAULT_TAG_LABELS, discountTags = null
     // 17 (2026-11-05): whole prior month for a closed month's MoM (was cut at
     //                  the 29th/30th), more outages flagged as partial.
     // 18 (2026-11-05): Samples broken down by product.
-    discounts_version: orders.length === 0 ? 18 : (sawDiscountApps ? (byApp && sawSourceName ? 18 : byApp ? 5 : 3) : 1),
+    // 19 (2026-11-16): bundle_sales (Shopify bundles by lineItemGroup).
+    discounts_version: orders.length === 0 ? 19 : (sawDiscountApps ? (byApp && sawSourceName ? 19 : byApp ? 5 : 3) : 1),
     discounts_by_app: byApp,
   };
 }
