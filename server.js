@@ -6,7 +6,7 @@ const { fetchProductImages, fetchSalesTimeseries, fetchRefundSplitByProduct, fet
 const { aggregate } = require('./src/aggregate');
 const { singleFlight } = require('./src/singleflight');
 const { fetchDiscountTags, classify: classifyDiscountTags, FALLBACK: DISCOUNT_TAGS_COPY } = require('./src/discount-tags');
-const { fetchChannelPerformance, fetchAttentiveSplit, attentiveRevenueKeys, ATTENTIVE_LABEL_KEYS, fetchCountryConversion } = require('./src/triplewhale');
+const { fetchChannelPerformance, fetchChannelRefunds, fetchAttentiveSplit, attentiveRevenueKeys, ATTENTIVE_LABEL_KEYS, fetchCountryConversion } = require('./src/triplewhale');
 const { fetchTikTokShop, fetchGmvEstimate, fetchGifting } = require('./src/tiktokshop');
 const { getSellerCenter, fetchPayouts, fetchDiscountFunding } = require('./src/windsor-tiktok');
 const tiktokApi = require('./src/tiktok-api');
@@ -1207,6 +1207,8 @@ app.get('/api/channels-change', async (req, res) => {
   const hit = channelsChangeCache.get(key);
   if (hit && hit.expires > Date.now()) return res.json(hit.payload);
   try {
+    // Started alongside the rest (used for the profitability columns below).
+    const refundsP = fetchChannelRefunds(site, start, end).catch(() => null);
     const [cur, yoy, prev] = await Promise.all([
       fetchChannelPerformance(site, start, end),
       yoy_start ? fetchChannelPerformance(site, yoy_start, yoy_end) : Promise.resolve(null),
@@ -1249,7 +1251,11 @@ app.get('/api/channels-change', async (req, res) => {
     // Copies — the split objects are shared through the in-memory cache.
     const attSplit = (v) => v && { sms_journey: v.sms_journey, email_journey: v.email_journey, sms_campaign: v.sms_campaign, email_campaign: v.email_campaign, email_combined: v.email_combined };
     const attentiveOut = attentive && { ...attSplit(attentive), revenue_keys: attentiveRevenueKeys(site, attentive), yoy: attSplit(attentiveYoy), prev: attSplit(attentivePrev) };
-    const payload = { site, start, end, has_yoy: !!yoy, has_prev: !!prev, channels, collabs, attentive: attentiveOut };
+    // Refunds by channel for the profitability columns (2026-11-16) — current
+    // period only; null when Triple Whale fails (the page then uses the
+    // store's return rate).
+    const refunds = await refundsP;
+    const payload = { site, start, end, has_yoy: !!yoy, has_prev: !!prev, channels, collabs, attentive: attentiveOut, refunds };
     const ended = new Date(`${end}T00:00:00Z`).getTime() + 86400000 <= Date.now();
     // A comparison that was asked for and failed isn't cached (2026-11-05).
     const missing = (yoy_start && !yoy) || (prev_start && !prev);
