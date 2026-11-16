@@ -162,6 +162,36 @@ async function fetchTopProducts(shopId, start, end) {
   return rows.map((r) => ({ title: r.title, gross_sales: num(r.gross_sales), units: num(r.units) }));
 }
 
+// Every TikTok Shop product of [start, end) (2026-11-16, Tomer: "include in
+// Top TikTok Shop products list of all products including bundles" — the
+// dashboard shows the first 10 and opens the rest). TikTok's bundles / sets
+// have no SKU in its order records (e.g. "HY-GLAM SET & BLUR BUNDLE"), so a
+// product whose lines never carry a SKU is flagged is_bundle.
+// COM Oct 2026: 118 products, 27 of them bundles / sets.
+const allProductsCache = new Map();
+async function fetchAllProducts(site, start, end) {
+  if (!SITES_WITH_TIKTOK_SHOP.includes(site) || !process.env.TRIPLEWHALE_API_KEY) return null;
+  if (!isoOk(start) || !isoOk(end) || end <= start) return null;
+  const shopId = TW_SHOP_ID[site];
+  const key = `allprod|${shopId}|${start}|${end}`;
+  const hit = allProductsCache.get(key);
+  if (hit && Date.now() - hit.at < (isSettled(end) ? PAST_TTL_MS : 10 * 60 * 1000)) return hit.value;
+  const rows = await twSql(shopId, `
+    SELECT p.product_name AS title,
+           SUM(p.product_name_price * p.product_name_quantity_sold) AS gross_sales,
+           SUM(p.product_name_quantity_sold) AS units,
+           max(p.product_sku) AS sku
+    FROM orders_table ARRAY JOIN products_info AS p
+    WHERE event_date >= '${start}' AND event_date < '${end}' AND platform = 'tiktok-shops'
+    GROUP BY title
+    ORDER BY gross_sales DESC
+    LIMIT 3000`.trim(), start, end);
+  const value = { start, end, products: rows.map((r) => ({ title: r.title, gross_sales: num(r.gross_sales), units: num(r.units), is_bundle: !String(r.sku || '').trim() })) };
+  allProductsCache.set(key, { at: Date.now(), value });
+  if (allProductsCache.size > 200) allProductsCache.delete(allProductsCache.keys().next().value);
+  return value;
+}
+
 // 'shipping' added 2026-10-14: the dashboard's TikTok Shop GMV change uses
 // gross + shipping − product discounts (TikTok's GMV formula).
 // 'ads_orders' added 2026-10-20 (Revenue & costs by source: TikTok Ads AOV YoY / MoM).
@@ -404,4 +434,4 @@ async function fetchGifting(site, start, end) {
   });
 }
 
-module.exports = { fetchTikTokShop, fetchGmvEstimate, fetchGifting, fetchOrderStatus, SITES_WITH_TIKTOK_SHOP };
+module.exports = { fetchTikTokShop, fetchGmvEstimate, fetchGifting, fetchOrderStatus, fetchAllProducts, SITES_WITH_TIKTOK_SHOP };
