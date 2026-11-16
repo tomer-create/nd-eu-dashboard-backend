@@ -167,18 +167,22 @@ async function fetchTopProducts(shopId, start, end) {
 // dashboard shows the first 10 and opens the rest). TikTok's bundles / sets
 // have no SKU in its order records (e.g. "HY-GLAM SET & BLUR BUNDLE"), so a
 // product whose lines never carry a SKU is flagged is_bundle.
-// COM Oct 2026: 118 products, 27 of them bundles / sets.
+// gross_sales = price × units + the line's discounts (TikTok's line price is
+// after seller discounts), so the products add up to the TikTok Gross Sales
+// tile; sales = after those discounts. COM Oct 2026: 118 products, 26 of them
+// bundles / sets, $425,686 gross (tile $425,300).
 const allProductsCache = new Map();
 async function fetchAllProducts(site, start, end) {
   if (!SITES_WITH_TIKTOK_SHOP.includes(site) || !process.env.TRIPLEWHALE_API_KEY) return null;
   if (!isoOk(start) || !isoOk(end) || end <= start) return null;
   const shopId = TW_SHOP_ID[site];
-  const key = `allprod|${shopId}|${start}|${end}`;
+  const key = `allprod2|${shopId}|${start}|${end}`;
   const hit = allProductsCache.get(key);
   if (hit && Date.now() - hit.at < (isSettled(end) ? PAST_TTL_MS : 10 * 60 * 1000)) return hit.value;
   const rows = await twSql(shopId, `
     SELECT p.product_name AS title,
-           SUM(p.product_name_price * p.product_name_quantity_sold) AS gross_sales,
+           SUM(p.product_name_price * p.product_name_quantity_sold + p.discount_amount_for_product) AS gross_sales,
+           SUM(p.product_name_price * p.product_name_quantity_sold) AS sales,
            SUM(p.product_name_quantity_sold) AS units,
            max(p.product_sku) AS sku
     FROM orders_table ARRAY JOIN products_info AS p
@@ -186,7 +190,7 @@ async function fetchAllProducts(site, start, end) {
     GROUP BY title
     ORDER BY gross_sales DESC
     LIMIT 3000`.trim(), start, end);
-  const value = { start, end, products: rows.map((r) => ({ title: r.title, gross_sales: num(r.gross_sales), units: num(r.units), is_bundle: !String(r.sku || '').trim() })) };
+  const value = { start, end, products: rows.map((r) => ({ title: r.title, gross_sales: num(r.gross_sales), sales: num(r.sales), units: num(r.units), is_bundle: !String(r.sku || '').trim() })) };
   allProductsCache.set(key, { at: Date.now(), value });
   if (allProductsCache.size > 200) allProductsCache.delete(allProductsCache.keys().next().value);
   return value;
