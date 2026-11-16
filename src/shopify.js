@@ -321,6 +321,7 @@ const ORDERS_QUERY = `
                 discountAllocations { allocatedAmountSet { shopMoney { amount } } discountApplication { index } }
                 taxLines { rate priceSet { shopMoney { amount } } }
                 variant { price compareAtPrice }
+                lineItemGroup { id title quantity }
               }
             }
           }
@@ -518,6 +519,7 @@ const ORDERS_QUERY_LIGHT = `
                 title
                 quantity
                 originalTotalSet { shopMoney { amount } }
+                lineItemGroup { id title quantity }
               }
             }
           }
