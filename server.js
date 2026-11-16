@@ -632,6 +632,9 @@ async function buildDataResponse({ site, start, end, compare }) {
     };
     topProducts = attachChangeByKey(topProducts, yoyAgg.top_products, 'title', 'gross_sales_yoy_change');
     byCountry = attachChangeByKey(byCountry, yoyCountry, 'country', 'gross_sales_yoy_change');
+    // Bundle Products YoY (2026-11-16): each bundle's gross (VAT left in) a
+    // year earlier — null when the comparison orders have no bundle data.
+    if (Array.isArray(yoyAgg.bundle_sales)) result.bundle_sales_yoy = Object.fromEntries(yoyAgg.bundle_sales.map((b) => [b.title, b.gross_plain]));
   }
 
   if (wantMom) {
@@ -654,6 +657,7 @@ async function buildDataResponse({ site, start, end, compare }) {
     };
     topProducts = attachChangeByKey(topProducts, momAgg.top_products, 'title', 'gross_sales_mom_change');
     byCountry = attachChangeByKey(byCountry, momCountry, 'country', 'gross_sales_mom_change');
+    if (Array.isArray(momAgg.bundle_sales)) result.bundle_sales_mom = Object.fromEntries(momAgg.bundle_sales.map((b) => [b.title, b.gross_plain]));
 
     // Profit/Profit Margin and Blended ROAS MoM (added 2026-09-07) — the
     // PRIOR month's own Total Cost / marketing spend, read live from the
