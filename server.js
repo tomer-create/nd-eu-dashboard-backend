@@ -1323,7 +1323,8 @@ app.get('/api/top-products', async (req, res) => {
 // Recommended Sets, Collection Bundles …): Shopify's sales report by product
 // for the orders carrying one of those tags, keeping the lines whose discount
 // is the bundle's own "-15%"-style discount (or titled bundle / set) — the
-// same rule as the Discounts Breakdown's "Bundles & sets". Per product: gross
+// same rule as the Discounts Breakdown's "Bundles & sets" (orders with a sale
+// tag are left out — they're the sale's there too). Per product: gross
 // sales, bundle discount, net sales, units, and gross sales in the comparison
 // periods; per bundle (tag): the same totals. Cached like /api/top-products.
 const BUNDLE_LINE_RE = /^\s*-?\s*\d+(\.\d+)?\s*%\s*(off)?\s*$|bundle|\bsets?\b/i;
@@ -1342,6 +1343,8 @@ app.get('/api/bundle-products', async (req, res) => {
     const tagInfo = (await fetchDiscountTags(site).catch(() => null)) || classifyDiscountTags(DISCOUNT_TAGS_COPY[site] || [], 'built-in');
     const bundles = (tagInfo.bundles || []).filter((b) => b && b.tag);
     const tags = [...new Set(bundles.map((b) => b.tag))];
+    // Orders with a sale tag are the sale's, as in the Discounts Breakdown.
+    const saleTags = [...new Set((tagInfo.sales || []).map((x) => x.tag).filter(Boolean))];
     const keep = (rows) => (rows || []).filter((r) => BUNDLE_LINE_RE.test(r.discount_title || ''));
     const byProduct = (rows) => {
       const m = new Map();
@@ -1353,16 +1356,16 @@ app.get('/api/bundle-products', async (req, res) => {
       return m;
     };
     const sumRows = (rows) => keep(rows).reduce((t, r) => ({ gross_sales: t.gross_sales + r.gross_sales, discounts: t.discounts + r.discounts, net_sales: t.net_sales + r.net_sales, units_sold: t.units_sold + r.units_sold }), { gross_sales: 0, discounts: 0, net_sales: 0, units_sold: 0 });
-    const prior = (s, e) => (s && tags.length ? fetchSalesByProductForTags(site, s, e, tags).catch((err) => {
+    const prior = (s, e) => (s && tags.length ? fetchSalesByProductForTags(site, s, e, tags, saleTags).catch((err) => {
       console.error(`bundle-products prior (site=${site} ${s}..${e}) failed:`, err.message);
       return null;
     }) : Promise.resolve(s ? [] : null));
     const [cur, summary, yoy, prev, perTag] = await Promise.all([
-      tags.length ? fetchSalesByProductForTags(site, start, end, tags) : Promise.resolve([]),
+      tags.length ? fetchSalesByProductForTags(site, start, end, tags, saleTags) : Promise.resolve([]),
       fetchSalesSummary(site, start, end).catch(() => null),
       prior(yoy_start, yoy_end),
       prior(prev_start, prev_end),
-      Promise.all(bundles.map((b) => fetchSalesByProductForTags(site, start, end, [b.tag]).then((rows) => ({ name: b.name, tag: b.tag, ...sumRows(rows) })).catch(() => ({ name: b.name, tag: b.tag, error: true })))),
+      Promise.all(bundles.map((b) => fetchSalesByProductForTags(site, start, end, [b.tag], saleTags).then((rows) => ({ name: b.name, tag: b.tag, ...sumRows(rows) })).catch(() => ({ name: b.name, tag: b.tag, error: true })))),
     ]);
     const curMap = byProduct(cur);
     const yMap = yoy ? byProduct(yoy) : null, pMap = prev ? byProduct(prev) : null;
