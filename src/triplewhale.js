@@ -601,4 +601,50 @@ async function fetchCountryConversion(site, start, endExclusive) {
     .filter((r) => r.country && r.sessions > 0);
 }
 
-module.exports = { fetchChannelRefunds, fetchCountryConversion, fetchChannelPerformance, fetchAttentiveSplit, attentiveBucket, attentiveRevenueKeys, ATTENTIVE_LABEL_KEYS, CHANNEL_MAP, TW_SHOP_ID, twSqlRequest };
+// Retention rate (2026-11-16, Tomer: "on the Goal Tracker add retention rate
+// Box"; he chose "Past customers who came back"): of the customers who bought
+// in the 12 months before the period, the share who bought again in the
+// period. Triple Whale's orders (orders_table) of the Shopify store: paid
+// orders only (not cancelled, product total after discounts above $0 — so
+// creator samples and free gifts don't make someone a customer), customers by
+// Shopify customer id. [start, end) like the rest of the dashboard.
+// COM Oct 2026: 2,640 of 74,403 → 3.5% (Oct 2025: 2.6%).
+function minusMonths(iso, n) {
+  const d = new Date(`${iso}T00:00:00Z`);
+  const t = new Date(Date.UTC(d.getUTCFullYear(), d.getUTCMonth() - n, 1));
+  const last = new Date(Date.UTC(t.getUTCFullYear(), t.getUTCMonth() + 1, 0)).getUTCDate();
+  t.setUTCDate(Math.min(d.getUTCDate(), last));
+  return t.toISOString().slice(0, 10);
+}
+async function fetchRetention(site, start, end) {
+  if (!process.env.TRIPLEWHALE_API_KEY) throw new Error('Triple Whale isn\'t configured (TRIPLEWHALE_API_KEY)');
+  if (!ISO_DAY.test(String(start)) || !ISO_DAY.test(String(end)) || end <= start) throw new Error('Invalid date range');
+  const shopId = TW_SHOP_ID[site];
+  if (!shopId) throw new Error(`No Triple Whale shop for site "${site}"`);
+  const baseStart = minusMonths(start, 12);
+  const query = `
+    WITH paid AS (
+      SELECT customer_id, event_date FROM orders_table
+      WHERE event_date >= '${baseStart}' AND event_date < '${end}'
+        AND platform = 'shopify' AND customer_id NOT IN ('', '0') AND cancelled_at IS NULL
+        AND gross_product_sales - discount_amount_for_product > 0
+    )
+    SELECT
+      uniqExactIf(customer_id, event_date < '${start}') AS base_customers,
+      uniqExactIf(customer_id, event_date >= '${start}') AS period_customers,
+      uniqExactIf(customer_id, event_date >= '${start}' AND customer_id IN (SELECT customer_id FROM paid WHERE event_date < '${start}')) AS retained
+    FROM paid
+  `.trim();
+  const res = await twSqlRequest(shopId, query, baseStart, end);
+  if (!res.ok) {
+    const body = await res.text().catch(() => '');
+    throw new Error(`Triple Whale retention failed (${res.status}): ${body.slice(0, 300)}`);
+  }
+  const json = await res.json();
+  const rows = Array.isArray(json) ? json : json.rows || json.data || [];
+  const r = (Array.isArray(rows) && rows[0]) || {};
+  const base = Number(r.base_customers) || 0, retained = Number(r.retained) || 0;
+  return { site, start, end, base_start: baseStart, base_customers: base, period_customers: Number(r.period_customers) || 0, retained, rate: base ? retained / base : null };
+}
+
+module.exports = { fetchRetention, fetchChannelRefunds, fetchCountryConversion, fetchChannelPerformance, fetchAttentiveSplit, attentiveBucket, attentiveRevenueKeys, ATTENTIVE_LABEL_KEYS, CHANNEL_MAP, TW_SHOP_ID, twSqlRequest };
