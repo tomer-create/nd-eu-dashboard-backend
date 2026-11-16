@@ -152,6 +152,10 @@
   table.c4-table td { padding:10px 8px; }
   table.c4-table th { white-space:normal; vertical-align:bottom; }
   table.c4-table tbody tr:not(.total-row):not(.c4-idle):not(.c4-pf-row):hover td { background:var(--page-plane); }
+  /* Bundle Products (2026-11-16) */
+  .bp-tiles { display:grid; grid-template-columns:repeat(auto-fill, minmax(180px, 1fr)); gap:10px; margin-bottom:14px; }
+  .bp-tile .kpi-label { white-space:normal; }
+  .bp-total { border-color:var(--text-primary); }
   /* Profitability by channel (2026-11-16) */
   table.c4-table tr.c4-pf-click { cursor:pointer; }
   table.c4-table tr.is-pf-open td { background:var(--page-plane); }
@@ -631,56 +635,62 @@
     <div class="trend-block" id="trend-block"></div>
   </div>
 
+  <div class="card" id="card-7">
+    <div class="section-title"><span class="section-num">2</span>Discounts Breakdown</div>
+    <div class="section-sub">Discount $ by program (storefront orders only), identified by order tag — from Shopify</div>
+    <div id="section-6"></div>
+  </div>
+
   <div class="card" id="card-2">
-    <div class="section-title"><span class="section-num">2</span>Top 10 Selling Products</div>
+    <div class="section-title"><span class="section-num">3</span>Top 10 Selling Products</div>
     <div class="section-sub">Gross sales, net sales, units sold, share of total, YoY &amp; MoM — from Shopify. Press + for every product.</div>
     <div id="section-2"></div>
   </div>
 
+  <div class="card" id="card-2b">
+    <div class="section-title"><span class="section-num">4</span>Bundle Products</div>
+    <div class="section-sub">Products bought with a bundle / set discount (the Evergreen Discounts Tags sheet’s bundle tags) — gross sales, discounts, net sales, units, YoY &amp; MoM — from Shopify. Press + for every product.</div>
+    <div id="section-bundles"></div>
+  </div>
+
   <div class="card" id="card-3">
-    <div class="section-title"><span class="section-num">3</span>Top 10 Return Products<span id="mtd-flag-3"></span></div>
+    <div class="section-title"><span class="section-num">5</span>Top 10 Return Products<span id="mtd-flag-3"></span></div>
     <div class="section-sub">Products customers sent back (refunds noted as a return), ranked by return $ value for the period, with return ratio for the period and YTD — from Shopify. Press + for every product.</div>
     <div id="section-3"></div>
   </div>
 
   <div class="card" id="card-3b">
-    <div class="section-title"><span class="section-num">4</span>Top 10 Refunded Products</div>
+    <div class="section-title"><span class="section-num">6</span>Top 10 Refunded Products</div>
     <div class="section-sub">Products refunded without a return (damaged, missing, lost, cancelled …), ranked by refund $ value for the period, with refund ratio for the period and YTD — from Shopify. Press + for every product.</div>
     <div id="section-3b"></div>
   </div>
 
   <div class="card" id="card-4">
-    <div class="section-title"><span class="section-num">5</span>Marketing &amp; Sales Channel Performance<span id="mtd-flag-4"></span></div>
+    <div class="section-title"><span class="section-num">7</span>Marketing &amp; Sales Channel Performance<span id="mtd-flag-4"></span></div>
     <div class="section-sub">What each marketing and sales channel spent and brought in, against its goal — and how that compares with past periods</div>
     <div id="section-4"></div>
   </div>
 
   <div class="card" id="card-tiktok">
-    <div class="section-title"><span class="section-num">6</span>TikTok Shop<span id="mtd-flag-tt"></span></div>
+    <div class="section-title"><span class="section-num">8</span>TikTok Shop<span id="mtd-flag-tt"></span></div>
     <div class="section-sub">ND.COM's TikTok Shop: GMV, sales, revenue by source (TikTok Ads, affiliates, organic) and TikTok costs. GMV comes from TikTok Shop's own analytics; days TikTok hasn't reported yet are filled from TikTok's order data in Triple Whale. Affiliate revenue follows TikTok's Affiliate Center (creator-attributed GMV). Sales, orders and ad results come from Triple Whale. Costs come from Triple Whale (ads), the P&amp;L sheet (commission), Shopify's $0 TikTok orders (samples and shipping) and TikTok's settlement statements (fees).</div>
     <div id="section-tiktok"></div>
   </div>
 
   <div class="card" id="card-section-5">
-    <div class="section-title"><span class="section-num">7</span>Sales by Country</div>
+    <div class="section-title"><span class="section-num">9</span>Sales by Country</div>
     <div class="section-sub">Gross &amp; net sales, AOV, orders, returns, YoY &amp; MoM by shipping destination — from Shopify</div>
     <div id="section-5"></div>
   </div>
 
   <div class="card" id="card-6">
-    <div class="section-title"><span class="section-num">8</span>Yotpo Loyalty</div>
+    <div class="section-title"><span class="section-num">10</span>Yotpo Loyalty</div>
     <div class="section-sub">New members, points redeemed by tier, and movement between tiers — from Yotpo webhook events</div>
     <div id="section-8"></div>
   </div>
 
-  <div class="card" id="card-7">
-    <div class="section-title"><span class="section-num">9</span>Discounts Breakdown</div>
-    <div class="section-sub">Discount $ by program (storefront orders only), identified by order tag — from Shopify</div>
-    <div id="section-6"></div>
-  </div>
-
   <div class="card" id="card-8">
-    <div class="section-title"><span class="section-num">10</span>Other Costs<span id="mtd-flag-7"></span></div>
+    <div class="section-title"><span class="section-num">11</span>Other Costs<span id="mtd-flag-7"></span></div>
     <div class="section-sub">Monthly goal vs. actual by cost line item, and each item's share of total other costs</div>
     <div id="section-7"></div>
   </div>
@@ -3139,10 +3149,48 @@ function renderTikTokShop(monthData, opts = {}) {
     : (payE && payE.status === 'loading'
       ? tileV('Net Sales', '…', null, null, true, 'Loading TikTok Shop net sales…')
       : tile('Net Sales', tt.net_sales, 'currency-full', 'net_sales', true, payE && payE.status === 'error' ? 'TikTok Shop net sales couldn’t be loaded — showing gross sales − discounts − refunds' : 'Gross sales − discounts − refunds'));
+  // Net orders, cancelled & refunded orders, AOV on net orders (2026-11-16,
+  // Tomer). Counts from TikTok's order records in Triple Whale for the period
+  // (orders placed in it): Net orders = the Orders tile − cancelled (paid)
+  // orders − refunded orders. YoY / MoM compare Triple Whale's own counts for
+  // both periods (paid orders − cancelled − refunded), one basis.
+  const osPr = ttPriorRanges();
+  const osOk = e => e && e.status === 'ok' && e.data ? e.data : null;
+  const osE = osPr.r ? ttEnsureOrderStatus(osPr.r) : null;
+  const osCur = osOk(osE);
+  const osY = osCur && osPr.yoy ? osOk(ttEnsureOrderStatus(osPr.yoy)) : null;
+  const osM = osCur && osPr.mom ? osOk(ttEnsureOrderStatus(osPr.mom)) : null;
+  const osPending = !!osE && osE.status === 'loading';
+  const osWhy = osPending ? 'Loading cancelled / refunded orders…' : (osE && osE.status === 'error' ? 'Cancelled / refunded orders couldn’t be loaded — ' + escText(osE.error || '') : '');
+  const osRel = (c, p) => (c === null || p === null || p === undefined || !p) ? null : (c - p) / p;
+  const lostOf = d => d ? d.cancelled + d.refunded : null;
+  const netOrdersShown = osCur && typeof ttOrdersShown === 'number' ? Math.max(0, ttOrdersShown - osCur.cancelled - osCur.refunded) : null;
+  const netOrdersTile = tileV('Net Orders', netOrdersShown === null ? (osPending ? '…' : '—') : fmtVal(netOrdersShown, 'number'),
+    osCur && osY ? osRel(osCur.net_orders, osY.net_orders) : null, osCur && osM ? osRel(osCur.net_orders, osM.net_orders) : null, true,
+    osCur ? `Orders ${fmtVal(ttOrdersShown, 'number')} − ${fmtVal(osCur.cancelled, 'number')} cancelled − ${fmtVal(osCur.refunded, 'number')} refunded` : osWhy,
+    'Net Orders = the Orders tile − cancelled orders (paid, then cancelled) − refunded orders (not cancelled, with any refund so far) among the orders placed in the period — TikTok’s order records via Triple Whale.');
+  const lostCur = lostOf(osCur);
+  const lostTile = tileV('Cancelled &amp; Refunded Orders', lostCur === null ? (osPending ? '…' : '—') : fmtVal(lostCur, 'number'),
+    osCur && osY ? osRel(lostCur, lostOf(osY)) : null, osCur && osM ? osRel(lostCur, lostOf(osM)) : null, false,
+    osCur ? `${fmtVal(osCur.cancelled, 'number')} cancelled · ${fmtVal(osCur.refunded, 'number')} refunded${ttOrdersShown ? ' · ' + fmtVal(lostCur / ttOrdersShown, 'percent') + ' of orders' : ''}` : osWhy,
+    'Orders placed in the period that were cancelled after payment, plus orders (not cancelled) that got any refund so far. TikTok’s auto-cancels of unpaid orders aren’t orders, so they’re not counted.');
+  // AOV on Net Orders: the Net Sales tile ÷ the Net Orders tile; YoY / MoM on
+  // TikTok's net sales ÷ Triple Whale's net orders for both periods.
+  const netAovOf = (p, d) => p && d && d.net_orders > 0 && p.net_sales_orders > 0 && p.net_sales > 0 ? p.net_sales / d.net_orders : null;
+  const netAovCur = payCur && netOrdersShown ? payCur.net_sales / netOrdersShown : null;
+  const netAovBase = netAovOf(payCur, osCur);
+  const netAovTile = tileV('AOV (Net Orders)', netAovCur === null ? ((osPending || (payE && payE.status === 'loading')) ? '…' : '—') : fmtVal(netAovCur, 'currency'),
+    netAovBase ? osRel(netAovBase, netAovOf(payY, osY)) : null, netAovBase ? osRel(netAovBase, netAovOf(payM, osM)) : null, true,
+    netAovCur !== null ? 'Net Sales ÷ Net Orders' : (osWhy || (payE && payE.status === 'loading' ? 'Loading TikTok net sales…' : 'Needs TikTok’s net sales')),
+    'Average order value on the orders that stayed: the Net Sales tile ÷ the Net Orders tile.');
   const tileList = [
     // What GMV includes (2026-10-26, Tomer asked for it inside the tile).
     tileV('TikTok Shop GMV', gmvShown === null ? '—' : fmtVal(gmvShown, 'currency-full'), proxyChange('yoy'), proxyChange('mom'), true,
       '<span class="tt-gmv-incl">All TikTok Shop orders — TikTok Ads + Affiliate + Organic (TikTok Ads isn’t added on top).</span>' + gmvInfo.note, gmvTip),
+    // Gross Sales (2026-11-16, Tomer): product price × units before any
+    // discount — TikTok's order records in Triple Whale (the base of the
+    // Return Rate and Discount Ratio tiles).
+    tile('Gross Sales', tt.gross_sales, 'currency-full', 'gross_sales', true, 'Before discounts and refunds · TikTok order data'),
     netTile,
     // 2026-11-02 (Tomer: "Seller Center shows 6077 orders for October"): the
     // Orders tile counts the same orders as the GMV tile — TikTok Shop
@@ -3150,6 +3198,8 @@ function renderTikTokShop(monthData, opts = {}) {
     // unpaid orders out). tt.orders is Triple Whale's count by New York day,
     // unpaid orders included (Oct 2026: 6,114 vs Seller Center's 6,077).
     tile('Orders', ttOrdersShown, 'number', 'orders', true, ttOrdersShown && tt.units ? (tt.units / ttOrdersShown).toFixed(1) + ' units per order' : ''),
+    netOrdersTile,
+    lostTile,
     // 2026-10-26 (Tomer: "keep the real AOV"): the "GMV per order" line under
     // it is removed — only Net Sales ÷ Orders is shown.
     // 2026-11-05 (Tomer: "for the AOV in TikTok set (net sales/Orders)"):
@@ -3163,6 +3213,7 @@ function renderTikTokShop(monthData, opts = {}) {
           ttAovChange(payCur, payM, tt.orders, tt.mom && tt.mom.orders),
           true, 'Net Sales ÷ Orders', 'Average order value: the Net Sales tile (TikTok Shop net sales by order date) ÷ the Orders tile.')
       : tileV('AOV', fmtVal(aov, 'currency'), aovYoy, aovMom, true, 'Net sales ÷ orders' + (payE && payE.status === 'loading' ? ' · loading TikTok net sales…' : ''), 'Average order value: net sales ÷ orders (Triple Whale’s net sales until TikTok’s load).'),
+    netAovTile,
     tile('Units Sold', tt.units, 'number', 'units', true, ''),
     tile('Refunds', tt.refunds, 'currency-full', 'refunds', false, gmvShown ? fmtVal(tt.refunds / gmvShown, 'percent') + ' of GMV' : ''),
     tileV('Return Rate', fmtVal(returnRate, 'percent'), returnRateYoy, returnRateMom, false,
@@ -3389,6 +3440,22 @@ function renderTikTokShop(monthData, opts = {}) {
     return { v, sub: ls.length > 1 ? ls.map(l => TX_FEE_KEYS[l.key] + ' ' + fmtVal(l.amount, 'currency-full')).join(' + ') : (ls.length ? TX_FEE_KEYS[ls[0].key] : '') };
   };
   const txCur = txFeeOf(sc), txY = txFeeOf(scY), txM = txFeeOf(scM);
+  // TikTok seller discounts (2026-11-16, Tomer: "add to the Costs the
+  // discounts from the discount breakdown that contain TikTok discounts"; he
+  // chose the seller discounts only): the Discounts Breakdown's "TikTok
+  // seller discounts (ND pays)" line for the same period. The platform
+  // discounts are TikTok's money, so they're only mentioned in the note.
+  // YoY / MoM follow TikTok's product discounts in Triple Whale (the seller
+  // share is taken as unchanged), so the Total keeps its comparisons.
+  const ttDiscItems = (() => {
+    const sp = monthData.discount_split;
+    const items = sp && Array.isArray(sp.buckets) ? sp.buckets.flatMap(b => b.items || []) : [];
+    const seller = items.find(i => i.key === 'tiktok_seller');
+    const platform = items.find(i => i.key === 'tiktok_platform');
+    return { seller, platform, split: !!(seller && platform), funding: sp && sp.tiktok_funding };
+  })();
+  const sellerDisc = ttDiscItems.split ? Math.abs(ttDiscItems.seller.discount_value || 0) : null;
+  const platformDisc = ttDiscItems.split ? Math.abs(ttDiscItems.platform.discount_value || 0) : null;
   const costRows = [
     { label: 'TikTok Ads spend', v: tt.ads_spend, yoy: tt.yoy ? tt.yoy.ads_spend : null, mom: tt.mom ? tt.mom.ads_spend : null, py: null, pm: null },
     { label: 'Affiliate commission', v: commission, yoy: commChg.yoy, mom: commChg.mom, pm: commApi === null && commChg.mom === null && sheetPrev ? sheetPrev.commission : null,
@@ -3397,6 +3464,7 @@ function renderTikTokShop(monthData, opts = {}) {
       sub: giftCur ? (giftCur.cost_pct === 1 ? `Retail price of the ${fmtVal(giftCur.units || 0, 'number')} products in ${fmtVal(giftCur.orders, 'number')} $0 TikTok orders${giftCur.units_no_price ? ` · ${fmtVal(giftCur.units_no_price, 'number')} without a price` : ''}` : giftCur.cost_pct ? `${Math.round(giftCur.cost_pct * 100)}% of the ${fmtVal(giftCur.retail_value || 0, 'currency-full')} price of the ${fmtVal(giftCur.units || 0, 'number')} products in ${fmtVal(giftCur.orders, 'number')} $0 TikTok orders${giftCur.units_no_price ? ` · ${fmtVal(giftCur.units_no_price, 'number')} without a price` : ''}` : `product cost of ${fmtVal(giftCur.orders, 'number')} $0 TikTok orders`) : giftFromSheet ? 'P&L sheet — $0-order figure unavailable' : '' },
     { label: 'Sample shipping cost', v: sampleShip, py: shipY, pm: shipM, sub: giftCur ? `${fmtVal(giftCur.orders,'number')} creators = ${fmtVal(giftCur.orders,'number')} $0 TikTok orders × $${SHIP_PER}` : '' },
     { label: 'TikTok Shop transaction fee', v: txCur ? txCur.v : null, py: txY ? txY.v : null, pm: txM ? txM.v : null, sub: txCur ? txCur.sub : '' },
+    { label: 'TikTok seller discounts (ND pays)', v: sellerDisc, yoy: tt.yoy ? tt.yoy.product_discounts : null, mom: tt.mom ? tt.mom.product_discounts : null, py: null, pm: null, sub: 'Discounts Breakdown' },
   ];
   const pctCh = (cur, prev) => (cur === null || cur === undefined || prev === null || prev === undefined || !prev) ? null : (cur - prev) / Math.abs(prev);
   costRows.forEach(r => {
@@ -3419,7 +3487,7 @@ function renderTikTokShop(monthData, opts = {}) {
   // Gross Sales TikTok ÷ all TikTok costs in the table below. Its YoY / MoM
   // compare with the prior period's GMV ÷ prior costs, so they show only when
   // every cost line has a prior value (like the Total row).
-  const missingCosts = costRows.filter(r => r.v === null || r.v === undefined).map(r => r.label === 'Samples (TikTok Gifting)' ? 'samples' : r.label === 'TikTok Shop transaction fee' ? 'transaction fee' : r.label.toLowerCase());
+  const missingCosts = costRows.filter(r => r.v === null || r.v === undefined).map(r => r.label === 'Samples (TikTok Gifting)' ? 'samples' : r.label === 'TikTok Shop transaction fee' ? 'transaction fee' : r.label === 'TikTok seller discounts (ND pays)' ? 'seller discounts' : r.label.toLowerCase());
   // On TikTok Shop GMV (the tile above) since 2026-10-14.
   const ttRoas = totalCost && gmvShown ? gmvShown / totalCost : null;
   const roasCh = (kind) => {
@@ -3431,7 +3499,7 @@ function renderTikTokShop(monthData, opts = {}) {
   const shipPending = giftPending;
   const roasTile = tileV('TikTok ROAS', ttRoas === null ? '—' : fmtVal(ttRoas, 'ratio'), roasCh('yoy'), roasCh('mom'), true,
     totalCost ? `GMV ÷ ${fmtVal(totalCost, 'currency-full')} TikTok costs${shipPending ? ' (samples / fees loading…)' : (missingCosts.length ? ' (excl. ' + missingCosts.join(', ') + ')' : '')}` : 'No TikTok costs for this period',
-    'TikTok Shop GMV ÷ total TikTok costs (ads spend + affiliate commission + samples + sample shipping + TikTok Shop transaction fee)');
+    'TikTok Shop GMV ÷ total TikTok costs (ads spend + affiliate commission + samples + sample shipping + TikTok Shop transaction fee + TikTok seller discounts)');
   const tiles = tileList.join('') + roasTile;
   const cCell = v => { const c = ttChange(v, false); return `<span class="kpi-yoy ${c.dir}">${c.str === null ? '—' : c.str}</span>`; };
   const missingRow = (r) => r.label === 'Samples (TikTok Gifting)' && giftPending
@@ -3440,6 +3508,8 @@ function renderTikTokShop(monthData, opts = {}) {
     : (r.label === 'Sample shipping cost' || r.label === 'Samples (TikTok Gifting)') && giftFailMsg ? `<tr class="no-data-row"><td>${r.label}</td><td colspan="4">${giftFailMsg}</td></tr>`
     : r.label === 'TikTok Shop transaction fee' && scPending
     ? `<tr class="no-data-row"><td>${r.label}</td><td colspan="4"><span class="tt-loading" aria-hidden="true"></span>Loading sample data from TikTok Shop…</td></tr>`
+    : r.label === 'TikTok seller discounts (ND pays)'
+    ? `<tr class="no-data-row"><td>${r.label}</td><td colspan="4">${!monthData.discount_split ? 'The Discounts Breakdown for this period isn’t loaded yet — click Sync' : ttDiscItems.seller ? 'TikTok’s seller / platform split of the TikTok discounts isn’t available yet' + (ttDiscItems.funding && ttDiscItems.funding.source === 'pending' ? ' — click Sync in a minute' : '') : 'No TikTok discounts in the Discounts Breakdown for this period'}</td></tr>`
     : `<tr class="no-data-row"><td>${r.label}</td><td colspan="4">No data for this period</td></tr>`;
   const costTable = `
     <table class="dtable">
@@ -3451,7 +3521,7 @@ function renderTikTokShop(monthData, opts = {}) {
         <tr class="total-row"><td>Total TikTok costs</td><td>${fmtVal(totalCost,'currency-full')}</td><td>${gmvShown ? fmtVal(totalCost/gmvShown,'percent') : '—'}</td><td>${cCell(totalYoy)}</td><td>${cCell(totalMom)}</td></tr>
       </tbody>
     </table>
-    <div class="tt-note">TikTok ROAS (tile above) = TikTok Shop GMV ÷ Total TikTok costs; “% of GMV” is on the same GMV. Product cost (COGS ${fmtVal(tt.cogs,'currency-full')}) isn't included. Sources: TikTok Ads spend — Triple Whale; Affiliate commission — TikTok Affiliate Center's Est. commission (the estimated creator commission + shop-ads commission on the period's affiliate orders, GMT-8 days, from TikTok's Affiliate API), YoY / ${mLabel} on the same figure; the P&amp;L sheet is only used when TikTok's figure isn't available; Samples (TikTok Gifting) — product cost of everything inside the $0 orders from the TikTok sales channel (the creator samples): each product's retail price × quantity, added up (2026-11-04: at retail, no longer 20% of it); YoY / ${mLabel} on the same formula; TikTok Shop transaction fee — TikTok's referral fee (its commission on each sale), plus any transaction fee / platform commission and the refund administration fee, from TikTok's settlement statements, by statement date; Sample shipping — one shipment per $0 order from the TikTok sales channel (the same orders as Samples / TikTok Gifting) × $11.</div>`;
+    <div class="tt-note">TikTok ROAS (tile above) = TikTok Shop GMV ÷ Total TikTok costs; “% of GMV” is on the same GMV. Product cost (COGS ${fmtVal(tt.cogs,'currency-full')}) isn't included. Sources: TikTok Ads spend — Triple Whale; Affiliate commission — TikTok Affiliate Center's Est. commission (the estimated creator commission + shop-ads commission on the period's affiliate orders, GMT-8 days, from TikTok's Affiliate API), YoY / ${mLabel} on the same figure; the P&amp;L sheet is only used when TikTok's figure isn't available; Samples (TikTok Gifting) — product cost of everything inside the $0 orders from the TikTok sales channel (the creator samples): each product's retail price × quantity, added up (2026-11-04: at retail, no longer 20% of it); YoY / ${mLabel} on the same formula; TikTok Shop transaction fee — TikTok's referral fee (its commission on each sale), plus any transaction fee / platform commission and the refund administration fee, from TikTok's settlement statements, by statement date; Sample shipping — one shipment per $0 order from the TikTok sales channel (the same orders as Samples / TikTok Gifting) × $11; TikTok seller discounts — the Discounts Breakdown’s “TikTok seller discounts (ND pays)” line for the same period, YoY / ${mLabel} following TikTok’s product discounts in Triple Whale${platformDisc !== null ? `; the ${fmtVal(platformDisc, 'currency-full')} of TikTok platform discounts (TikTok pays) aren’t a cost to ND, so they’re not included` : ''}.</div>`;
 
   // Revenue & costs by source (2026-10-20, Tomer: "add Revenue by source and
   // TikTok costs on the same chart, when the cost of the affiliate should be
@@ -3789,6 +3859,35 @@ function ttMissingDays(p) {
 }
 // TikTok payouts per period (2026-11-04) — /api/tiktok-shop/payouts.
 const payoutsCache = {};
+// Cancelled and refunded TikTok Shop orders of a period (2026-11-16, Tomer:
+// "number of orders − canceled orders and refunded orders", AOV on those, and
+// the number of canceled and refunded orders) — /api/tiktok-shop/order-status.
+const orderStatusCache = {};
+function ttEnsureOrderStatus(range) {
+  const key = range.start + '|' + range.end;
+  const prev = orderStatusCache[key];
+  if (!prev || (prev.status === 'error' && Date.now() - (prev.at || 0) > 60000)) {
+    orderStatusCache[key] = { status: 'loading' };
+    (async () => {
+      let lastErr = null;
+      for (let attempt = 0; attempt < 4; attempt++) {
+        if (attempt) await new Promise(r => setTimeout(r, 5000 * attempt));
+        try {
+          const res = await fetch(`${BACKEND_URL}/api/tiktok-shop/order-status?start=${range.start}&end=${range.end}`);
+          const body = await res.json().catch(() => null);
+          if (res.ok && body && typeof body.net_orders === 'number') return body;
+          lastErr = new Error((body && body.error) || ('Backend returned ' + res.status));
+          if (res.status === 400 || res.status === 503) break;
+        } catch (e) { lastErr = e; }
+      }
+      throw lastErr || new Error('Couldn’t load');
+    })()
+      .then(d => { orderStatusCache[key] = { status: 'ok', data: d }; })
+      .catch(err => { orderStatusCache[key] = { status: 'error', error: err.message, at: Date.now() }; })
+      .finally(() => { if (state.site === 'com' || state.site === 'all') renderTikTokShop(getMonthData()); });
+  }
+  return orderStatusCache[key];
+}
 function ttEnsurePayouts(range) {
   const key = range.start + '|' + range.end;
   const prev = payoutsCache[key];
@@ -5714,6 +5813,136 @@ function renderTopProducts(monthData) {
 const TOP_PRODUCTS_PAGE = 10;
 const topProductsOpen = {};
 
+/* ---------------- Bundle Products (2026-11-16) ---------------- */
+// Tomer: "create new section under best selling products section and add the
+// bundles products to that section" — he chose products "bought with a bundle
+// discount": /api/bundle-products (Shopify's sales by product for the orders
+// carrying one of the Evergreen sheet's bundle / set tags, the lines with the
+// bundle's own discount — the Discounts Breakdown's "Bundles & sets" rule).
+const bundleProductsCache = {};
+const bundleProductsOpen = {};
+function bundleProductsData() {
+  const r = usStatesRanges();
+  const sites = state.site === 'all' ? Object.keys(DATA.sites) : [state.site];
+  const ck = [state.site, r.cur.start, r.cur.end, r.prev ? r.prev.start : ''].join('|');
+  let entry = bundleProductsCache[ck];
+  if (entry && entry.error && Date.now() - (entry.at || 0) > 60000) { delete bundleProductsCache[ck]; entry = null; }
+  if (entry && entry !== 'loading') return entry;
+  if (!entry) {
+    bundleProductsCache[ck] = 'loading';
+    const view = state.site + '|' + state.month;
+    Promise.all(sites.map(site => {
+      const q = new URLSearchParams({ site, start: r.cur.start, end: r.cur.end, yoy_start: r.yoy.start, yoy_end: r.yoy.end });
+      if (r.prev) { q.set('prev_start', r.prev.start); q.set('prev_end', r.prev.end); }
+      return fetch(`${BACKEND_URL}/api/bundle-products?${q}`).then(res => res.json().then(body => { if (!res.ok) throw new Error(body.error || ('Backend returned ' + res.status)); return { site, body }; }));
+    })).then(results => {
+      const map = new Map(), progs = new Map();
+      let storeGross = 0, storeKnown = true, hasYoy = true, hasPrev = true;
+      results.forEach(({ site, body }) => {
+        const fx = state.site === 'all' && FX_TO_USD[site] != null ? FX_TO_USD[site] : 1;
+        if (body.total_gross === null || body.total_gross === undefined) storeKnown = false; else storeGross += body.total_gross * fx;
+        hasYoy = hasYoy && body.has_yoy; hasPrev = hasPrev && body.has_prev;
+        (body.products || []).forEach(p => {
+          const name = String(p.title).replace(/\s+-\s+[^\x00-\x7F].*$/, '').trim();
+          const key = name.toUpperCase();
+          const a = map.get(key) || { title: name, gross_sales: 0, discounts: 0, net_sales: 0, units_sold: 0, yoy_gross: 0, prev_gross: 0 };
+          a.gross_sales += p.gross_sales * fx; a.discounts += (p.discounts || 0) * fx; a.net_sales += p.net_sales * fx; a.units_sold += p.units_sold;
+          a.yoy_gross += (p.yoy_gross || 0) * fx; a.prev_gross += (p.prev_gross || 0) * fx;
+          map.set(key, a);
+        });
+        (body.bundles || []).forEach(b => {
+          const key = String(b.name).trim().toUpperCase();
+          const a = progs.get(key) || { name: b.name, gross_sales: 0, discounts: 0, net_sales: 0, units_sold: 0, error: false };
+          if (b.error) a.error = true;
+          else { a.gross_sales += (b.gross_sales || 0) * fx; a.discounts += (b.discounts || 0) * fx; a.net_sales += (b.net_sales || 0) * fx; a.units_sold += b.units_sold || 0; }
+          progs.set(key, a);
+        });
+      });
+      const chg = (c, p) => p ? (c - p) / p : null;
+      const list = Array.from(map.values()).sort((a, b) => b.gross_sales - a.gross_sales);
+      const bundleGross = list.reduce((t, p) => t + p.gross_sales, 0);
+      list.forEach(p => {
+        p.share = bundleGross ? p.gross_sales / bundleGross : null;
+        p.yoy = hasYoy ? chg(p.gross_sales, p.yoy_gross) : null;
+        p.mom = hasPrev ? chg(p.gross_sales, p.prev_gross) : null;
+      });
+      const sumPrior = k => list.reduce((t, p) => t + (p[k] || 0), 0);
+      bundleProductsCache[ck] = {
+        list, programs: Array.from(progs.values()).sort((a, b) => b.gross_sales - a.gross_sales),
+        storeGross: storeKnown ? storeGross : null, hasYoy, hasPrev,
+        totalYoy: hasYoy ? chg(bundleGross, sumPrior('yoy_gross')) : null, totalMom: hasPrev ? chg(bundleGross, sumPrior('prev_gross')) : null,
+      };
+    }).catch(err => {
+      console.error('bundle-products fetch failed:', err);
+      bundleProductsCache[ck] = { error: String(err.message || err), at: Date.now() };
+    }).finally(() => { if (state.site + '|' + state.month === view) renderBundleProducts(getMonthData()); });
+  }
+  return 'loading';
+}
+function renderBundleProducts() {
+  const el = document.getElementById('section-bundles');
+  if (!el) return;
+  const d = bundleProductsData();
+  if (d === 'loading') {
+    el.innerHTML = `<div class="tt-pending"><span class="tt-loading" aria-hidden="true"></span>Loading bundle products from Shopify for this period…</div>`;
+    return;
+  }
+  if (d.error) {
+    el.innerHTML = `<div class="tt-pending">Bundle products couldn’t be loaded (${escText(d.error)}). They’ll be tried again on the next refresh.</div>`;
+    return;
+  }
+  if (!d.list.length) {
+    el.innerHTML = `<div class="tt-pending">No products were bought with a bundle / set discount in this period.</div>`;
+    return;
+  }
+  const tot = d.list.reduce((t, p) => ({ g: t.g + p.gross_sales, x: t.x + p.discounts, n: t.n + p.net_sales, u: t.u + p.units_sold }), { g: 0, x: 0, n: 0, u: 0 });
+  const progTiles = d.programs.filter(b => b.error || b.gross_sales > 0).map(b => `<div class="kpi-tile bp-tile">
+      <div class="kpi-top"><span class="kpi-label">${escText(b.name)}</span></div>
+      <div class="kpi-value">${b.error ? '—' : fmtVal(b.gross_sales, 'currency-full')}</div>
+      <div class="kpi-goal-line">${b.error ? 'Couldn’t be loaded' : `Net ${fmtVal(b.net_sales, 'currency-full')} · ${fmtVal(b.units_sold, 'number')} units · ${fmtVal(b.discounts, 'currency-full')} off`}</div>
+    </div>`).join('');
+  const sumTile = `<div class="kpi-tile bp-tile bp-total">
+      <div class="kpi-top"><span class="kpi-label">All bundles</span>${d.totalYoy !== null ? `<span class="kpi-yoy ${d.totalYoy >= 0 ? 'up' : 'down'}">YoY ${fmtYoY(d.totalYoy)}</span>` : ''}</div>
+      <div class="kpi-value">${fmtVal(tot.g, 'currency-full')}</div>
+      <div class="kpi-goal-line">${d.storeGross ? fmtVal(tot.g / d.storeGross, 'percent') + ' of Gross Sales · ' : ''}${fmtVal(tot.u, 'number')} units</div>
+    </div>`;
+  const bpKey = state.site + '|' + state.month;
+  const open = !!bundleProductsOpen[bpKey];
+  const shown = open ? d.list : d.list.slice(0, TOP_PRODUCTS_PAGE);
+  const more = d.list.length > TOP_PRODUCTS_PAGE
+    ? `<tr class="show-more-row"><td colspan="8"><button type="button" class="show-more-btn" id="bundle-products-more" aria-expanded="${open}">${open ? '− Show top ' + TOP_PRODUCTS_PAGE : '+ ' + (d.list.length - TOP_PRODUCTS_PAGE) + ' more products'}</button></td></tr>`
+    : '';
+  const rows = shown.map((p, i) => `<tr>
+      <td title="${escText(p.title)}">${productCell(p.title, i + 1)}</td>
+      <td>${fmtVal(p.gross_sales, 'currency-full')}</td>
+      <td>${fmtVal(p.discounts, 'currency-full')}</td>
+      <td>${fmtVal(p.net_sales, 'currency-full')}</td>
+      <td>${p.units_sold.toLocaleString('en-US')}</td>
+      <td>${p.share !== null ? fmtVal(p.share, 'percent') : '—'}</td>
+      <td>${yoyCell(p.yoy)}</td>
+      <td>${yoyCell(p.mom)}</td>
+    </tr>`).join('');
+  const totalRow = `<tr class="total-row">
+      <td>Total (all bundle products)</td>
+      <td>${fmtVal(tot.g, 'currency-full')}</td>
+      <td>${fmtVal(tot.x, 'currency-full')}</td>
+      <td>${fmtVal(tot.n, 'currency-full')}</td>
+      <td>${tot.u.toLocaleString('en-US')}</td>
+      <td>100.0%</td>
+      <td>${yoyCell(d.totalYoy)}</td>
+      <td>${yoyCell(d.totalMom)}</td>
+    </tr>`;
+  el.innerHTML = `<div class="bp-tiles">${sumTile}${progTiles}</div>
+  <table class="dtable">
+    <thead><tr><th style="text-align:left">Product</th><th>Gross Sales</th><th>Discounts</th><th>Net Sales</th><th>Units Sold</th><th>% of Bundle Sales</th><th>YoY</th><th>${momLabel()}</th></tr></thead>
+    <tbody>${rows}${more}${totalRow}</tbody>
+  </table>
+  <div style="margin-top:10px;font-size:11px;color:var(--text-muted)">Shopify analytics for the period${state.site === 'all' ? ', the three sites added up in USD' : ''}: the products in orders tagged with one of the Evergreen Discounts Tags sheet’s bundle / set tags, on the lines that got the bundle’s own discount — the same orders and lines as “Bundles &amp; sets” in the Discounts Breakdown (orders with a sale tag count as the sale there, so they’re left out here too). Gross Sales before discounts; Discounts = every discount on those lines (the bundle’s own plus any code used with it — the Discounts Breakdown counts the bundle’s own discount only); Net Sales after discounts and returns. A product can be in more than one bundle, so the bundle boxes can add up to slightly more than All bundles. YoY / ${momLabel()} compare the same products’ bundle sales in the comparison period.</div>`;
+  const btn = document.getElementById('bundle-products-more');
+  if (btn) btn.addEventListener('click', () => { bundleProductsOpen[bpKey] = !open; renderBundleProducts(); });
+  if (typeof applyMobileTableLabels === 'function') applyMobileTableLabels(el);
+}
+
 /* ---------------- Placeholder sections (3, 5, 6) ---------------- */
 const PLACEHOLDERS = {
   'section-3': {
@@ -6853,6 +7082,7 @@ function render() {
   renderKPIs(monthData);
   renderTrends();
   renderTopProducts(monthData);
+  renderBundleProducts(monthData);
   renderReturns(monthData);
   renderChannels(monthData);
   // Section 5 (Sales by Country) — hidden entirely for ND.IL only, per
@@ -6884,8 +7114,9 @@ function render() {
   document.getElementById('footer-note').textContent = combined
     ? monthData.combined_footer_note
     : isSynced
-    ? 'Source: Marketing P&L 2026 Google Sheet (sections 1 goals, 4, 7) and a LIVE sync with Shopify for ' + siteMeta(state.site).name + ' · ' + monthLabelText() + ' (sections 1 actuals/YoY, 2, 5, 6). Section 3 (returns by product) isn’t available from the sync endpoint and still shows the embedded snapshot. Click Sync again any time to refresh.'
-    : 'Source: Marketing P&L 2026 Google Sheet (sections 1, 4, 7) and an embedded Shopify snapshot (sections 1 YoY, 2, 3, 5, 6) as of ' + DATA.meta.current_month_full + '. Click Sync above to pull live numbers for the selected site/month.';
+    // Section names instead of numbers (2026-11-16: the sections were re-ordered).
+    ? 'Sources: Marketing P&L 2026 Google Sheet (goals, channel spend, Other Costs) and a LIVE sync with Shopify, Triple Whale and TikTok Shop for ' + siteMeta(state.site).name + ' · ' + monthLabelText() + ' (actuals, discounts, products, bundles, returns, channels, countries). Click Sync again any time to refresh.'
+    : 'Sources: Marketing P&L 2026 Google Sheet (goals, channel spend, Other Costs) and an embedded Shopify snapshot as of ' + DATA.meta.current_month_full + '. Click Sync above to pull live numbers for the selected site/month.';
 }
 
 document.getElementById('sync-btn').addEventListener('click', performSync);
@@ -6910,17 +7141,20 @@ document.getElementById('sync-btn').addEventListener('click', performSync);
 // the current site.
 // 2026-11-11: Top 10 Refunded Products became #4 (everything after moved
 // up one); pill ids are now 'quicknav-<cardId>' so they don't drift again.
+// 2026-11-16 (Tomer): Discounts Breakdown moved to #2 and Bundle Products
+// added as #4 (under Top Selling Products); the rest moved down.
 const QUICKNAV_CARDS = [
   { num: 1, cardId: 'card-1' },
-  { num: 2, cardId: 'card-2' },
-  { num: 3, cardId: 'card-3' },
-  { num: 4, cardId: 'card-3b' },
-  { num: 5, cardId: 'card-4' },
-  { num: 6, cardId: 'card-tiktok' }, // TikTok Shop (ND.COM only) — added 2026-10-07
-  { num: 7, cardId: 'card-section-5' },
-  { num: 8, cardId: 'card-6' },
-  { num: 9, cardId: 'card-7' },
-  { num: 10, cardId: 'card-8' },
+  { num: 2, cardId: 'card-7' }, // Discounts Breakdown
+  { num: 3, cardId: 'card-2' },
+  { num: 4, cardId: 'card-2b' }, // Bundle Products
+  { num: 5, cardId: 'card-3' },
+  { num: 6, cardId: 'card-3b' },
+  { num: 7, cardId: 'card-4' },
+  { num: 8, cardId: 'card-tiktok' }, // TikTok Shop (ND.COM only) — added 2026-10-07
+  { num: 9, cardId: 'card-section-5' },
+  { num: 10, cardId: 'card-6' },
+  { num: 11, cardId: 'card-8' },
 ];
 function quicknavLabel(cardId) {
   const t = document.querySelector('#' + cardId + ' .section-title');
