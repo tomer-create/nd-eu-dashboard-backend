@@ -6072,7 +6072,7 @@ function renderBundleProducts(monthData) {
   const open = !!bundleProductsOpen[bpKey];
   const shown = open ? list : list.slice(0, TOP_PRODUCTS_PAGE);
   const more = list.length > TOP_PRODUCTS_PAGE
-    ? `<tr class="show-more-row"><td colspan="10"><button type="button" class="show-more-btn" id="bundle-products-more" aria-expanded="${open}">${open ? '− Show top ' + TOP_PRODUCTS_PAGE : '+ ' + (list.length - TOP_PRODUCTS_PAGE) + ' more bundles'}</button></td></tr>`
+    ? `<tr class="show-more-row"><td colspan="9"><button type="button" class="show-more-btn" id="bundle-products-more" aria-expanded="${open}">${open ? '− Show top ' + TOP_PRODUCTS_PAGE : '+ ' + (list.length - TOP_PRODUCTS_PAGE) + ' more bundles'}</button></td></tr>`
     : '';
   const rows = shown.map((b, i) => `<tr>
       <td title="${escText(b.title)}">${productCell(b.title, i + 1)}</td>
@@ -6080,7 +6080,6 @@ function renderBundleProducts(monthData) {
       <td>${fmtVal(b.orders, 'number')}</td>
       <td>${fmtVal(b.gross_sales, 'currency-full')}</td>
       <td>${fmtVal(b.discounts, 'currency-full')}</td>
-      <td>${b.gross_sales ? fmtVal(b.discounts / b.gross_sales, 'percent') : '—'}</td>
       <td>${fmtVal(b.net_sales, 'currency-full')}</td>
       <td>${tot.g ? fmtVal(b.gross_sales / tot.g, 'percent') : '—'}</td>
       <td>${yoyCell(yoyMap ? chg(b.gross_plain || 0, yoyMap[b.title] || 0) : null)}</td>
@@ -6092,7 +6091,6 @@ function renderBundleProducts(monthData) {
       <td>${fmtVal(tot.o, 'number')}</td>
       <td>${fmtVal(tot.g, 'currency-full')}</td>
       <td>${fmtVal(tot.x, 'currency-full')}</td>
-      <td>${tot.g ? fmtVal(tot.x / tot.g, 'percent') : '—'}</td>
       <td>${fmtVal(tot.n, 'currency-full')}</td>
       <td>100.0%</td>
       <td>${yoyCell(totYoy)}</td>
@@ -6101,10 +6099,10 @@ function renderBundleProducts(monthData) {
   const multi = state.month === 'YTD' || isQuarter(state.month);
   el.innerHTML = `${tiles}
   <table class="dtable">
-    <thead><tr><th style="text-align:left">Bundle</th><th>Bundles Sold</th><th>Orders</th><th>Gross Sales</th><th>Discounts</th><th title="Discounts ÷ Gross Sales of the bundle">% Discount Ratio</th><th>Net Sales</th><th>% of Bundle Sales</th><th>YoY</th><th>${momLabel()}</th></tr></thead>
+    <thead><tr><th style="text-align:left">Bundle</th><th>Bundles Sold</th><th>Orders</th><th>Gross Sales</th><th>Discounts</th><th>Net Sales</th><th>% of Bundle Sales</th><th>YoY</th><th>${momLabel()}</th></tr></thead>
     <tbody>${rows}${more}${totalRow}</tbody>
   </table>
-  <div style="margin-top:10px;font-size:11px;color:var(--text-muted)">Shopify bundles only — every order line that Shopify marks as part of a bundle, grouped by the bundle’s name (the bundle as the customer bought it, e.g. “MINI EYE SCULPT DUO”), from the period’s Shopify orders${state.site === 'all' ? ', the three sites added up in USD' : ''}. Bundles Sold = how many of each bundle were bought; Gross Sales = the bundle’s products at their order prices${state.site === 'il' || state.site === 'all' ? ' (VAT out, as in Gross Sales)' : ''}; Discounts = every discount on those lines (the bundle’s own and any code used with it); % Discount Ratio = Discounts ÷ Gross Sales; Net Sales = gross − discounts (returns aren’t taken off). Single products and sets sold as one product aren’t bundles here, so they stay in Top Selling Products only. YoY / ${momLabel()} compare each bundle’s gross sales with the same bundle in the comparison period${multi ? ' (YoY only for a quarter / Year to Date)' : ''}.${md.bundle_sales_missing ? ` ${md.bundle_sales_missing} of the months / sites in this view are still being refreshed, so they aren’t included yet.` : ''}</div>`;
+  <div style="margin-top:10px;font-size:11px;color:var(--text-muted)">Shopify bundles only — every order line that Shopify marks as part of a bundle, grouped by the bundle’s name (the bundle as the customer bought it, e.g. “MINI EYE SCULPT DUO”), from the period’s Shopify orders${state.site === 'all' ? ', the three sites added up in USD' : ''}. Bundles Sold = how many of each bundle were bought; Gross Sales = the bundle’s products at their order prices${state.site === 'il' || state.site === 'all' ? ' (VAT out, as in Gross Sales)' : ''}; Discounts = every discount on those lines (the bundle’s own and any code used with it); % Discount Ratio (box above) = Discounts ÷ Gross Sales of all bundles; Net Sales = gross − discounts (returns aren’t taken off). Single products and sets sold as one product aren’t bundles here, so they stay in Top Selling Products only. YoY / ${momLabel()} compare each bundle’s gross sales with the same bundle in the comparison period${multi ? ' (YoY only for a quarter / Year to Date)' : ''}.${md.bundle_sales_missing ? ` ${md.bundle_sales_missing} of the months / sites in this view are still being refreshed, so they aren’t included yet.` : ''}</div>`;
   const btn = document.getElementById('bundle-products-more');
   if (btn) btn.addEventListener('click', () => { bundleProductsOpen[bpKey] = !open; renderBundleProducts(getMonthData()); });
   if (typeof applyMobileTableLabels === 'function') applyMobileTableLabels(el);
