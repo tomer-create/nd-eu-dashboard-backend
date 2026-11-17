@@ -361,6 +361,7 @@
   .pill.warn { background: rgba(250,178,25,0.16); color: #8a5a00; }
   .pill.crit { background: rgba(208,59,59,0.13); color: var(--status-crit); }
   .pill.muted { background: transparent; color: var(--text-muted); font-weight:600; }
+  .kpi-goal-line.ret-explain { font-size:10.5px; line-height:1.35; color: var(--text-muted); margin-top:4px; }
   .pill.tt-bundle-pill { background: var(--track); color: var(--text-secondary); font-weight:600; margin-left:34px; }
 
   /* ---- placeholder (sections 2,3,5,6 until data connected) ---- */
@@ -2891,6 +2892,14 @@ function ensureRetention(site, range) {
   }
   return retentionCache[key];
 }
+// "1 Oct 2025" from an ISO day (shift: days to add, e.g. −1 for the day
+// before an end-exclusive date) — Retention Rate explanation (2026-11-17).
+function retDay(iso, shift = 0) {
+  const d = new Date(iso + 'T00:00:00Z');
+  if (isNaN(d)) return iso || '';
+  d.setUTCDate(d.getUTCDate() + shift);
+  return d.getUTCDate() + ' ' + ['Jan','Feb','Mar','Apr','May','Jun','Jul','Aug','Sep','Oct','Nov','Dec'][d.getUTCMonth()] + ' ' + d.getUTCFullYear();
+}
 function retentionTile() {
   const pr = ttPriorRanges();
   if (!pr.r || !['com', 'eu', 'il', 'all'].includes(state.site)) return null;
@@ -2918,6 +2927,7 @@ function retentionTile() {
       <div class="kpi-mom-row">${chip(ch(m), momLabel())}</div>
       <div class="kpi-value" title="${escText(tip)}">${fmtVal(cur.rate, 'percent')}</div>
       <div class="kpi-goal-line">${fmtVal(cur.retained, 'number')} of ${fmtVal(cur.base_customers, 'number')} customers of the 12 months before came back</div>
+      <div class="kpi-goal-line ret-explain">How it’s calculated: customers who bought in the 12 months before the period (${retDay(cur.base_start)} – ${retDay(cur.start, -1)}) and bought again in the period ÷ all customers of those 12 months. Each customer counted once; paid Shopify orders only (not cancelled, above $0 after discounts), from Triple Whale${site === 'all' ? '; the three stores added up' : ''}.</div>
     `;
   return tile;
 }
