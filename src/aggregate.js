@@ -557,6 +557,39 @@ function bundleSales(orders) {
   }).sort((x, y) => y.gross_sales - x.gross_sales);
 }
 
+// Pick & Pack (2026-11-16, Tomer: "for the pick and pack cost on the .com
+// should be all the orders from Mainfreight Warehouse location, take the
+// number of lines means the unique number of products you have in the order
+// and multiply it by 5. do the same for the .eu"). Orders whose fulfillment
+// is assigned to the Mainfreight Warehouse location; lines = the order's
+// distinct products (variants) still on it (current quantity > 0, so
+// cancelled orders and removed items don't count) that need shipping;
+// cost = lines × 5 in the store's currency ($ / €). Undefined when the
+// orders were fetched without locations (stored months / light queries).
+const PICK_PACK_RATE = 5;
+const PICK_PACK_LOCATION = /mainfreight/i;
+function pickPack(orders) {
+  let seen = false, orderCount = 0, lines = 0;
+  for (const order of orders) {
+    if (!order || !('fulfillmentOrders' in order)) continue;
+    seen = true;
+    const fos = (order.fulfillmentOrders && order.fulfillmentOrders.nodes) || [];
+    if (!fos.some((fo) => fo && fo.assignedLocation && PICK_PACK_LOCATION.test(fo.assignedLocation.name || ''))) continue;
+    const ids = new Set();
+    for (const e of (order.lineItems && order.lineItems.edges) || []) {
+      const n = e.node || {};
+      const q = n.currentQuantity !== undefined && n.currentQuantity !== null ? Number(n.currentQuantity) : Number(n.quantity);
+      if (!(q > 0) || n.requiresShipping === false) continue;
+      ids.add((n.variant && n.variant.id) || n.title);
+    }
+    if (!ids.size) continue;
+    orderCount += 1;
+    lines += ids.size;
+  }
+  if (!seen) return undefined;
+  return { location: 'Mainfreight Warehouse', orders: orderCount, lines, rate: PICK_PACK_RATE, cost: lines * PICK_PACK_RATE };
+}
+
 function aggregate(orders, { tagLabels = DEFAULT_TAG_LABELS, discountTags = null, splitExtraOrders = null } = {}) {
   let grossSales = 0;
   let discountsTotal = 0;
@@ -818,6 +851,7 @@ function aggregate(orders, { tagLabels = DEFAULT_TAG_LABELS, discountTags = null
     },
     top_products: topProducts,
     bundle_sales: bundleSales(orders),
+    pick_pack: pickPack(orders),
     by_country: byCountry,
     discounts,
     discounts_total_gross: discountsTotalGross,
