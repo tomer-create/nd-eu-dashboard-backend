@@ -571,10 +571,15 @@ const PICK_PACK_LOCATION = /mainfreight/i;
 function pickPack(orders) {
   let seen = false, orderCount = 0, lines = 0;
   for (const order of orders) {
-    if (!order || !('fulfillmentOrders' in order)) continue;
+    if (!order) continue;
+    // fulfillmentOrders (assigned warehouse) when the token can read them;
+    // otherwise the location of the order's fulfillments (shipped orders).
+    let locs;
+    if ('fulfillmentOrders' in order) locs = ((order.fulfillmentOrders && order.fulfillmentOrders.nodes) || []).map((fo) => fo && fo.assignedLocation && fo.assignedLocation.name);
+    else if ('fulfillments' in order) locs = (order.fulfillments || []).map((f) => f && f.location && f.location.name);
+    else continue;
     seen = true;
-    const fos = (order.fulfillmentOrders && order.fulfillmentOrders.nodes) || [];
-    if (!fos.some((fo) => fo && fo.assignedLocation && PICK_PACK_LOCATION.test(fo.assignedLocation.name || ''))) continue;
+    if (!locs.some((n) => PICK_PACK_LOCATION.test(n || ''))) continue;
     const ids = new Set();
     for (const e of (order.lineItems && order.lineItems.edges) || []) {
       const n = e.node || {};
