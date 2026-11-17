@@ -312,15 +312,18 @@ const ORDERS_QUERY = `
             nodes { discountAllocations { allocatedAmountSet { shopMoney { amount } } discountApplication { index } } }
           }
           shippingAddress { countryCode }
+          fulfillmentOrders(first: 5) { nodes { assignedLocation { name } } }
           lineItems(first: 100) {
             edges {
               node {
                 title
                 quantity
+                currentQuantity
+                requiresShipping
                 originalTotalSet { shopMoney { amount } }
                 discountAllocations { allocatedAmountSet { shopMoney { amount } } discountApplication { index } }
                 taxLines { rate priceSet { shopMoney { amount } } }
-                variant { price compareAtPrice }
+                variant { id price compareAtPrice }
                 lineItemGroup { id title quantity }
               }
             }
@@ -388,7 +391,26 @@ const ORDERS_QUERY = `
 // period and the YoY/MoM comparison periods (see fetchOrdersLight below)
 // since both use the same aggregate() gross_sales calculation.
 async function fetchOrders(site, startISO, endISO) {
-  return fetchOrdersChunked(site, ORDERS_QUERY, startISO, endISO, 'full');
+  return fetchOrdersWithLocations(site, startISO, endISO, 'full');
+}
+// Pick & Pack (2026-11-16): ORDERS_QUERY reads each order's fulfillment
+// location (fulfillmentOrders), which needs the fulfillment-order read
+// scopes. If a store's token doesn't have them, the orders are pulled
+// without it (the dashboard then keeps the P&L sheet's Pick & Pack figure)
+// instead of failing the whole sync.
+const ORDERS_QUERY_NO_FO = ORDERS_QUERY.replace(/\n\s*fulfillmentOrders\(first: 5\) \{ nodes \{ assignedLocation \{ name \} \} \}/, '');
+const noFulfillmentOrderSites = new Set();
+async function fetchOrdersWithLocations(site, startISO, endISO, label, opts) {
+  if (!noFulfillmentOrderSites.has(site)) {
+    try {
+      return await fetchOrdersChunked(site, ORDERS_QUERY, startISO, endISO, label, opts);
+    } catch (err) {
+      if (!/fulfillmentOrder|access denied|ACCESS_DENIED/i.test(String(err && err.message))) throw err;
+      console.error(`shopify orders: fulfillment locations not readable for site=${site} (${err.message}) — pulling without them`);
+      noFulfillmentOrderSites.add(site);
+    }
+  }
+  return fetchOrdersChunked(site, ORDERS_QUERY_NO_FO, startISO, endISO, label, opts);
 }
 // Only the voided orders of [startISO, endISO) — same full query. Used for the
 // Discounts Breakdown's split only (2026-11-04): Shopify's sales report counts
@@ -396,7 +418,7 @@ async function fetchOrders(site, startISO, endISO) {
 // Discounts includes them (ND.EU May 2026: report 1,137 orders = 1,118 + 19
 // voided).
 async function fetchVoidedOrders(site, startISO, endISO) {
-  return fetchOrdersChunked(site, ORDERS_QUERY, startISO, endISO, 'voided', { voided: true });
+  return fetchOrdersWithLocations(site, startISO, endISO, 'voided', { voided: true });
 }
 
 // Minimal per-order query for Section 8's Net Sales-by-tier column (added
