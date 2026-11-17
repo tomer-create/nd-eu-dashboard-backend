@@ -397,17 +397,24 @@ async function fetchOrders(site, startISO, endISO) {
 // location (fulfillmentOrders), which needs the fulfillment-order read
 // scopes. If a store's token doesn't have them, the orders are pulled
 // without it (the dashboard then keeps the P&L sheet's Pick & Pack figure)
-// instead of failing the whole sync.
-const ORDERS_QUERY_NO_FO = ORDERS_QUERY.replace(/\n\s*fulfillmentOrders\(first: 5\) \{ nodes \{ assignedLocation \{ name \} \} \}/, '');
-const noFulfillmentOrderSites = new Set();
+// instead of failing the whole sync. Second try (ND.EU / ND.IL's tokens
+// have no fulfillment-order scopes, 2026-11-17): the location of each
+// order's fulfillments (shipped orders only).
+const FO_LINE = /\n\s*fulfillmentOrders\(first: 5\) \{ nodes \{ assignedLocation \{ name \} \} \}/;
+const ORDERS_QUERY_FULFILLMENTS = ORDERS_QUERY.replace(FO_LINE, '\n          fulfillments(first: 5) { location { name } }');
+const ORDERS_QUERY_NO_FO = ORDERS_QUERY.replace(FO_LINE, '');
+const locationQueryLevel = new Map(); // site -> 0 fulfillmentOrders, 1 fulfillments, 2 none
+const accessDenied = (err) => /access denied|ACCESS_DENIED|fulfillmentOrder|fulfillments/i.test(String(err && err.message));
 async function fetchOrdersWithLocations(site, startISO, endISO, label, opts) {
-  if (!noFulfillmentOrderSites.has(site)) {
+  const queries = [ORDERS_QUERY, ORDERS_QUERY_FULFILLMENTS, ORDERS_QUERY_NO_FO];
+  for (let lvl = locationQueryLevel.get(site) || 0; lvl < queries.length; lvl++) {
     try {
-      return await fetchOrdersChunked(site, ORDERS_QUERY, startISO, endISO, label, opts);
+      const out = await fetchOrdersChunked(site, queries[lvl], startISO, endISO, label, opts);
+      locationQueryLevel.set(site, lvl);
+      return out;
     } catch (err) {
-      if (!/fulfillmentOrder|access denied|ACCESS_DENIED/i.test(String(err && err.message))) throw err;
-      console.error(`shopify orders: fulfillment locations not readable for site=${site} (${err.message}) — pulling without them`);
-      noFulfillmentOrderSites.add(site);
+      if (lvl === queries.length - 1 || !accessDenied(err)) throw err;
+      console.error(`shopify orders: ${lvl === 0 ? 'fulfillment orders' : 'fulfillment locations'} not readable for site=${site} (${String(err.message).slice(0, 200)}) — ${lvl === 0 ? 'trying fulfillments' : 'pulling without locations'}`);
     }
   }
   return fetchOrdersChunked(site, ORDERS_QUERY_NO_FO, startISO, endISO, label, opts);
