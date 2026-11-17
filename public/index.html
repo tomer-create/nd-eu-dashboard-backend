@@ -1236,6 +1236,8 @@ function mergeLiveIntoMonthData(monthData, live, site) {
   merged.by_country_note = `Pulled live via the Sync button (real-time Shopify analytics, grouped by ${groupedByPhrase}, exact selected date range). Return Rate = |sales reversals| ÷ gross sales for that country; YoY/MoM compare gross sales for the same country against the comparison period, matched by exact country name — a country with no orders in that comparison period shows —.`;
 
   // Bundle Products (2026-11-16): Shopify bundles sold, by bundle.
+  // Pick & Pack (2026-11-16): Mainfreight Warehouse lines × 5 — see applyPickPackRule.
+  if (live.pick_pack) merged.pick_pack = live.pick_pack;
   if (Array.isArray(live.bundle_sales)) {
     merged.bundle_sales = live.bundle_sales;
     merged.bundle_sales_yoy = live.bundle_sales_yoy || null;
@@ -1596,7 +1598,7 @@ function mergeLiveIntoMonthData(monthData, live, site) {
 function getSingleSiteMonthData(site, month) {
   const base = DATA.sites[site].months[month];
   const cached = liveCache[site + '|' + month];
-  return applyCogsRule(site, cached ? mergeLiveIntoMonthData(base, cached.data, site) : base);
+  return applyPickPackRule(site, applyCogsRule(site, cached ? mergeLiveIntoMonthData(base, cached.data, site) : base));
 }
 // ND.IL Product Cost / COGS (2026-10-15, Tomer: "the product cost for ND.IL
 // is wrong"; he chose "20% of Net Sales"). Same as the P&L sheet's IL
@@ -1639,6 +1641,36 @@ function applyCogsRule(site, md) {
       const t = out.total_other_costs_actual;
       out.other_costs = out.other_costs.map(o => Object.assign({}, o, { ratio_of_total: t ? (o.actual || 0) / t : null }));
     }
+  }
+  return out;
+}
+
+// Pick & Pack Fee (2026-11-16, Tomer: "for the pick and pack cost on the .com
+// should be all the orders from Mainfreight Warehouse location, take the
+// number of lines means the unique number of products you have in the order
+// and multiply it by 5. do the same for the .eu"): ND.COM and ND.EU's "Pick &
+// Pack Fee" line in Other Costs = the period's Mainfreight Warehouse orders'
+// lines (distinct products per order) × $5 / €5 (backend pick_pack). Periods
+// with no Mainfreight orders (before the move to Mainfreight, Nov 2026) keep
+// the P&L sheet's figure. Like the COGS rule, the Profit KPI keeps using the
+// sheet's Total Cost.
+function applyPickPackRule(site, md) {
+  const pp = md && md.pick_pack;
+  if (!pp || !(pp.orders > 0) || (site !== 'com' && site !== 'eu') || !md.other_costs) return md;
+  const label = 'Pick & Pack Fee';
+  if (!md.other_costs.some(o => o.label === label)) return md;
+  let delta = 0;
+  const out = Object.assign({}, md);
+  out.other_costs = md.other_costs.map(o => {
+    if (o.label !== label) return o;
+    delta += pp.cost - (o.actual || 0);
+    return Object.assign({}, o, { actual: pp.cost, no_data: false,
+      note: `${pp.lines.toLocaleString('en-US')} lines (distinct products) in ${pp.orders.toLocaleString('en-US')} Mainfreight Warehouse orders × ${site === 'eu' ? '€' : '$'}${pp.rate}` });
+  });
+  if (delta && typeof md.total_other_costs_actual === 'number') {
+    out.total_other_costs_actual = md.total_other_costs_actual + delta;
+    const t = out.total_other_costs_actual;
+    out.other_costs = out.other_costs.map(o => Object.assign({}, o, { ratio_of_total: t ? (o.actual || 0) / t : null }));
   }
   return out;
 }
