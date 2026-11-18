@@ -245,7 +245,9 @@ const CHANNEL_MAP = [
   // flagged as having that same problem at the time. Tomer's 2026-09-07
   // report means Pinterest's Pixel CV isn't reliable either — same fix,
   // same reasoning, just a channel Tomer didn't call out the first time.
-  { ids: ['pinterest-ads'], label: 'Pinterest', cv: 'channel' },
+  // Back to Pixel CV 2026-11-18 (Tomer: "for Pinterest revenue use triple
+  // whale cv pixel") — Last-Click order revenue, like Google / Meta / TikTok.
+  { ids: ['pinterest-ads'], label: 'Pinterest', cv: 'pixel' },
   // New rows — not present in the dashboard's existing P&L-sourced Section 4
   // data for any site/month yet. The frontend merge adds these as brand new
   // channel rows the first time a Sync returns data for them.
