@@ -365,6 +365,7 @@
   .ret-explain-btn { margin-top:6px; padding:0; border:0; background:none; color: var(--text-secondary); font: inherit; font-size:11px; font-weight:600; cursor:pointer; }
   .ret-explain-btn:hover { color: var(--text-primary); text-decoration: underline; }
   .ret-explain-btn:focus-visible { outline: 2px solid var(--text-secondary); outline-offset: 2px; border-radius: 3px; }
+  table.dtable tr.disc-outside td { color: var(--text-muted); border-top: 2px dashed var(--border); font-style: italic; }
   .pill.tt-bundle-pill { background: var(--track); color: var(--text-secondary); font-weight:600; margin-left:34px; }
 
   /* ---- placeholder (sections 2,3,5,6 until data connected) ---- */
@@ -1236,8 +1237,13 @@ function mergeLiveIntoMonthData(monthData, live, site) {
   merged.by_country_note = `Pulled live via the Sync button (real-time Shopify analytics, grouped by ${groupedByPhrase}, exact selected date range). Return Rate = |sales reversals| ÷ gross sales for that country; YoY/MoM compare gross sales for the same country against the comparison period, matched by exact country name — a country with no orders in that comparison period shows —.`;
 
   // Bundle Products (2026-11-16): Shopify bundles sold, by bundle.
-  // Pick & Pack (2026-11-16): Mainfreight Warehouse lines × 5 — see applyPickPackRule.
+  // Pick & Pack (2026-11-16): Mainfreight Warehouse lines × rate — see applyPickPackRule.
   if (live.pick_pack) merged.pick_pack = live.pick_pack;
+  // Gross Sales of new / returning customers (2026-11-18) — New Users /
+  // Returning Users boxes.
+  if (live.kpis && typeof live.kpis.new_customers_gross === 'number' && typeof live.kpis.returning_customers_gross === 'number') {
+    merged.customer_gross = { new: live.kpis.new_customers_gross, returning: live.kpis.returning_customers_gross };
+  }
   if (Array.isArray(live.bundle_sales)) {
     merged.bundle_sales = live.bundle_sales;
     merged.bundle_sales_yoy = live.bundle_sales_yoy || null;
@@ -1598,7 +1604,7 @@ function mergeLiveIntoMonthData(monthData, live, site) {
 function getSingleSiteMonthData(site, month) {
   const base = DATA.sites[site].months[month];
   const cached = liveCache[site + '|' + month];
-  return applyPickPackRule(site, applyCogsRule(site, cached ? mergeLiveIntoMonthData(base, cached.data, site) : base));
+  return applyPpcFeeRule(site, applyCollabsSpendRule(site, applyPickPackRule(site, applyCogsRule(site, cached ? mergeLiveIntoMonthData(base, cached.data, site) : base))));
 }
 // ND.IL Product Cost / COGS (2026-10-15, Tomer: "the product cost for ND.IL
 // is wrong"; he chose "20% of Net Sales"). Same as the P&L sheet's IL
@@ -1665,7 +1671,59 @@ function applyPickPackRule(site, md) {
     if (o.label !== label) return o;
     delta += pp.cost - (o.actual || 0);
     return Object.assign({}, o, { actual: pp.cost, no_data: false,
-      note: `${pp.lines.toLocaleString('en-US')} lines (distinct products) in ${pp.orders.toLocaleString('en-US')} Mainfreight Warehouse orders × ${site === 'eu' ? '€' : '$'}${pp.rate}` });
+      note: `${pp.lines.toLocaleString('en-US')} lines (distinct products) in ${pp.orders.toLocaleString('en-US')} Mainfreight Warehouse orders × ${site === 'eu' ? '€' : '$'}${Number(pp.rate).toFixed(2)}` });
+  });
+  if (delta && typeof md.total_other_costs_actual === 'number') {
+    out.total_other_costs_actual = md.total_other_costs_actual + delta;
+    const t = out.total_other_costs_actual;
+    out.other_costs = out.other_costs.map(o => Object.assign({}, o, { ratio_of_total: t ? (o.actual || 0) / t : null }));
+  }
+  return out;
+}
+
+// Collabs Affiliate spend (2026-11-18, Tomer: "double check the numbers for
+// collabs channel (the ROAS doesn't make sense should be around 10)"): the
+// P&L sheet's Collabs cost runs behind its revenue (Nov 1–18: $1,589 on
+// $29,802 = 5.3%, while the sheet's own Collabs rate is 9% and October
+// closed at 11.4% → ROAS 8.75). When the sheet's cost is below 9% of the
+// revenue, the spend shown is 9% of the revenue (marked est.); a complete
+// month keeps the sheet's figure.
+const COLLABS_COMMISSION = 0.09;
+function applyCollabsSpendRule(site, md) {
+  if (!md || !Array.isArray(md.channels)) return md;
+  const i = md.channels.findIndex(c => c.label === 'Collabs Affiliate' && !c.no_data && (c.revenue_actual || 0) > 0);
+  if (i < 0) return md;
+  const c = md.channels[i];
+  const est = c.revenue_actual * COLLABS_COMMISSION;
+  if ((c.spend_actual || 0) >= est - 0.5) return md;
+  const out = Object.assign({}, md);
+  out.channels = md.channels.slice();
+  out.channels[i] = Object.assign({}, c, { spend_actual: est, spend_sheet: c.spend_actual || 0, spend_est: true, roas: est ? c.revenue_actual / est : null });
+  return out;
+}
+
+// PPC Agency Fee (2026-11-18, Tomer: "change the calculation to 9% out of
+// the spend of tiktok ads spend + google ads spend + meta ads spend +
+// snapchat spend + Microsoft Ads spend + Pinterest spend + ChatGPT Ads
+// Spend"): 9% of those channels' spend in Marketing & Sales Channel
+// Performance (the same spend figures as that section). Was the P&L sheet's
+// 9% of Google + Meta + TikTok Ads.
+const PPC_FEE_PCT = 0.09;
+const PPC_FEE_CHANNELS = ['TikTok Ads', 'Google Ads', 'Meta Ads', 'Snapchat', 'Microsoft Ads', 'Pinterest', 'ChatGPT Ads'];
+function applyPpcFeeRule(site, md) {
+  if (!md || !Array.isArray(md.other_costs) || !Array.isArray(md.channels)) return md;
+  const label = 'PPC Agency Fee';
+  if (!md.other_costs.some(o => o.label === label)) return md;
+  const used = md.channels.filter(c => PPC_FEE_CHANNELS.includes(c.label) && !c.no_data && typeof c.spend_actual === 'number');
+  if (!used.length) return md;
+  const spend = used.reduce((s, c) => s + c.spend_actual, 0);
+  const fee = spend * PPC_FEE_PCT;
+  let delta = 0;
+  const out = Object.assign({}, md);
+  out.other_costs = md.other_costs.map(o => {
+    if (o.label !== label) return o;
+    delta += fee - (o.actual || 0);
+    return Object.assign({}, o, { actual: fee, no_data: false, note: `9% of ${fmtVal(spend, 'currency-full')} ad spend: ${used.map(c => c.label).join(', ')}` });
   });
   if (delta && typeof md.total_other_costs_actual === 'number') {
     out.total_other_costs_actual = md.total_other_costs_actual + delta;
@@ -2324,6 +2382,8 @@ function combineMonthDatas(entries, opts) {
     discounts_note: dd.list ? ('Combined for ' + label + '.' + combinedTail + (dd.partial ? ' Only ' + dd.sourcesCount + ' of ' + dd.totalSources + ' site/period combination(s) had discount-level data to merge.' : '')) : undefined,
     tiktok_shop: ttCombined,
     bundle_sales: bsCombined.list, bundle_sales_yoy: bsCombined.yoy, bundle_sales_mom: bsCombined.mom, bundle_sales_missing: bsCombined.missing,
+    customer_gross: entries.length && entries.every(e => e.monthData.customer_gross)
+      ? entries.reduce((a, e) => ({ new: a.new + e.monthData.customer_gross.new * e.fx, returning: a.returning + e.monthData.customer_gross.returning * e.fx }), { new: 0, returning: 0 }) : null,
     combined_label: label,
     combined_footer_note: 'Section 1 goals/actuals, Section 4 channels, and Section 7 other costs are true sums across ' + label + (entries.length > 1 && entries.some(e => e.fx !== 1) ? ', converted to USD. ' + FX_NOTE : '.') + combinedTail + partialTail + (opts.periodKind === 'quarter'
       ? ' Click Sync above to pull live Shopify numbers for ' + (isQuarter(state.month) && isQuarterInProgress(state.month) ? 'the current month (' + DATA.meta.current_month_full + ')' : 'this quarter\'s months') + ' across ND.COM, ND.EU, and ND.IL.'
@@ -2820,7 +2880,24 @@ function renderKPIs(monthData) {
   // Profit) are shown once, in the headline row above, with their YoY / MoM
   // and goal — 2026-11-15, Tomer: "should be removed from the Goal tracker".
   const inHeadline = new Set(HEADLINE.map(h => h.label));
-  monthData.kpis.filter(k => !inHeadline.has(k.label)).forEach(k => {
+  // 2026-11-18 (Tomer): "from the goal tracker remove the COGS" (the figure
+  // is still used by Other Costs and channel profitability).
+  inHeadline.add('COGS');
+  // Discounts / % Discount Ratio = the Discounts Breakdown's Total (2026-11-18,
+  // see discountView): without TikTok platform discounts and free shipping,
+  // TikTok creator samples at TikTok costs' figure. YoY / MoM stay Shopify's
+  // changes. Periods stored before the breakdown keep Shopify's figure.
+  const dView = discountView(monthData);
+  const grossK = monthData.kpis.find(k => k.label === 'Gross Sales');
+  const grossAct = grossK && !grossK.no_data && typeof grossK.actual === 'number' ? grossK.actual : null;
+  const kpisShown = monthData.kpis.map(k => {
+    if (!dView || k.no_data) return k;
+    if (k.label === 'Discounts') return Object.assign({}, k, { actual: dView.total, pct_of_goal: k.goal ? dView.total / k.goal : null, _fromBreakdown: true });
+    if (k.label === '% Discount Ratio' && grossAct) { const r = dView.total / grossAct; return Object.assign({}, k, { actual: r, pct_of_goal: k.goal ? r / k.goal : null, _fromBreakdown: true }); }
+    return k;
+  });
+  const custGross = monthData.customer_gross || null;
+  kpisShown.filter(k => !inHeadline.has(k.label)).forEach(k => {
     const tile = document.createElement('div');
     // The snapshot's not-yet-synced months carry actual 0 with YoY −100%
     // (2026-11-05 code check: they showed "$0.00 · YoY −100%" until the sync
@@ -2850,6 +2927,13 @@ function renderKPIs(monthData) {
       // neutral "info" color (see pbarClass) rather than a good/warn/crit
       // threshold read — a users-mix share isn't a goal being hit or missed.
       progressHtml = renderPBar(pctOfTotal, true, true) + `<div class="pbar-pct">${pctLabel(pctOfTotal)} of total users</div>`;
+      // Gross Sales of these customers (2026-11-18, Tomer: "To New users and
+      // Returning Users add the Gross sales") — Shopify's sales report.
+      if (custGross) {
+        const g = k.label === 'New Users' ? custGross.new : custGross.returning;
+        const gAll = custGross.new + custGross.returning;
+        progressHtml += `<div class="kpi-goal-line" style="margin-top:6px">Gross sales <strong>${fmtVal(g, 'currency-full')}</strong>${gAll ? ' · ' + pctLabel(g / gAll) + ' of gross sales' : ''}</div>`;
+      }
     } else if (noGoal) {
       progressHtml = '';
     } else if ((k.pct_of_goal === null && k.met_goal !== null && k.met_goal !== undefined)
@@ -2891,8 +2975,54 @@ function renderKPIs(monthData) {
     `;
     grid.appendChild(tile);
   });
+  const ct = combinedNetTile(monthData);
+  if (ct) grid.appendChild(ct);
   const rt = retentionTile();
   if (rt) grid.appendChild(rt);
+}
+
+// Net Sales + TikTok Net Sales (2026-11-18, Tomer: "Create a new box … that
+// will include TikTok net sales + Net sales … in the Goal Tracker"; he chose
+// to simply add them). Net Sales = the headline's Shopify Net Sales; TikTok
+// Net Sales = the TikTok Shop section's Net Sales tile (TikTok's own net
+// sales by order date, /api/tiktok-shop/payouts). ND.COM and All Sites.
+// TikTok Shop orders also sync into Shopify, so they're in both parts.
+function combinedNetTile(monthData) {
+  if (state.site !== 'com' && state.site !== 'all') return null;
+  const netK = (monthData.kpis || []).find(k => k.label === 'Net Sales');
+  if (!netK || netK.no_data || typeof netK.actual !== 'number') return null;
+  const pr = ttPriorRanges();
+  if (!pr.r) return null;
+  const ok = e => e && e.status === 'ok' && e.data && typeof e.data.net_sales === 'number' ? e.data : null;
+  const e = ttEnsurePayouts(pr.r);
+  const cur = ok(e);
+  const tile = document.createElement('div');
+  tile.className = 'kpi-tile' + (cur ? '' : ' no-data');
+  const label = 'Net Sales + TikTok Net Sales';
+  const tip = 'Net Sales (Shopify, as in the headline) + TikTok Shop Net Sales (TikTok’s own net sales of the orders placed in the period, as in the TikTok Shop section). TikTok Shop orders also sync into Shopify, so they are in both parts.';
+  if (!cur) {
+    tile.innerHTML = `<div class="kpi-top"><span class="kpi-label" title="${escText(tip)}">${label}</span></div>
+      <div class="kpi-value" style="font-size:13px;color:var(--text-muted);font-weight:500">${e && e.status === 'error' ? 'TikTok net sales couldn’t be loaded — ' + escText(e.error || '') : 'Loading TikTok net sales…'}</div>`;
+    return tile;
+  }
+  const total = netK.actual + cur.net_sales;
+  const priorNet = ch => (ch === null || ch === undefined || (1 + ch) === 0) ? null : netK.actual / (1 + ch);
+  const chg = (kind) => {
+    const r = pr[kind]; if (!r) return null;
+    const p = ok(ttEnsurePayouts(r));
+    const pn = priorNet(netK[kind]);
+    if (!p || !(p.net_sales_orders > 0) || pn === null) return null;
+    const prior = pn + p.net_sales;
+    return prior ? (total - prior) / Math.abs(prior) : null;
+  };
+  const y = chg('yoy'), m = chg('mom');
+  const chip = (v, lbl) => { const str = fmtYoY(v); return str === null ? '' : `<span class="kpi-yoy ${v >= 0 ? 'up' : 'down'}">${lbl} ${str}</span>`; };
+  tile.innerHTML = `
+      <div class="kpi-top"><span class="kpi-label" title="${escText(tip)}">${label}</span>${chip(y, 'YoY')}</div>
+      <div class="kpi-mom-row">${chip(m, momLabel())}</div>
+      <div class="kpi-value" title="${escText(fmtTileExact(total, 'currency-cents'))}">${fmtTile(total, 'currency-cents')}</div>
+      <div class="kpi-goal-line">Net Sales ${fmtVal(netK.actual, 'currency-full')} + TikTok Shop ${fmtVal(cur.net_sales, 'currency-full')}</div>`;
+  return tile;
 }
 
 // Retention Rate (2026-11-16, Tomer: "on the Goal Tracker add retention rate
@@ -3241,7 +3371,12 @@ function renderTikTokShop(monthData, opts = {}) {
       const note = (!tikDays ? 'TikTok order data (same formula as TikTok’s analytics)' + (gmvRange.end > todayIso ? ' · to date' : '') : '') || (f.days
         ? `TikTok Shop analytics (${tikDays} day${tikDays === 1 ? '' : 's'}) + TikTok order data for ${runsTxt}${gmvRange.end > todayIso ? ' · month to date' : ''}`
         : 'TikTok Shop analytics');
-      return { value: (tikDays ? d.gmv : 0) + f.gmv, orders: (tikDays ? d.orders : 0) + f.orders, tiktok: true, note };
+      // Units / refunds (2026-11-18): TikTok's days + the filled days (null
+      // when either side is missing — e.g. TikTok's units / refunds don't
+      // cover every day TikTok has a GMV for (units_days, backend v13), or a
+      // payload from before the backend filled them).
+      const addF = (scv, fv) => (tikDays && typeof scv !== 'number') || (f.days && typeof fv !== 'number') ? null : (tikDays ? scv : 0) + (f.days ? fv : 0);
+      return { value: (tikDays ? d.gmv : 0) + f.gmv, orders: (tikDays ? d.orders : 0) + f.orders, units: addF(d.units_days === tikDays ? d.perf_units : null, f.units), refunds: addF(d.refunds_days === tikDays ? d.perf_refunds : null, f.refunds), src: !tikDays ? 'TikTok order data' : f.days ? 'TikTok Shop analytics + order data for ' + f.days + ' day' + (f.days === 1 ? '' : 's') : 'TikTok Shop analytics', tiktok: true, note };
     }
     const gap = covered && d.gap && d.gap.gmv !== undefined ? d.gap : null;
     const lastDay = new Date(Date.parse((gmvRange.end <= todayIso ? gmvRange.end : new Date(Date.parse(todayIso + 'T00:00:00Z') + 86400000).toISOString().slice(0, 10)) + 'T00:00:00Z') - 86400000).toISOString().slice(0, 10);
@@ -3250,11 +3385,40 @@ function renderTikTokShop(monthData, opts = {}) {
       ? `TikTok Shop analytics ${c4RangeText({ start: gmvRange.start, end: plus1(d.perf_through) })} + TikTok order data ${c4RangeText({ start: gap.start, end: plus1(lastDay) })}${gmvRange.end > todayIso ? ' · month to date' : ''}`
       : 'TikTok Shop analytics' + (through ? ' · through ' + fmtD(through) : '');
     return covered
-      ? { value: d.gmv + (gap ? gap.gmv : 0), orders: d.orders + (gap ? gap.orders : 0), tiktok: true, note }
+      ? { value: d.gmv + (gap ? gap.gmv : 0), orders: d.orders + (gap ? gap.orders : 0),
+          units: d.units_days === d.days_with_data && typeof d.perf_units === 'number' && (!gap || typeof gap.units === 'number') ? d.perf_units + (gap ? gap.units : 0) : null,
+          refunds: d.refunds_days === d.days_with_data && typeof d.perf_refunds === 'number' && (!gap || typeof gap.refunds === 'number') ? d.perf_refunds + (gap ? gap.refunds : 0) : null,
+          src: gap ? 'TikTok Shop analytics + order data for the latest days' : 'TikTok Shop analytics', tiktok: true, note }
       : { value: hasProdDiscEarly ? proxyNow : null, orders: tt.orders, tiktok: false, note: (hasProdDiscEarly ? '≈ estimate from TikTok order data — ' : '') + why };
   })();
   const gmvShown = gmvInfo.value;
   const ttOrdersShown = gmvInfo.tiktok && typeof gmvInfo.orders === 'number' ? gmvInfo.orders : tt.orders;
+  // Seller Center figures (2026-11-18, Tomer: "pull the main data that is not
+  // calculated data for TikTok Shop section from TikTok seller center"): GMV
+  // and Orders already were; Units Sold and Refunds now are too — TikTok Shop
+  // analytics (Windsor) + TikTok's order data for the days TikTok's analytics
+  // don't have yet, like the GMV tile. Triple Whale's figures show while
+  // Seller Center loads or when it doesn't cover the period. Gross Sales has
+  // no Seller Center figure (TikTok's GMV is after discounts), so it stays on
+  // TikTok's order data.
+  const scUnits = gmvInfo.tiktok && typeof gmvInfo.units === 'number' ? gmvInfo.units : null;
+  const scRefunds = gmvInfo.tiktok && typeof gmvInfo.refunds === 'number' ? gmvInfo.refunds : null;
+  // Return Rate (2026-11-18, Tomer: "Make sure you are pulling and calculating
+  // the right return Rate for TikTok shop"): Seller Center's refunds ÷ the GMV
+  // tile — both TikTok's own figures, both at the prices customers paid. It
+  // was Triple Whale's refunds ÷ gross sales before discounts, which put the
+  // paid-price refunds over a before-discount base (Oct 2026: 7.3% vs 10.4%).
+  // YoY / MoM: the change in refunds ÷ GMV on TikTok's order data (refunds
+  // change vs the GMV tile's change).
+  const rrChange = (kind) => {
+    const c = tt[kind], g = proxyChange(kind);
+    if (!c || c.refunds === null || c.refunds === undefined || g === null || g === undefined || (1 + g) === 0) return null;
+    return (1 + c.refunds) / (1 + g) - 1;
+  };
+  // The Refunds tile ÷ the GMV tile: Seller Center's refunds when they cover
+  // the period, otherwise TikTok's order data (Triple Whale) — the same tile.
+  const rrRefunds = scRefunds !== null ? scRefunds : (typeof tt.refunds === 'number' ? tt.refunds : null);
+  const scRate = rrRefunds !== null && gmvShown ? rrRefunds / gmvShown : null;
   const gmvTip = 'TikTok Shop GMV = price × items sold + shipping fees − seller promotions − platform co-funding (TikTok Shop analytics). TikTok’s analytics run about two days behind, so the latest days — and any day TikTok’s analytics are missing — are filled from TikTok’s order data (Triple Whale) on the same formula to keep it month to date. YoY / ' + mLabel + ': same formula on TikTok’s order data, same days.';
   // Net Sales = TikTok payouts (2026-11-04, Tomer: "for TikTok Shop Net Sales
   // pull the payout amounts from TikTok seller"): what TikTok paid out to the
@@ -3352,11 +3516,19 @@ function renderTikTokShop(monthData, opts = {}) {
           true, 'Net Sales ÷ Orders', 'Average order value: the Net Sales tile (TikTok Shop net sales by order date) ÷ the Orders tile.')
       : tileV('AOV', fmtVal(aov, 'currency'), aovYoy, aovMom, true, 'Net sales ÷ orders' + (payE && payE.status === 'loading' ? ' · loading TikTok net sales…' : ''), 'Average order value: net sales ÷ orders (Triple Whale’s net sales until TikTok’s load).'),
     netAovTile,
-    tile('Units Sold', tt.units, 'number', 'units', true, ''),
-    tile('Refunds', tt.refunds, 'currency-full', 'refunds', false, gmvShown ? fmtVal(tt.refunds / gmvShown, 'percent') + ' of GMV' : ''),
-    tileV('Return Rate', fmtVal(returnRate, 'percent'), returnRateYoy, returnRateMom, false,
-      hasRefunds ? fmtVal(tt.refunds, 'currency-full') + ' refunds ÷ ' + fmtVal(tt.gross_sales, 'currency-full') + ' gross sales' : 'Refunds not loaded yet — click Sync',
-      'TikTok Shop return rate = refunds ÷ gross sales (before discounts) — the same definition as Key Metrics’ % Returns Ratio. TikTok order data via Triple Whale; refunds are counted on the day they were issued.'),
+    scUnits !== null
+      ? tile('Units Sold', scUnits, 'number', 'units', true, gmvInfo.src)
+      : tile('Units Sold', tt.units, 'number', 'units', true, gmvInfo.tiktok ? 'TikTok order data' : ''),
+    scRefunds !== null
+      ? tile('Refunds', scRefunds, 'currency-full', 'refunds', false, gmvInfo.src + ' · by refund day')
+      : tile('Refunds', tt.refunds, 'currency-full', 'refunds', false, 'TikTok order data · by refund day'),
+    scRate !== null
+      ? tileV('Return Rate', fmtVal(scRate, 'percent'), rrChange('yoy'), rrChange('mom'), false,
+          fmtVal(rrRefunds, 'currency-full') + ' refunds ÷ ' + fmtVal(gmvShown, 'currency-full') + ' GMV',
+          'TikTok Shop return rate = the Refunds tile ÷ the TikTok Shop GMV tile — TikTok Shop analytics (Seller Center) where they cover the period, TikTok’s order data for the rest; both at the prices customers paid; refunds are counted on the day they were issued. YoY / MoM: the change in the same ratio on TikTok’s order data.')
+      : tileV('Return Rate', fmtVal(returnRate, 'percent'), returnRateYoy, returnRateMom, false,
+          hasRefunds ? fmtVal(tt.refunds, 'currency-full') + ' refunds ÷ ' + fmtVal(tt.gross_sales, 'currency-full') + ' gross sales' + (gmvSC && gmvSC.status === 'loading' ? ' · loading TikTok’s figures…' : '') : 'Refunds not loaded yet — click Sync',
+          'While TikTok Shop analytics load or don’t cover the period: refunds ÷ gross sales (before discounts), TikTok order data via Triple Whale; refunds are counted on the day they were issued.'),
     tileV('Discount Ratio', fmtVal(discRatio, 'percent'), discRatioYoy, discRatioMom, false, hasProdDisc ? fmtVal(prodDisc, 'currency-full') + ' product discounts ÷ gross sales before discounts (excl. ' + fmtVal((tt.discounts || 0) - prodDisc, 'currency-full') + ' shipping discounts)' : 'Product discounts not loaded yet — click Sync', 'Product discounts ÷ Gross Sales TikTok (shipping discounts not included)'),
     tile('New-Customer Orders', tt.new_customer_orders, 'number', 'new_customer_orders', true, (tt.orders && typeof tt.new_customer_orders === 'number') ? fmtVal(tt.new_customer_orders / tt.orders, 'percent') + ' of orders' : ''),
   ];
@@ -3621,24 +3793,8 @@ function renderTikTokShop(monthData, opts = {}) {
   };
   const totalPrior = kind => { if (known.length !== costRows.length) return null; let t = 0; for (const r of costRows) { const v = priorOf(r, kind); if (v === null) return null; t += v; } return t; };
   const totalYoy = pctCh(totalCost, totalPrior('yoy')), totalMom = pctCh(totalCost, totalPrior('mom'));
-  // TikTok ROAS (added 2026-10-12 per Tomer, "Overall TikTok ROAS"):
-  // Gross Sales TikTok ÷ all TikTok costs in the table below. Its YoY / MoM
-  // compare with the prior period's GMV ÷ prior costs, so they show only when
-  // every cost line has a prior value (like the Total row).
-  const missingCosts = costRows.filter(r => r.v === null || r.v === undefined).map(r => r.label === 'Samples (TikTok Gifting)' ? 'samples' : r.label === 'TikTok Shop transaction fee' ? 'transaction fee' : r.label === 'TikTok seller discounts (ND pays)' ? 'seller discounts' : r.label.toLowerCase());
-  // On TikTok Shop GMV (the tile above) since 2026-10-14.
-  const ttRoas = totalCost && gmvShown ? gmvShown / totalCost : null;
-  const roasCh = (kind) => {
-    const chG = proxyChange(kind), pc = totalPrior(kind);
-    if (ttRoas === null || chG === null || chG === undefined || (1 + chG) === 0 || !pc) return null;
-    const prior = (gmvShown / (1 + chG)) / pc;
-    return prior ? (ttRoas - prior) / prior : null;
-  };
-  const shipPending = giftPending;
-  const roasTile = tileV('TikTok ROAS', ttRoas === null ? '—' : fmtVal(ttRoas, 'ratio'), roasCh('yoy'), roasCh('mom'), true,
-    totalCost ? `GMV ÷ ${fmtVal(totalCost, 'currency-full')} TikTok costs${shipPending ? ' (samples / fees loading…)' : (missingCosts.length ? ' (excl. ' + missingCosts.join(', ') + ')' : '')}` : 'No TikTok costs for this period',
-    'TikTok Shop GMV ÷ total TikTok costs (ads spend + affiliate commission + samples + sample shipping + TikTok Shop transaction fee + TikTok seller discounts)');
-  const tiles = tileList.join('') + roasTile;
+  // TikTok ROAS tile removed (2026-11-18, Tomer: "remove the TikTok ROAS Box").
+  const tiles = tileList.join('');
   const cCell = v => { const c = ttChange(v, false); return `<span class="kpi-yoy ${c.dir}">${c.str === null ? '—' : c.str}</span>`; };
   const missingRow = (r) => r.label === 'Samples (TikTok Gifting)' && giftPending
     ? `<tr class="no-data-row"><td>${r.label}</td><td colspan="4"><span class="tt-loading" aria-hidden="true"></span>Loading the $0 TikTok orders…</td></tr>`
@@ -3659,7 +3815,7 @@ function renderTikTokShop(monthData, opts = {}) {
         <tr class="total-row"><td>Total TikTok costs</td><td>${fmtVal(totalCost,'currency-full')}</td><td>${gmvShown ? fmtVal(totalCost/gmvShown,'percent') : '—'}</td><td>${cCell(totalYoy)}</td><td>${cCell(totalMom)}</td></tr>
       </tbody>
     </table>
-    <div class="tt-note">TikTok ROAS (tile above) = TikTok Shop GMV ÷ Total TikTok costs; “% of GMV” is on the same GMV. Product cost (COGS ${fmtVal(tt.cogs,'currency-full')}) isn't included. Sources: TikTok Ads spend — Triple Whale; Affiliate commission — TikTok Affiliate Center's Est. commission (the estimated creator commission + shop-ads commission on the period's affiliate orders, GMT-8 days, from TikTok's Affiliate API), YoY / ${mLabel} on the same figure; the P&amp;L sheet is only used when TikTok's figure isn't available; Samples (TikTok Gifting) — product cost of everything inside the $0 orders from the TikTok sales channel (the creator samples): each product's retail price × quantity, added up (2026-11-04: at retail, no longer 20% of it); YoY / ${mLabel} on the same formula; TikTok Shop transaction fee — TikTok's referral fee (its commission on each sale), plus any transaction fee / platform commission and the refund administration fee, from TikTok's settlement statements, by statement date; Sample shipping — one shipment per $0 order from the TikTok sales channel (the same orders as Samples / TikTok Gifting) × $11; TikTok seller discounts — the Discounts Breakdown’s “TikTok seller discounts (ND pays)” line for the same period, YoY / ${mLabel} following TikTok’s product discounts in Triple Whale${platformDisc !== null ? `; the ${fmtVal(platformDisc, 'currency-full')} of TikTok platform discounts (TikTok pays) aren’t a cost to ND, so they’re not included` : ''}.</div>`;
+    <div class="tt-note">“% of GMV” is on TikTok Shop GMV (the tile above). Product cost (COGS ${fmtVal(tt.cogs,'currency-full')}) isn't included. Sources: TikTok Ads spend — Triple Whale; Affiliate commission — TikTok Affiliate Center's Est. commission (the estimated creator commission + shop-ads commission on the period's affiliate orders, GMT-8 days, from TikTok's Affiliate API), YoY / ${mLabel} on the same figure; the P&amp;L sheet is only used when TikTok's figure isn't available; Samples (TikTok Gifting) — product cost of everything inside the $0 orders from the TikTok sales channel (the creator samples): each product's retail price × quantity, added up (2026-11-04: at retail, no longer 20% of it); YoY / ${mLabel} on the same formula; TikTok Shop transaction fee — TikTok's referral fee (its commission on each sale), plus any transaction fee / platform commission and the refund administration fee, from TikTok's settlement statements, by statement date; Sample shipping — one shipment per $0 order from the TikTok sales channel (the same orders as Samples / TikTok Gifting) × $11; TikTok seller discounts — the Discounts Breakdown’s “TikTok seller discounts (ND pays)” line for the same period, YoY / ${mLabel} following TikTok’s product discounts in Triple Whale${platformDisc !== null ? `; the ${fmtVal(platformDisc, 'currency-full')} of TikTok platform discounts (TikTok pays) aren’t a cost to ND, so they’re not included` : ''}.</div>`;
 
   // Revenue & costs by source (2026-10-20, Tomer: "add Revenue by source and
   // TikTok costs on the same chart, when the cost of the affiliate should be
@@ -4154,7 +4310,7 @@ function ttEnsurePayouts(range) {
     })()
       .then(d => { payoutsCache[key] = { status: 'ok', data: d }; })
       .catch(err => { payoutsCache[key] = { status: 'error', error: err.message, at: Date.now() }; })
-      .finally(() => { if (state.site === 'com') renderTikTokShop(getMonthData()); });
+      .finally(() => { if (state.site === 'com') renderTikTokShop(getMonthData()); if (state.site === 'com' || state.site === 'all') renderKPIs(getMonthData()); });
   }
   return payoutsCache[key];
 }
@@ -4182,7 +4338,7 @@ function ttEnsureGifting(range) {
       }
       throw lastErr || new Error('Couldn’t load');
     })()
-      .then(d => { giftingCache[key] = { status: 'ok', data: d }; })
+      .then(d => { giftingCache[key] = { status: 'ok', data: d }; if (state.site === 'com' || state.site === 'all') { const md = getMonthData(); renderKPIs(md); renderDiscounts(md); } })
       .catch(err => {
         giftingCache[key] = { status: 'error', error: err.message, at: Date.now() };
         setTimeout(() => { if (state.site === 'com') renderTikTokShop(getMonthData()); }, 61000); // re-render → ttEnsureGifting tries again
@@ -4763,7 +4919,7 @@ function renderChannels(monthData) {
       return c.revenue_source === 'triple_whale' ? 'Triple Whale · spend from P&amp;L sheet'
         : c.revenue_source === 'mixed' ? 'Triple Whale + P&amp;L sheet · spend from sheet' : 'P&amp;L sheet · Avg order: Triple Whale';
     }
-    if (ch.collabs) return 'P&amp;L sheet · Avg order: Collabs codes';
+    if (ch.collabs || c.label === 'Collabs Affiliate') return c.spend_est ? 'P&amp;L sheet · spend est. 9% commission (sheet behind) · Avg order: Collabs codes' : 'P&amp;L sheet · Avg order: Collabs codes';
     if (ch.ttRevLive) return (ch.ttApi ? 'TikTok Affiliate Center' : 'TikTok order data (est.)') + ' · spend from P&amp;L sheet';
     if (ch.ttAff && ch.aov !== null) return 'P&amp;L sheet · Avg order: TikTok order data';
     if (c.plug) return 'Gross sales − all other channels';
@@ -4826,9 +4982,19 @@ function renderChannels(monthData) {
       <td>${c4Fig(c.revenue_actual || 0, c.revenue_goal, 'revenue', chip(ch, 'revenue', 'revenue'), isCurrent)}</td>
       <td>${c4Roas(c.roas, chip(ch, 'roas', 'roas'), c.roas_goal, 'Goal from the P&amp;L sheet (column C)')}</td>
       <td>${aovCell(ch, ch.collabs)}</td>
+      <td>${c4OrdersCell(ch)}</td>
       <td>${c4Share(c.revenue_ratio)}</td>
       ${c4PfCells(pf, id, open)}
-    </tr>${pf ? `<tr class="c4-pf-row" id="c4pf-${id}"${open ? '' : ' hidden'}><td colspan="8">${c4PfDetail(pf, c)}</td></tr>` : ''}`;
+    </tr>${pf ? `<tr class="c4-pf-row" id="c4pf-${id}"${open ? '' : ' hidden'}><td colspan="9">${c4PfDetail(pf, c)}</td></tr>` : ''}`;
+  };
+  // Orders per channel (2026-11-18, Tomer: "add number of orders on each
+  // channel"): the attributed orders behind Avg order; channels without an
+  // order count show revenue ÷ AOV, marked ≈.
+  const c4OrdersOf = (ch) => ch.aovOrders > 0 ? { n: ch.aovOrders, est: false } : (ch.pf && ch.pf.orders > 0 ? { n: ch.pf.orders, est: true } : null);
+  const c4OrdersCell = (ch) => {
+    if (chgLoading && !(ch.aovOrders > 0)) return '<span class="c4-dim">…</span>';
+    const o = c4OrdersOf(ch);
+    return o ? `<span${o.est ? ' title="Estimated: revenue ÷ the store’s average order value"' : ''}>${o.est ? '≈ ' : ''}${fmtVal(Math.round(o.n), 'number')}</span>` : '<span class="c4-dim">—</span>';
   };
   // Summary tiles (the whole section's strip and each group's).
   const tile = (label, valueHtml, chipHtml, extra) => `<div class="kpi-tile c4-tile"><div class="kpi-top"><span class="kpi-label">${label}</span>${chipHtml ? `<span class="c4-tchip"><span class="lbl">${cmpLbl}</span>${chipHtml}</span>` : ''}</div><div class="kpi-value">${valueHtml}</div>${extra}</div>`;
@@ -4848,7 +5014,7 @@ function renderChannels(monthData) {
   const grouped = C4_GROUPS.map(g => ({ ...g, chans: activeChannels.filter(c => g.labels.includes(c.label)) }));
   const otherChans = activeChannels.filter(c => !C4_GROUPS.some(g => g.labels.includes(c.label)));
   if (otherChans.length) grouped.push({ key: 'other', name: 'Other channels', chans: otherChans });
-  const theadHtml = `<thead><tr><th style="text-align:left">Channel</th><th>Spend vs budget</th><th>Revenue vs goal</th><th title="Return on ad spend: revenue ÷ spend">ROAS</th><th title="Average order value: channel revenue ÷ attributed orders">Avg order</th><th title="Channel revenue ÷ Gross Sales">% of Gross Sales</th><th title="Channel revenue minus returns, product cost, shipping &amp; fulfilment and the channel’s own spend — click a row to see its costs">Profit</th><th title="Profit ÷ channel revenue">Margin</th></tr></thead>`;
+  const theadHtml = `<thead><tr><th style="text-align:left">Channel</th><th>Spend vs budget</th><th>Revenue vs goal</th><th title="Return on ad spend: revenue ÷ spend">ROAS</th><th title="Average order value: channel revenue ÷ attributed orders">Avg order</th><th title="Orders attributed to the channel">Orders</th><th title="Channel revenue ÷ Gross Sales">% of Gross Sales</th><th title="Gross sales from the channel − product cost − shipping (orders without paid shipping) − ad spend — click a row to see its costs">Profit</th><th title="Profit ÷ the channel’s gross sales">Margin</th></tr></thead>`;
   const roasTile = (roas, goal) => {
     const back = roas !== null ? `Every ${sym()}1 spent brought back ${sym()}${roas.toFixed(2)}` : 'No spend this period';
     if (roas === null || !goal) return `<div class="pbar-pct c4-tile-sub">${back}</div>`;
@@ -4889,10 +5055,6 @@ function renderChannels(monthData) {
   const pfShipLines = pfCostLines(/shipping|^boxes$|pick/i);
   const pfShip = pfShipLines.reduce((t, o) => t + o.actual, 0);
   const pfPerOrder = pfOrders && pfShip ? pfShip / pfOrders : null;
-  const pfAgency = pfCostLines(/^PPC Agency Fee$/i).reduce((t, o) => t + o.actual, 0);
-  const pfGifting = pfCostLines(/^TikTok Gifting$/i).reduce((t, o) => t + o.actual, 0);
-  const PF_AGENCY = ['Google Ads', 'Meta Ads', 'TikTok Ads'];
-  const pfAgencyBase = activeChannels.filter(c => PF_AGENCY.includes(c.label)).reduce((t, c) => t + (c.spend_actual || 0), 0);
   const pfRf = chg && chg !== 'loading' && !chg.error ? chg.refunds : null;
   const pfRate = (v) => v && v.revenue > 0 ? v.refunds / v.revenue : null;
   const pfStoreRet = pfRf && pfRate(pfRf.store) !== null
@@ -4909,47 +5071,59 @@ function renderChannels(monthData) {
     if (!pfStoreRet) return null;
     return { r: pfStoreRet.r, src: pfStoreRet.src + (v && v.orders ? ` — only ${v.orders} order${v.orders === 1 ? '' : 's'} from this channel` : '') };
   };
-  // Sales tax / VAT: Triple Whale's order revenue includes it, so it comes
-  // off the rows whose revenue is Triple Whale's (Pixel) order revenue.
-  const PF_TW_PIXEL = ['Google Ads', 'TikTok Ads', 'Meta Ads', 'Microsoft Ads', 'RTB House', 'Criteo', 'ChatGPT Ads', 'Shop App'];
-  const pfTaxFor = (c, ch) => {
-    const att = !!ATTENTIVE_ROW_KEYS[c.label];
-    if (!pfRf || !(att ? ch.attRevFull : (ch.tw && PF_TW_PIXEL.includes(c.label)))) return null;
-    const v = pfRf.by_label[att ? 'Attentive' : c.label];
-    const use = v && v.orders >= 20 && v.revenue > 0 ? v : pfRf.store;
-    return use && use.revenue > 0 ? (use.taxes || 0) / use.revenue : null;
-  };
   const pfReady = !chgLoading && pfCogsRate !== null && pfPerOrder !== null;
+  // 2026-11-18 (Tomer: "make sure that the profit and the Margin is
+  // calculated as the gross sales from that channel - the product cost -
+  // shipping cost (if customer didn't pay for shipping) - spend ads for this
+  // order"; product cost = 20% of the channel's net sales):
+  //   gross    = the channel's revenue on Gross Sales' basis (before
+  //              discounts, tax and shipping) — revenue × gross ÷ order
+  //              revenue of the channel's Triple Whale orders (Last Click;
+  //              TikTok rows: TikTok Shop's; Organic is already gross;
+  //              Collabs / sheet rows without Triple Whale orders: as shown);
+  //   product  = 20% × net sales (gross − the channel's discounts − returns);
+  //   shipping = the orders where the customer paid no shipping × (boxes +
+  //              shipping + pick & pack ÷ all orders);
+  //   spend    = the channel's ad spend (Spend column);
+  //   margin   = profit ÷ gross.
+  const pfTwFor = (c) => {
+    if (!pfRf) return null;
+    const tt = c.label === 'TikTok Affiliates' || c.label === 'TikTok Organic';
+    const key = ATTENTIVE_ROW_KEYS[c.label] ? 'Attentive' : c.label;
+    const v = tt ? pfRf.tiktok_shop : pfRf.by_label[key];
+    return v && v.orders >= 20 && v.revenue > 0 ? v : null;
+  };
+  const pfStoreFree = pfRf && pfRf.store && pfRf.store.orders > 0 && typeof pfRf.store.free_ship_orders === 'number' ? pfRf.store.free_ship_orders / pfRf.store.orders : null;
   const pfCalc = (c, ch) => {
     if (!pfReady) return null;
     const R = c.revenue_actual || 0;
+    const v = c.plug ? null : pfTwFor(c);
+    const grossRate = v && v.gross > 0 ? v.gross / v.revenue : null;
+    const gross = c.plug ? R : (grossRate !== null ? R * grossRate : R);
+    const o = c.plug ? (pfRf && pfRf.by_label.Organic) : v;
+    const discRate = o && o.gross > 0 ? o.discounts / o.gross : (pfDisc !== null && pfGross ? pfDisc / pfGross : 0);
+    const disc = gross * discRate;
     const ret = pfRetFor(c.label);
-    const returns = ret ? R * ret.r : 0;
-    let disc = 0, discRate = null;
-    if (c.plug) {
-      const o = pfRf && pfRf.by_label.Organic;
-      discRate = o && o.gross > 0 ? o.discounts / o.gross : (pfDisc !== null && pfGross ? pfDisc / pfGross : null);
-      disc = discRate !== null ? R * discRate : 0;
-    }
-    const taxRate = pfTaxFor(c, ch);
-    const tax = taxRate ? R * taxRate : 0;
-    const product = Math.max(0, R - tax - disc - returns) * pfCogsRate;
+    const returns = ret ? gross * ret.r : 0;
+    const net = Math.max(0, gross - disc - returns);
+    const product = net * pfCogsRate;
     const estOrders = !(ch.aovOrders > 0);
     const orders = estOrders ? (pfAov ? R / pfAov : 0) : ch.aovOrders;
-    const ship = orders * pfPerOrder;
+    const src = o && o.orders > 0 && typeof o.free_ship_orders === 'number' ? o : null;
+    const freeShare = src ? src.free_ship_orders / src.orders : pfStoreFree;
+    const freeOrders = freeShare !== null ? orders * freeShare : orders;
+    const ship = freeOrders * pfPerOrder;
     const spend = c.spend_actual || 0;
-    const agency = PF_AGENCY.includes(c.label) && pfAgencyBase ? pfAgency * spend / pfAgencyBase : 0;
-    const gifting = c.label === 'TikTok Affiliates' ? pfGifting : 0;
-    const profit = R - tax - disc - returns - product - ship - spend - agency - gifting;
-    return { R, tax, taxRate, disc, discRate, returns, ret, product, orders, estOrders, ship, spend, agency, gifting, profit, margin: R ? profit / R : null };
+    const profit = gross - product - ship - spend;
+    return { R, gross, grossRate, disc, discRate, returns, ret, net, product, orders, estOrders, freeOrders, freeShare, freeFromChannel: !!src, ship, spend, profit, margin: gross ? profit / gross : null };
   };
   grouped.forEach(g => { g.chans.forEach((c, j) => { chsByKey[g.key][j].pf = pfCalc(c, chsByKey[g.key][j]); }); });
   const pfSum = (list) => {
     const ps = list.filter(Boolean);
     if (!ps.length) return null;
-    const t = { R: 0, tax: 0, disc: 0, returns: 0, product: 0, ship: 0, spend: 0, agency: 0, gifting: 0, profit: 0, orders: 0 };
+    const t = { R: 0, gross: 0, disc: 0, returns: 0, net: 0, product: 0, ship: 0, spend: 0, profit: 0, orders: 0, freeOrders: 0 };
     ps.forEach(p => Object.keys(t).forEach(k => { t[k] += p[k] || 0; }));
-    t.margin = t.R ? t.profit / t.R : null;
+    t.margin = t.gross ? t.profit / t.gross : null;
     return t;
   };
   const pfWhyBlank = pfCogsRate === null ? 'Net Sales or COGS for this period isn’t loaded yet'
@@ -4967,25 +5141,22 @@ function renderChannels(monthData) {
   };
   const pfShipWhat = [...new Set(pfShipLines.map(o => o.label.replace(/\s*-?\s*Shipping Cost$/i, ' shipping').replace(/ Fee$/i, '')))].join(', ');
   const c4PfDetail = (pf, c) => {
-    const pctOf = (v) => pf.R ? fmtVal(v / pf.R, 'percent') : '—';
-    const spendAll = pf.spend + pf.agency + pf.gifting;
-    const segs = [['tax', 'Sales tax / VAT', pf.tax], ['disc', 'Discounts', pf.disc], ['ret', 'Returns &amp; refunds', pf.returns], ['prod', 'Product cost', pf.product], ['ship', 'Shipping &amp; fulfilment', pf.ship], ['spend', 'Channel spend', spendAll], ['profit', 'Profit', Math.max(0, pf.profit)]].filter(x => x[2] > 0.5);
-    const denom = Math.max(pf.R, segs.reduce((t, x) => t + x[2], 0)) || 1;
-    const bar = `<div class="c4-pf-bar" role="img" aria-label="Where ${c4Name(c.label)}’s revenue goes">${segs.map(x => `<i class="pf-${x[0]}" style="width:${(x[2] / denom * 100).toFixed(2)}%" title="${x[1]}: ${fmtVal(x[2], 'currency-full')} (${pctOf(x[2])})"></i>`).join('')}</div>
+    const pctOf = (v) => pf.gross ? fmtVal(v / pf.gross, 'percent') : '—';
+    const segs = [['prod', 'Product cost', pf.product], ['ship', 'Shipping &amp; fulfilment', pf.ship], ['spend', 'Ad spend', pf.spend], ['profit', 'Profit', Math.max(0, pf.profit)]].filter(x => x[2] > 0.5);
+    const denom = Math.max(pf.gross, segs.reduce((t, x) => t + x[2], 0)) || 1;
+    const bar = `<div class="c4-pf-bar" role="img" aria-label="Where ${c4Name(c.label)}’s gross sales go">${segs.map(x => `<i class="pf-${x[0]}" style="width:${(x[2] / denom * 100).toFixed(2)}%" title="${x[1]}: ${fmtVal(x[2], 'currency-full')} (${pctOf(x[2])})"></i>`).join('')}</div>
       <div class="c4-pf-legend">${segs.map(x => `<span><i class="pf-${x[0]}"></i>${x[1]}</span>`).join('')}</div>`;
     const line = (cls, label, how, v, sign) => `<div class="c4-pf-line${cls ? ' ' + cls : ''}"><span class="c4-pf-lbl">${label}${how ? `<span class="c4-pf-how">${how}</span>` : ''}</span><span class="c4-pf-val">${sign}${fmtVal(Math.abs(v), 'currency-full')}</span><span class="c4-pf-pct">${pctOf(v)}</span></div>`;
     const spendHow = c.plug ? 'No spend on organic' : c.label === 'TikTok Affiliates' ? 'Affiliate commission, as in the Spend column'
-      : ATTENTIVE_ROW_KEYS[c.label] ? 'Attentive’s cost for this channel (P&amp;L sheet)' : c.label === 'Collabs Affiliate' ? 'Collabs commission (P&amp;L sheet)' : 'As in the Spend column';
+      : ATTENTIVE_ROW_KEYS[c.label] ? 'Attentive’s cost for this channel (P&amp;L sheet)' : c.label === 'Collabs Affiliate' ? 'Collabs commission, as in the Spend column' : 'As in the Spend column';
+    const grossHow = c.plug ? 'Gross Sales − every other channel (already before discounts)'
+      : pf.grossRate !== null ? `Revenue ${fmtVal(pf.R, 'currency-full')} × ${fmtVal(pf.grossRate, 'percent')} — gross sales ÷ order revenue of ${c.label === 'TikTok Affiliates' || c.label === 'TikTok Organic' ? 'TikTok Shop' : 'this channel’s'} orders in Triple Whale (before discounts, tax and shipping)`
+      : 'As in the Revenue column (no Triple Whale orders to convert it)';
     const lines = [
-      line('is-rev', 'Revenue', c.plug ? 'Gross Sales − every other channel (before discounts)' : 'As in the Revenue column', pf.R, ''),
-      pf.tax > 0.5 ? line('', 'Sales tax / VAT', `${fmtVal(pf.taxRate, 'percent')} — Triple Whale’s order revenue includes the tax customers paid`, pf.tax, '−') : '',
-      pf.disc > 0.5 ? line('', 'Discounts', `${fmtVal(pf.discRate, 'percent')} — Triple Whale’s organic &amp; direct orders’ discount rate`, pf.disc, '−') : '',
-      line('', 'Returns &amp; refunds', pf.ret ? `${fmtVal(pf.ret.r, 'percent')} refund rate — ${pf.ret.src}` : 'No refund rate for this period', pf.returns, '−'),
-      line('', 'Product cost', `${fmtVal(pfCogsRate, 'percent')} of this channel’s net sales (${fmtVal(Math.max(0, pf.R - pf.tax - pf.disc - pf.returns), 'currency-full')}: revenue after tax, discounts and returns) — the dashboard’s product-cost rule`, pf.product, '−'),
-      line('', 'Shipping &amp; fulfilment', `${fmtVal(Math.round(pf.orders), 'number')} orders${pf.estOrders ? ' (est.: revenue ÷ AOV)' : ''} × ${fmtVal(pfPerOrder, 'currency-cents')} per order — ${pfShipWhat} ÷ all orders`, pf.ship, '−'),
-      c.plug && !pf.spend ? '' : line('', 'Channel spend', spendHow, pf.spend, '−'),
-      pf.agency > 0.5 ? line('', 'PPC agency fee', `Its share of the PPC Agency Fee (${fmtVal(pfAgency, 'currency-full')}) by ad spend across Google, Meta and TikTok Ads`, pf.agency, '−') : '',
-      pf.gifting > 0.5 ? line('', 'TikTok gifting', 'Free samples sent to creators (Other Costs · TikTok Gifting)', pf.gifting, '−') : '',
+      line('is-rev', 'Gross sales', grossHow, pf.gross, ''),
+      line('', 'Product cost', `${fmtVal(pfCogsRate, 'percent')} of net sales ${fmtVal(pf.net, 'currency-full')} (gross − ${fmtVal(pf.disc, 'currency-full')} discounts${pf.discRate ? ' at ' + fmtVal(pf.discRate, 'percent') : ''} − ${fmtVal(pf.returns, 'currency-full')} returns${pf.ret ? ' at ' + fmtVal(pf.ret.r, 'percent') : ''})`, pf.product, '−'),
+      line('', 'Shipping &amp; fulfilment', `${fmtVal(Math.round(pf.freeOrders), 'number')} orders where the customer paid no shipping${pf.freeShare !== null ? ` (${fmtVal(pf.freeShare, 'percent')} of ${fmtVal(Math.round(pf.orders), 'number')} orders${pf.estOrders ? ', est.' : ''}${pf.freeFromChannel ? '' : ' — store average'})` : ''} × ${fmtVal(pfPerOrder, 'currency-cents')} per order — ${pfShipWhat} ÷ all orders`, pf.ship, '−'),
+      c.plug && !pf.spend ? '' : line('', 'Ad spend', spendHow, pf.spend, '−'),
       `<div class="c4-pf-line is-profit${pf.profit < 0 ? ' is-neg' : ''}"><span class="c4-pf-lbl">Profit</span><span class="c4-pf-val">${pf.profit < -0.5 ? '−' : ''}${fmtVal(Math.abs(pf.profit), 'currency-full')}</span><span class="c4-pf-pct">${pfMargin(pf.margin)}</span></div>`,
     ].join('');
     return `<div class="c4-pf-detail">${bar}<div class="c4-pf-lines">${lines}</div></div>`;
@@ -5037,6 +5208,7 @@ function renderChannels(monthData) {
       <td>${c4Fig(rv, rvG || null, 'revenue', chip(gch, 'revenue', 'revenue'), isCurrent)}</td>
       <td>${c4Roas(gRoas, chip(gch, 'roas', 'roas'), gRoasGoal, gRG.why)}</td>
       <td>${gch.loading ? '<span class="c4-dim">…</span>' : (gch.aov !== null ? `<span title="${aovWhy}">${fmtVal(gch.aov, 'currency-full')}</span>` : '<span class="c4-dim" title="No order counts for the channels in this group">—</span>')}</td>
+      <td>${(() => { const os = chs.map(c4OrdersOf).filter(Boolean); return os.length ? `${os.some(o => o.est) ? '≈ ' : ''}${fmtVal(Math.round(os.reduce((t, o) => t + o.n, 0)), 'number')}` : '<span class="c4-dim">—</span>'; })()}</td>
       <td>${c4Share(share)}</td>
       ${c4PfCells(gpf, null)}
     </tr>`;
@@ -5135,25 +5307,25 @@ function renderChannels(monthData) {
     const profitKpi = kpiAct('Profit');
     if (allPf) {
       const ttRet = pfRetFor('TikTok Affiliates');
-      const ovlProfit = c4Ovl > 0.5 ? c4Ovl * (1 - (ttRet ? ttRet.r : 0)) * (1 - pfCogsRate) - (pfAov ? c4Ovl / pfAov * pfPerOrder : 0) : 0;
+      const ovlProfit = c4Ovl > 0.5 ? c4Ovl - c4Ovl * (1 - (ttRet ? ttRet.r : 0)) * pfCogsRate - (pfAov ? c4Ovl / pfAov * pfPerOrder : 0) : 0;
       const chProfit = allPf.profit - ovlProfit;
-      const chRev = allPf.R - c4Ovl;
+      const chRev = allPf.gross - c4Ovl;
       const diff = profitKpi !== null ? profitKpi - chProfit : null;
       // Fixed costs: the Other Costs lines no channel is charged with (not
       // product cost, shipping / boxes / pick & pack, the PPC agency fee or
       // TikTok gifting); the rest is the estimate / attribution gap.
       let parts = null;
       if (diff !== null) {
-        const fixed = pfCostLines(/./).filter(o => !/product|shipping|^boxes$|pick|ppc agency|tiktok gifting/i.test(o.label)).reduce((t, o) => t + o.actual, 0);
+        const fixed = pfCostLines(/./).filter(o => !/product|shipping|^boxes$|pick/i.test(o.label)).reduce((t, o) => t + o.actual, 0);
         parts = { fixed, rest: -diff - fixed };
       }
       const partsHtml = parts ? `<div class="c4-recon-parts">
-          <span><b>${pfMoney(-parts.fixed)}</b> costs no channel causes (Other Costs: tools, development, SEO, customer service, Shopify apps, PR boxes, gratis…)</span>
+          <span><b>${pfMoney(-parts.fixed)}</b> costs no channel is charged with (Other Costs: PPC agency fee, TikTok gifting, tools, development, SEO, customer service, Shopify apps, PR boxes, gratis…)</span>
           <span><b>${pfMoney(-parts.rest)}</b> the gap between the channels’ figures and the books: revenue the channels claim beyond the store’s sales (their own attribution overlaps — impact.com, Snapchat, Pinterest and TikTok report their own conversions), discounts outside channel revenue (incl. TikTok-funded ones), the P&amp;L sheet’s marketing costs vs the spend here, and returns vs Shopify’s</span>
         </div>` : '';
       const reconWhy = 'Dashboard Profit − the channels’ profit: costs no single channel causes, plus the gap between the channels’ own figures and the books';
       recon = `<div class="c4-recon" aria-label="Profit from channels and the dashboard’s Profit">
-        <div class="c4-recon-item"><span class="c4-recon-lbl">Profit from channels</span><span class="c4-recon-val">${pfMoney(chProfit)}</span><span class="c4-recon-sub">${fmtVal(chRev ? chProfit / chRev : null, 'percent')} of channel revenue, after each channel’s own costs</span></div>
+        <div class="c4-recon-item"><span class="c4-recon-lbl">Profit from channels</span><span class="c4-recon-val">${pfMoney(chProfit)}</span><span class="c4-recon-sub">${fmtVal(chRev ? chProfit / chRev : null, 'percent')} of the channels’ gross sales, after product cost, shipping and ad spend</span></div>
         ${diff !== null ? `<span class="c4-recon-op" aria-hidden="true">${diff < 0 ? '−' : '+'}</span>
         <div class="c4-recon-item" title="${reconWhy}"><span class="c4-recon-lbl">Costs not tied to a channel &amp; other differences</span><span class="c4-recon-val">${fmtVal(Math.abs(diff), 'currency-full')}</span><span class="c4-recon-sub">Made up of the two lines below</span></div>
         <span class="c4-recon-op" aria-hidden="true">=</span>
@@ -5193,7 +5365,8 @@ function renderChannels(monthData) {
       <li><b>Groups</b> — Paid ads (Google, Meta, Snapchat, Pinterest, Shop App, Microsoft, TikTok Ads, ChatGPT Ads), Email, SMS &amp; retargeting (Attentive, RTB House — Criteo until September 2026), Affiliates (Collabs, impact.com, TikTok Affiliates) and Organic. Each group is its own block: four tiles (Spend, Revenue, Overall ROAS, Avg order value); “Show breakdown” opens its channels and total row. Organic is one line — Revenue and Avg order value only: its revenue is Gross Sales minus every other channel (so it includes TikTok Organic, which isn’t shown on its own), and its Avg order value comes from Triple Whale’s organic channels (Organic &amp; Social + Direct): their revenue ÷ their orders, the same method as the other channels. The group’s spend (total cost) and revenue add up its channels; Overall ROAS = group revenue ÷ group spend; Avg order value = revenue ÷ orders of the group’s channels that have an order count; its change adds up the channels that have that comparison, shown when they make up at least 80% of the group. The <b>All channels</b> block at the top shows the totals for every channel: Total Marketing Spend, Revenue from channels (equals Gross Sales), Overall ROAS, the top revenue channel and Avg order. <b>Avg order</b> there is Shopify’s AOV — (Gross Sales − Discounts) ÷ orders — the same as AOV in Key Metrics. Each group’s Avg order value is the revenue ÷ orders Triple Whale attributes to that group’s channels.</li>
       ${monthData.c4_gross ? `<li><b>Organic</b> — Gross Sales (${fmtVal(monthData.c4_gross, 'currency-full')}, as in Key Metrics) minus every other channel above, so the Total always equals Gross Sales.${monthData.c4_tt_overlap > 0.5 ? ` TikTok Ads and TikTok Affiliates both include ${fmtVal(monthData.c4_tt_overlap, 'currency-full')} of TikTok orders (ads on a creator’s content) — counted once in Organic and in the Total.` : ''} The P&amp;L sheet’s Organic row works the same way, but several channels here come live from Triple Whale rather than from the sheet, so it’s recomputed on the dashboard’s own figures${(() => { const o = monthData.channels.find(c => c.plug); return o && o.sheet_revenue != null ? ` (the sheet’s Organic figure: ${fmtVal(o.sheet_revenue, 'currency-full')})` : ''; })()}.${state.month === DATA.meta.current_month ? ' For the month in progress, channels from the sheet run through its last update, so Organic also picks up the days the sheet hasn’t reached yet.' : ''}</li>` : ''}
       <li><b>Changes (switch: vs last year / vs last ${periodWord})</b> — Triple Whale channels compare the same dates last year and ${prevAvailable ? 'in the previous ' + periodWord : '(no previous period here)'}. Channels from the P&amp;L sheet (Organic, TikTok Affiliates, TikTok Organic, Collabs, Attentive…) have no YoY: the sheet’s 2025 columns only hold Gross and Net Sales, not channels. Their ${momLabel()} compares the previous closed ${periodWord} on this dashboard${isCurMonth ? `; for the month in progress the sheet has one month-to-date figure, so it compares per day — this month’s figure ÷ the days it covers against last month’s full figure ÷ its days (ROAS as is). The days covered come from the sheet’s own Gross Sales as a share of Shopify’s so far${pace ? ` (${Math.round(pace.share * 100)}% of ${pace.elapsed} days ≈ ${pace.curDays.toFixed(1)} days)` : ''}. Those chips have a dotted underline; hover one for details` : ''}. The Total’s changes and Avg order cover the Triple Whale channels. Spend changes are grey — more spend isn’t good or bad by itself. Hover a “—” to see why it’s blank.</li>
-      <li><b>Profit / Margin</b> — what each channel’s orders leave after their own costs: revenue − sales tax / VAT (only where the revenue is Triple Whale’s order revenue, which includes it) − returns &amp; refunds (the channel’s refund rate in Triple Whale, Last Click: refunds ÷ order revenue; TikTok Affiliates use TikTok Shop’s; under 20 orders, the store’s rate) − product cost (${pfCogsRate !== null ? fmtVal(pfCogsRate, 'percent') : '20%'} of the channel’s net sales — revenue after tax, discounts and returns — the same rule as the COGS tile: 20% of Net Sales) − shipping &amp; fulfilment (the channel’s orders × ${pfPerOrder !== null ? fmtVal(pfPerOrder, 'currency-cents') : 'the cost'} per order: boxes, shipping and pick &amp; pack in Other Costs ÷ all orders; channels without an order count use revenue ÷ AOV) − the channel’s spend. Google, Meta and TikTok Ads also carry their share of the PPC Agency Fee (by spend), TikTok Affiliates the TikTok Gifting cost, and Organic its discounts (its revenue is Gross Sales − the other channels, before discounts). Margin = profit ÷ revenue. Click a channel’s row to see its costs. The strip under the summary tiles adds the channels up and shows what’s left to reach Profit in Key Metrics: costs no single channel causes, the P&amp;L sheet’s marketing costs vs the spend here, and revenue the channels claim beyond the store’s sales (several channels — impact.com, Snapchat, Pinterest, TikTok — report their own conversions, which overlap; Organic is Gross Sales − the rest). Payment processing and TikTok Shop platform fees aren’t included.</li>
+      <li><b>Orders</b> — the channel’s attributed orders (the same count as Avg order; ≈ = estimated as revenue ÷ AOV).</li>
+      <li><b>Profit / Margin</b> — gross sales from the channel − product cost − shipping (only the orders where the customer paid no shipping) − the channel’s ad spend. Gross sales = the channel’s revenue on Gross Sales’ basis (before discounts, tax and shipping: revenue × gross ÷ order revenue of the channel’s Triple Whale orders, Last Click; TikTok rows use TikTok Shop’s; Organic is already gross; rows without Triple Whale orders as shown). Product cost = ${pfCogsRate !== null ? fmtVal(pfCogsRate, 'percent') : '20%'} of the channel’s net sales (gross − its discounts − its returns), the dashboard’s COGS rule. Shipping = the channel’s orders without paid shipping (Triple Whale’s share for the channel, else the store’s) × ${pfPerOrder !== null ? fmtVal(pfPerOrder, 'currency-cents') : 'the cost'} per order (boxes, shipping and pick &amp; pack in Other Costs ÷ all orders). Margin = profit ÷ gross sales. Click a channel’s row to see its costs. The strip under the summary tiles adds the channels up and shows what’s left to reach Profit in Key Metrics (costs no channel is charged with, like the PPC agency fee and TikTok gifting, and the gap between the channels’ own figures and the books).</li>
       ${attNote}
       ${monthData.channels_note ? `<li><b>Sources</b> — ${monthData.channels_note}</li>` : ''}
       ${chg && chg.partial ? '<li>Some sites’ Triple Whale data didn’t load, so the changes cover the rest.</li>' : ''}
@@ -7008,65 +7181,92 @@ const discGroupOpen = {};
 // discount in exactly one item (backend discount_split, src/aggregate.js).
 // Months stored before it show the older program table until they refresh.
 const splitOpen = {};
-// TikTok platform discounts as their own bucket (2026-11-16, Tomer: "on
-// Discounts Breakdown the total is not equal to the total discount, find
-// what is missing and add it to the breakdown"): earlier the same day the
-// line was taken out of Regular ("Remove the TikTok platform discounts (TikTok
-// pays)"), which left it out of the Total. It's back as a bucket of its own,
-// after Regular: Regular keeps ND's own discounts only (its orders / gross
-// without the orders that had only a platform voucher) and the Total is the
-// whole period again.
-function discountSplitPlatformBucket(sp0) {
-  let hit = null;
-  (sp0.buckets || []).forEach(b => { const i = (b.items || []).find(x => x.key === 'tiktok_platform'); if (i && !hit) hit = { b, i }; });
-  if (!hit) return { sp: sp0, platform: null };
-  const P = hit.i;
-  const rv = P.discount_value || 0;
-  const oo = P.only_orders || 0, og = P.only_orders_gross || 0, dg = P.only_discounted_gross || 0;
-  const less = (x) => ({
-    ...x,
-    discount_value: (x.discount_value || 0) - rv,
-    orders: Math.max(0, (x.orders || 0) - oo),
-    orders_gross: typeof x.orders_gross === 'number' ? x.orders_gross - og : x.orders_gross,
-    discounted_gross: typeof x.discounted_gross === 'number' ? x.discounted_gross - dg : x.discounted_gross,
-  });
-  const pb = { key: 'tiktok_platform', label: 'TikTok platform discounts (TikTok pays)', desc: 'TikTok’s vouchers on TikTok Shop orders — TikTok pays them back in its settlement',
-    discount_value: rv, orders: P.orders || 0, orders_gross: P.orders_gross, discounted_gross: P.discounted_gross, items: [] };
-  const buckets = [];
-  sp0.buckets.forEach(b => { if (b !== hit.b) { buckets.push(b); return; } buckets.push({ ...less(b), items: b.items.filter(i => i !== P) }, pb); });
-  return { sp: { ...sp0, buckets }, platform: pb };
+// The Discounts Breakdown as shown (2026-11-18, Tomer's list of fixes):
+//  - TikTok platform discounts (TikTok pays) out of Regular and out of the
+//    Total, shown under the Total line ("move TikTok platform discounts …
+//    below the Total line and don't include it inside"); the orders that had
+//    only a platform voucher (and their gross) come off Regular and the Total.
+//  - Free shipping isn't shown at all ("Remove Free shipping from Regular and
+//    don't show it at all") — its discount comes off Regular and the Total.
+//  - Glow / Glam tier gifts move from Yotpo Loyalty to Gifts: GWP to customers
+//    ("all the gifts should be under Gifts: GWP to customers").
+//  - TikTok creator samples = "Samples (TikTok Gifting)" in TikTok costs
+//    ("should be the same number") — ND.COM / All Sites, once that figure has
+//    loaded for the period (/api/tiktok-shop/gifting).
+// The Total is the buckets added up, and the Goal Tracker's Discounts / %
+// Discount Ratio boxes show the same Total ("the Total line should be equal
+// to the total discounts data"; Tomer chose to change Key Metrics too).
+// monthData itself isn't changed (the TikTok section reads the raw split).
+function discountView(md) {
+  const sp0 = md && md.discount_split;
+  if (!sp0 || !Array.isArray(sp0.buckets)) return null;
+  const num = v => (typeof v === 'number' ? v : 0);
+  const clone = b => ({ ...b, items: (b.items || []).map(i => ({ ...i })) });
+  const buckets = sp0.buckets.map(clone);
+  const total = { ...sp0.total };
+  const sub = (x, i, opts = {}) => {
+    x.discount_value = num(x.discount_value) - num(i.discount_value);
+    if (typeof x.discounted_gross === 'number') x.discounted_gross -= num(opts.dg !== undefined ? opts.dg : i.discounted_gross);
+    if (opts.orders !== undefined) x.orders = Math.max(0, num(x.orders) - opts.orders);
+    if (opts.og !== undefined && typeof x.orders_gross === 'number') x.orders_gross -= opts.og;
+  };
+  const take = (key) => {
+    for (const b of buckets) { const k = b.items.findIndex(i => i.key === key); if (k >= 0) { const [it] = b.items.splice(k, 1); return { b, it }; } }
+    return null;
+  };
+  // TikTok platform discounts.
+  let platform = null;
+  const p = take('tiktok_platform');
+  if (p) {
+    const P = p.it;
+    const o = { orders: P.only_orders || 0, og: P.only_orders_gross || 0, dg: P.only_discounted_gross || 0 };
+    sub(p.b, P, o); sub(total, P, o);
+    platform = { ...P, label: 'TikTok platform discounts (TikTok pays)' };
+  }
+  // Free shipping — hidden.
+  const fs = take('free_shipping');
+  if (fs) { sub(fs.b, fs.it); sub(total, fs.it); }
+  // Tier gifts → Gifts: GWP to customers.
+  const gwp = buckets.find(b => b.key === 'gwp');
+  if (gwp) {
+    ['glow_gift', 'glam_gift'].forEach(k => {
+      const t = take(k);
+      if (!t || t.b === gwp) { if (t) t.b.items.push(t.it); return; }
+      sub(t.b, t.it, { orders: num(t.it.orders), og: num(t.it.orders_gross) });
+      gwp.discount_value = num(gwp.discount_value) + num(t.it.discount_value);
+      gwp.orders = num(gwp.orders) + num(t.it.orders);
+      if (typeof gwp.discounted_gross === 'number') gwp.discounted_gross += num(t.it.discounted_gross);
+      if (typeof gwp.orders_gross === 'number') gwp.orders_gross += num(t.it.orders_gross);
+      gwp.items.push(t.it);
+    });
+  }
+  // TikTok creator samples = Samples (TikTok Gifting) from TikTok costs.
+  let creator = null;
+  const range = ttPeriodRange();
+  if ((state.site === 'com' || state.site === 'all') && range) {
+    const ge = ttEnsureGifting(range);
+    const g = ge && ge.status === 'ok' && ge.data && typeof ge.data.cost === 'number' ? ge.data : null;
+    const tb = buckets.find(b => b.key === 'tiktok_creators');
+    const ti = tb && tb.items.find(i => i.key === 'tiktok_samples');
+    creator = { pending: !!ge && ge.status === 'loading', cost: g ? g.cost : null, retail: ti ? num(ti.discount_value) : null };
+    if (g && ti) {
+      const delta = g.cost - num(ti.discount_value);
+      ti.discount_value = g.cost; ti.retail_value = creator.retail;
+      tb.discount_value = num(tb.discount_value) + delta;
+      total.discount_value = num(total.discount_value) + delta;
+    }
+  }
+  total.discount_value = buckets.reduce((s, b) => s + num(b.discount_value), 0);
+  return { sp: { ...sp0, buckets, total }, platform, creator, total: total.discount_value };
 }
 function renderDiscountSplit(monthData) {
-  // TikTok platform discounts: out of Regular, in a bucket of their own
-  // (2026-11-16, see discountSplitPlatformBucket). monthData itself isn't
-  // changed (the TikTok section still reads the split).
-  const { sp } = discountSplitPlatformBucket(monthData.discount_split);
+  const view = discountView(monthData);
+  const { sp, platform, creator } = view;
   const el = document.getElementById('section-6');
-  // Total = Key Metrics' Discounts (2026-11-04, Tomer: "make sure that the
-  // total line will be equal to the total Discounts from the first section").
-  // That figure is Shopify's sales report; the buckets come from the orders
-  // themselves, which differ from it by about 1% (orders voided before
-  // payment, order edits, sale-date vs order-date timing) — that difference
-  // is its own line so the column still adds up.
-  // 2026-11-04 (Tomer: "the discount value should be calculated from the
-  // retail price"): the buckets are valued at each product's retail price in
-  // Shopify (discount_value); order_value is the same discounts at the order's
-  // own prices — what Key Metrics counts. The adjustment line keeps the
-  // order-price figures tied to Key Metrics; the Total = Key Metrics + the
-  // retail value above the order prices.
-  const splitSum = sp.total.discount_value || 0;
-  const km = typeof monthData.discounts_total_abs === 'number' ? Math.abs(monthData.discounts_total_abs) : null;
-  // Total = Key Metrics' Discounts exactly (2026-11-16, Tomer: "the total is
-  // not equal to the total discount"). The buckets are at retail prices; the
-  // retail value above the order prices had its own line until Tomer asked
-  // the same day to "hide the Retail value above the order prices" — it's now
-  // inside the Shopify report adjustment, so buckets + that line = the Total.
-  // 2026-11-16, later (Tomer: "Hide in the discount breakdown the Shopify
-  // report adjustment line"; he chose "Total = sum of buckets"): no adjustment
-  // line — the Total is the buckets added up (at retail prices); its subtitle
-  // gives Key Metrics' Discounts and the difference.
-  const adj = km !== null ? splitSum - km : 0;
-  const tot = splitSum;
+  // Total = Key Metrics' Discounts (2026-11-04) → buckets added up (2026-11-16)
+  // → since 2026-11-18 the Goal Tracker's Discounts box shows this same Total
+  // (see discountView), so the two are equal again.
+  const tot = view.total;
   const gross = monthData.discounts_total_gross || sp.total.gross_sales || 0;
   const pct = v => fmtVal(v, 'percent');
   const ofDisc = v => tot ? pct((v || 0) / tot) : '—';
@@ -7076,10 +7276,11 @@ function renderDiscountSplit(monthData) {
   // was taken off (Pro Artist → 30%, samples and gifts → 100%).
   const ratio = x => typeof x.discounted_gross === 'number' && x.discounted_gross > 0 ? pct((x.discount_value || 0) / x.discounted_gross) : '—';
   // Gross Sales column (2026-11-04): the gross sales of the whole orders that
-  // got a discount from the bucket / item (Tomer: "the gross sales and the
-  // discount are the same, fix it" — the discounted items alone equal the
-  // discount for free samples / gifts). Months stored before it show "—".
+  // got a discount from the bucket / item. Months stored before it show "—".
   const gs = x => typeof x.orders_gross === 'number' ? fmtVal(x.orders_gross, 'currency-full') : '—';
+  const itemNote = i => i.key === 'tiktok_samples' && typeof i.retail_value === 'number'
+    ? ` <span style="color:var(--text-muted);font-size:10px">(product cost, as in TikTok costs · retail ${fmtVal(i.retail_value, 'currency-full')})</span>`
+    : (i.key === 'tiktok_samples' && creator && creator.pending ? ' <span style="color:var(--text-muted);font-size:10px">(retail — loading TikTok costs’ figure…)</span>' : '');
   let body = '';
   sp.buckets.forEach(b => {
     const open = !!splitOpen[b.key];
@@ -7093,7 +7294,7 @@ function renderDiscountSplit(monthData) {
       <td><strong>${n(b.orders)}</strong></td>
       <td><strong>${ofGross(b.discount_value)}</strong></td>
     </tr>` + items.map(i => `<tr class="disc-prog" data-group="${b.key}"${open ? '' : ' hidden'}>
-      <td style="padding-left:28px">${escText(i.label)}</td>
+      <td style="padding-left:28px">${escText(i.label)}${itemNote(i)}</td>
       <td>${gs(i)}</td>
       <td>${fmtVal(i.discount_value || 0, 'currency-full')}</td>
       <td>${ratio(i)}</td>
@@ -7103,7 +7304,7 @@ function renderDiscountSplit(monthData) {
     </tr>`).join('');
   });
   const totalRow = `<tr class="total-row">
-      <td>Total<div style="font-size:10px;color:var(--text-muted);font-weight:500">${km === null ? '' : Math.abs(adj) >= 0.5 ? 'Discounts in Key Metrics ' + fmtVal(km, 'currency-full') + ' ' + (adj > 0 ? '+ ' : '− ') + fmtVal(Math.abs(adj), 'currency-full') + ' (retail prices vs order prices, Shopify’s report vs the orders) · ' : '= Discounts in Key Metrics · '}each order once</div></td>
+      <td>Total<div style="font-size:10px;color:var(--text-muted);font-weight:500">= Discounts in Key Metrics · each order once</div></td>
       <td>${gs(sp.total)}</td>
       <td>${fmtVal(tot, 'currency-full')}</td>
       <td>${ratio(sp.total)}</td>
@@ -7111,11 +7312,20 @@ function renderDiscountSplit(monthData) {
       <td>${n(sp.total.orders)}</td>
       <td>${ofGross(tot)}</td>
     </tr>`;
+  const platformRow = platform && Math.abs(platform.discount_value || 0) >= 0.005 ? `<tr class="disc-group disc-outside">
+      <td><strong>TikTok platform discounts (TikTok pays)</strong><div style="font-size:10px;color:var(--text-muted);font-weight:500">Not in the Total — TikTok’s vouchers on TikTok Shop orders, paid back to ND in TikTok’s settlement</div></td>
+      <td>${gs(platform)}</td>
+      <td>${fmtVal(platform.discount_value || 0, 'currency-full')}</td>
+      <td>${ratio(platform)}</td>
+      <td>—</td>
+      <td>${n(platform.orders)}</td>
+      <td>${ofGross(platform.discount_value)}</td>
+    </tr>` : '';
   el.innerHTML = `<table class="dtable">
     <thead><tr><th style="text-align:left">Bucket</th><th title="Gross sales of the whole orders that got a discount from this bucket / item">Gross Sales</th><th title="At each product's retail price in Shopify (compare-at price when set, otherwise its price)">Discount $</th><th title="Discount $ ÷ the gross sales of the items it was taken off (Pro Artist → 30%, samples and gifts → 100%)">Discount Ratio</th><th>% of Discounts</th><th title="Orders that got a discount from this bucket / item">Orders</th><th title="Discount $ ÷ the period's store-wide Gross Sales">% of Gross Sales</th></tr></thead>
-    <tbody>${body}${totalRow}</tbody>
+    <tbody>${body}${totalRow}${platformRow}</tbody>
   </table>
-  <div style="margin-top:10px;font-size:11px;color:var(--text-muted)">${monthData.discounts_note ? escText(monthData.discounts_note) + ' ' : ''}Every product discount in Shopify for the period (TikTok Shop orders included; shipping discounts aren't part of Shopify's Discounts), read discount by discount — each discount counts in exactly one item, so the items add up to their bucket and the buckets to the Total. Click a bucket to open its items. Discount Ratio = Discount $ ÷ the gross sales of the items it was taken off (Pro Artist → 30%, samples and gifts → 100%). Orders: an order with discounts from two buckets is in both; the Total counts it once. Samples: Free Sample on site orders, one line per product given as a sample (months synced before 5 Nov show one “Free Sample” line until they re-sync). Gifts: GWP: free gifts and the free makeup bag. Gifts: TikTok creators: TikTok creator samples ("Free sample" on TikTok orders). Yotpo Loyalty: points redemptions (8-character upper-case fixed-amount codes in multiples of $0.10 — 10 points = $1), the Glow / Glam tier gifts, Birthday (any BDAY… code) and Refer a friend (REF…) codes. Sales: one line per sale in the "Evergreen Discounts Tags" sheet (the sale's discounts on orders carrying its tag)${sp.sale_tags_source === 'built-in' ? ' — the sheet couldn’t be read, so the sale list is the copy saved on 15 Nov 2026' : ''}; "Other % discounts" are percentage discounts on orders with no sale tag. Regular: TikTok seller discounts (ND pays); TikTok's platform vouchers (TikTok pays them back in its settlement) are their own bucket, "TikTok platform discounts (TikTok pays)" — Shopify gets both as one discount per TikTok order, so the split follows TikTok's own order data for the period${sp.tiktok_funding && sp.tiktok_funding.source !== 'tiktok_orders' ? ' (not available for this period yet, so Regular still shows both together)' : ''}; Attentive's single-use codes, influencer / affiliate / campaign codes (incl. Collabs), Pro Artist, BA, bundles / sets, free shipping, manual discounts and other offers. Values are at each product's retail price in Shopify (its compare-at price when set, otherwise its price): when a discounted item came in below that on the order (e.g. a TikTok sample at $0), it's counted at retail. Gross Sales = the gross sales of the whole orders that got a discount from the bucket / item (an order in two buckets is in both; the Total counts it once). Discount Ratio = Discount $ ÷ the gross of the discounted items only. Total = the buckets added up (at retail prices). It's a little above Key Metrics' Discounts (Shopify's sales report, at order prices) — mostly TikTok creator samples counted at retail instead of $0, plus orders voided before payment, order edits and sale-date timing; the Total's subtitle gives the difference.</div>`;
+  <div style="margin-top:10px;font-size:11px;color:var(--text-muted)">${monthData.discounts_note ? escText(monthData.discounts_note) + ' ' : ''}Every product discount in Shopify for the period (TikTok Shop orders included; shipping discounts aren't part of Shopify's Discounts), read discount by discount — each discount counts in exactly one item, so the items add up to their bucket and the buckets to the Total. Click a bucket to open its items. Discount Ratio = Discount $ ÷ the gross sales of the items it was taken off (Pro Artist → 30%, samples and gifts → 100%). Orders: an order with discounts from two buckets is in both; the Total counts it once. Samples: Free Sample on site orders, one line per sample product at its retail price in Shopify (the sample SKUs are priced $5 / €5). Gifts: GWP to customers: free gifts (incl. the sheet's gift tags), the free makeup bag and the Glow / Glam tier gifts. Gifts: TikTok creators: TikTok creator samples${state.site === 'com' || state.site === 'all' ? ' — the same figure as “Samples (TikTok Gifting)” in TikTok costs (the products’ cost, 20% of their price), once it has loaded' : ''}. Yotpo Loyalty: points redemptions (8-character upper-case fixed-amount codes in multiples of $0.10 — 10 points = $1), Birthday (any BDAY… code) and Refer a friend (REF…) codes. Sales: one line per sale in the "Evergreen Discounts Tags" sheet (the sale's discounts on orders carrying its tag)${sp.sale_tags_source === 'built-in' ? ' — the sheet couldn’t be read, so the sale list is the copy saved in the dashboard' : ''}; "Other % discounts" are percentage discounts on orders with no sale tag. Regular: TikTok seller discounts (ND pays)${sp.tiktok_funding && sp.tiktok_funding.source !== 'tiktok_orders' ? ' — TikTok’s seller / platform split isn’t available for this period yet, so the line shows both together' : ''}, Attentive's single-use codes, influencer / affiliate / campaign codes (incl. Collabs), Pro Artist, BA, bundles / sets, manual discounts and other offers; free-shipping discounts aren't shown. TikTok platform discounts (TikTok pays): TikTok's vouchers on TikTok Shop orders — shown under the Total and not included in it (Shopify gets them with the seller discounts as one discount per TikTok order; the split follows TikTok's own order data). Values are at each product's retail price in Shopify (its compare-at price when set, otherwise its price). Gross Sales = the gross sales of the whole orders that got a discount from the bucket / item (an order in two buckets is in both; the Total counts it once). Total = the buckets added up — the same figure as the Discounts box in the Goal Tracker.</div>`;
   el.querySelectorAll('.disc-toggle').forEach(btn => btn.addEventListener('click', () => {
     const k = btn.dataset.group;
     splitOpen[k] = !splitOpen[k];
