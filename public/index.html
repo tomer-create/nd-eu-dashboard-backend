@@ -5019,7 +5019,7 @@ function renderChannels(monthData) {
   const grouped = C4_GROUPS.map(g => ({ ...g, chans: activeChannels.filter(c => g.labels.includes(c.label)) }));
   const otherChans = activeChannels.filter(c => !C4_GROUPS.some(g => g.labels.includes(c.label)));
   if (otherChans.length) grouped.push({ key: 'other', name: 'Other channels', chans: otherChans });
-  const theadHtml = `<thead><tr><th style="text-align:left">Channel</th><th>Spend vs budget</th><th>Revenue vs goal</th><th title="Return on ad spend: revenue ÷ spend">ROAS</th><th title="Average order value: channel revenue ÷ attributed orders">Avg order</th><th title="Orders attributed to the channel">Orders</th><th title="Channel revenue ÷ Gross Sales">% of Gross Sales</th><th title="Gross sales from the channel − product cost − shipping (orders without paid shipping) − ad spend — click a row to see its costs">Profit</th><th title="Profit ÷ the channel’s gross sales">Margin</th></tr></thead>`;
+  const theadHtml = `<thead><tr><th style="text-align:left">Channel</th><th>Spend vs budget</th><th>Revenue vs goal</th><th title="Return on ad spend: revenue ÷ spend">ROAS</th><th title="Average order value: channel revenue ÷ attributed orders">Avg order</th><th title="Orders attributed to the channel">Orders</th><th title="Channel revenue ÷ Gross Sales">% of Gross Sales</th><th title="Revenue × 0.8 − orders − ad spend — click a row to see the lines">Profit</th><th title="Profit ÷ revenue">Margin</th></tr></thead>`;
   const roasTile = (roas, goal) => {
     const back = roas !== null ? `Every ${sym()}1 spent brought back ${sym()}${roas.toFixed(2)}` : 'No spend this period';
     if (roas === null || !goal) return `<div class="pbar-pct c4-tile-sub">${back}</div>`;
@@ -5050,83 +5050,36 @@ function renderChannels(monthData) {
   //   channels, i.e. before discounts (Triple Whale's organic discount rate).
   const kpiAct = (l) => { const k = (monthData.kpis || []).find(x => x.label === l); return k && !k.no_data && typeof k.actual === 'number' ? k.actual : null; };
   const pfGross = monthData.c4_gross || kpiAct('Gross Sales');
-  const pfCogs = kpiAct('COGS'), pfOrders = kpiAct('Number of Orders'), pfDisc = kpiAct('Discounts'), pfRet = kpiAct('Returns');
+  const pfCogs = kpiAct('COGS'), pfOrders = kpiAct('Number of Orders'), pfDisc = kpiAct('Discounts');
   // Product cost: the dashboard's rule, 20% of Net Sales (2026-11-16) — on
   // each channel's own net sales (revenue after tax, discounts and returns).
   const pfNet = kpiAct('Net Sales');
   const pfCogsRate = pfNet && pfCogs !== null ? pfCogs / pfNet : null;
   const pfAov = pfOrders && pfGross ? (pfGross - (pfDisc || 0)) / pfOrders : null;
   const pfCostLines = (re) => (monthData.other_costs || []).filter(o => !o.no_data && re.test(o.label) && (o.actual || 0) > 0);
-  const pfShipLines = pfCostLines(/shipping|^boxes$|pick/i);
-  const pfShip = pfShipLines.reduce((t, o) => t + o.actual, 0);
-  const pfPerOrder = pfOrders && pfShip ? pfShip / pfOrders : null;
-  const pfRf = chg && chg !== 'loading' && !chg.error ? chg.refunds : null;
-  const pfRate = (v) => v && v.revenue > 0 ? v.refunds / v.revenue : null;
-  const pfStoreRet = pfRf && pfRate(pfRf.store) !== null
-    ? { r: pfRate(pfRf.store), src: 'store average (all Triple Whale orders)' }
-    : (pfRet !== null && pfGross ? { r: pfRet / pfGross, src: 'store average (Returns ÷ Gross Sales)' } : null);
-  const pfRetFor = (label) => {
-    const tt = label === 'TikTok Affiliates' || label === 'TikTok Organic';
-    const key = ATTENTIVE_ROW_KEYS[label] ? 'Attentive' : label;
-    const v = !pfRf ? null : tt ? pfRf.tiktok_shop : pfRf.by_label[key];
-    if (v && v.orders >= 20 && pfRate(v) !== null) {
-      const what = tt ? 'TikTok Shop orders' : key === 'Attentive' ? 'all Attentive orders' : key === 'Organic' ? 'organic &amp; direct orders' : 'this channel’s orders';
-      return { r: pfRate(v), src: `${what} in Triple Whale (${fmtVal(v.orders, 'number')} orders)` };
-    }
-    if (!pfStoreRet) return null;
-    return { r: pfStoreRet.r, src: pfStoreRet.src + (v && v.orders ? ` — only ${v.orders} order${v.orders === 1 ? '' : 's'} from this channel` : '') };
-  };
-  const pfReady = !chgLoading && pfCogsRate !== null && pfPerOrder !== null;
-  // 2026-11-18 (Tomer: "make sure that the profit and the Margin is
-  // calculated as the gross sales from that channel - the product cost -
-  // shipping cost (if customer didn't pay for shipping) - spend ads for this
-  // order"; product cost = 20% of the channel's net sales):
-  //   gross    = the channel's revenue on Gross Sales' basis (before
-  //              discounts, tax and shipping) — revenue × gross ÷ order
-  //              revenue of the channel's Triple Whale orders (Last Click;
-  //              TikTok rows: TikTok Shop's; Organic is already gross;
-  //              Collabs / sheet rows without Triple Whale orders: as shown);
-  //   product  = 20% × net sales (gross − the channel's discounts − returns);
-  //   shipping = the orders where the customer paid no shipping × (boxes +
-  //              shipping + pick & pack ÷ all orders);
-  //   spend    = the channel's ad spend (Spend column);
-  //   margin   = profit ÷ gross.
-  const pfTwFor = (c) => {
-    if (!pfRf) return null;
-    const tt = c.label === 'TikTok Affiliates' || c.label === 'TikTok Organic';
-    const key = ATTENTIVE_ROW_KEYS[c.label] ? 'Attentive' : c.label;
-    const v = tt ? pfRf.tiktok_shop : pfRf.by_label[key];
-    return v && v.orders >= 20 && v.revenue > 0 ? v : null;
-  };
-  const pfStoreFree = pfRf && pfRf.store && pfRf.store.orders > 0 && typeof pfRf.store.free_ship_orders === 'number' ? pfRf.store.free_ship_orders / pfRf.store.orders : null;
+  // 2026-11-18, later (Tomer: "change profit formula to Profit = revenue *
+  // 0.8 - orders - ads spend"; asked what "orders" subtracts, he said "stick
+  // with the formula i gave you"): Profit = Revenue column × 0.8 − the
+  // channel's order count − its ad spend; Margin = profit ÷ revenue. It needs
+  // only the channel's own figures.
+  const PF_REV_KEEP = 0.8;
+  const pfReady = !chgLoading;
   const pfCalc = (c, ch) => {
     if (!pfReady) return null;
     const R = c.revenue_actual || 0;
-    const v = c.plug ? null : pfTwFor(c);
-    const grossRate = v && v.gross > 0 ? v.gross / v.revenue : null;
-    const gross = c.plug ? R : (grossRate !== null ? R * grossRate : R);
-    const o = c.plug ? (pfRf && pfRf.by_label.Organic) : v;
-    const discRate = o && o.gross > 0 ? o.discounts / o.gross : (pfDisc !== null && pfGross ? pfDisc / pfGross : 0);
-    const disc = gross * discRate;
-    const ret = pfRetFor(c.label);
-    const returns = ret ? gross * ret.r : 0;
-    const net = Math.max(0, gross - disc - returns);
-    const product = net * pfCogsRate;
     const estOrders = !(ch.aovOrders > 0);
     const orders = estOrders ? (pfAov ? R / pfAov : 0) : ch.aovOrders;
-    const src = o && o.orders > 0 && typeof o.free_ship_orders === 'number' ? o : null;
-    const freeShare = src ? src.free_ship_orders / src.orders : pfStoreFree;
-    const freeOrders = freeShare !== null ? orders * freeShare : orders;
-    const ship = freeOrders * pfPerOrder;
+    const product = R * (1 - PF_REV_KEEP);
     const spend = c.spend_actual || 0;
-    const profit = gross - product - ship - spend;
-    return { R, gross, grossRate, disc, discRate, returns, ret, net, product, orders, estOrders, freeOrders, freeShare, freeFromChannel: !!src, ship, spend, profit, margin: gross ? profit / gross : null };
+    const profit = R * PF_REV_KEEP - orders - spend;
+    // gross = R so the totals / reconciliation below read the same field.
+    return { R, gross: R, product, orders, estOrders, ship: orders, spend, profit, margin: R ? profit / R : null };
   };
   grouped.forEach(g => { g.chans.forEach((c, j) => { chsByKey[g.key][j].pf = pfCalc(c, chsByKey[g.key][j]); }); });
   const pfSum = (list) => {
     const ps = list.filter(Boolean);
     if (!ps.length) return null;
-    const t = { R: 0, gross: 0, disc: 0, returns: 0, net: 0, product: 0, ship: 0, spend: 0, profit: 0, orders: 0, freeOrders: 0 };
+    const t = { R: 0, gross: 0, product: 0, ship: 0, spend: 0, profit: 0, orders: 0 };
     ps.forEach(p => Object.keys(t).forEach(k => { t[k] += p[k] || 0; }));
     t.margin = t.gross ? t.profit / t.gross : null;
     return t;
@@ -5144,23 +5097,19 @@ function renderChannels(monthData) {
     const v = id ? `<button type="button" class="c4-pf-btn" data-c4pf="${id}" aria-expanded="${!!open}" aria-controls="c4pf-${id}" title="Show this channel’s costs">${pfMoney(pf.profit)}</button>` : pfMoney(pf.profit);
     return `<td class="c4-pf-cell">${v}</td><td>${pfMargin(pf.margin)}</td>`;
   };
-  const pfShipWhat = [...new Set(pfShipLines.map(o => o.label.replace(/\s*-?\s*Shipping Cost$/i, ' shipping').replace(/ Fee$/i, '')))].join(', ');
   const c4PfDetail = (pf, c) => {
-    const pctOf = (v) => pf.gross ? fmtVal(v / pf.gross, 'percent') : '—';
-    const segs = [['prod', 'Product cost', pf.product], ['ship', 'Shipping &amp; fulfilment', pf.ship], ['spend', 'Ad spend', pf.spend], ['profit', 'Profit', Math.max(0, pf.profit)]].filter(x => x[2] > 0.5);
-    const denom = Math.max(pf.gross, segs.reduce((t, x) => t + x[2], 0)) || 1;
-    const bar = `<div class="c4-pf-bar" role="img" aria-label="Where ${c4Name(c.label)}’s gross sales go">${segs.map(x => `<i class="pf-${x[0]}" style="width:${(x[2] / denom * 100).toFixed(2)}%" title="${x[1]}: ${fmtVal(x[2], 'currency-full')} (${pctOf(x[2])})"></i>`).join('')}</div>
+    const pctOf = (v) => pf.R ? fmtVal(v / pf.R, 'percent') : '—';
+    const segs = [['prod', 'Product cost', pf.product], ['ship', 'Orders', pf.ship], ['spend', 'Ad spend', pf.spend], ['profit', 'Profit', Math.max(0, pf.profit)]].filter(x => x[2] > 0.5);
+    const denom = Math.max(pf.R, segs.reduce((t, x) => t + x[2], 0)) || 1;
+    const bar = `<div class="c4-pf-bar" role="img" aria-label="Where ${c4Name(c.label)}’s revenue goes">${segs.map(x => `<i class="pf-${x[0]}" style="width:${(x[2] / denom * 100).toFixed(2)}%" title="${x[1]}: ${fmtVal(x[2], 'currency-full')} (${pctOf(x[2])})"></i>`).join('')}</div>
       <div class="c4-pf-legend">${segs.map(x => `<span><i class="pf-${x[0]}"></i>${x[1]}</span>`).join('')}</div>`;
     const line = (cls, label, how, v, sign) => `<div class="c4-pf-line${cls ? ' ' + cls : ''}"><span class="c4-pf-lbl">${label}${how ? `<span class="c4-pf-how">${how}</span>` : ''}</span><span class="c4-pf-val">${sign}${fmtVal(Math.abs(v), 'currency-full')}</span><span class="c4-pf-pct">${pctOf(v)}</span></div>`;
     const spendHow = c.plug ? 'No spend on organic' : c.label === 'TikTok Affiliates' ? 'Affiliate commission, as in the Spend column'
       : ATTENTIVE_ROW_KEYS[c.label] ? 'Attentive’s cost for this channel (P&amp;L sheet)' : c.label === 'Collabs Affiliate' ? 'Collabs commission, as in the Spend column' : 'As in the Spend column';
-    const grossHow = c.plug ? 'Gross Sales − every other channel (already before discounts)'
-      : pf.grossRate !== null ? `Revenue ${fmtVal(pf.R, 'currency-full')} × ${fmtVal(pf.grossRate, 'percent')} — gross sales ÷ order revenue of ${c.label === 'TikTok Affiliates' || c.label === 'TikTok Organic' ? 'TikTok Shop' : 'this channel’s'} orders in Triple Whale (before discounts, tax and shipping)`
-      : 'As in the Revenue column (no Triple Whale orders to convert it)';
     const lines = [
-      line('is-rev', 'Gross sales', grossHow, pf.gross, ''),
-      line('', 'Product cost', `${fmtVal(pfCogsRate, 'percent')} of net sales ${fmtVal(pf.net, 'currency-full')} (gross − ${fmtVal(pf.disc, 'currency-full')} discounts${pf.discRate ? ' at ' + fmtVal(pf.discRate, 'percent') : ''} − ${fmtVal(pf.returns, 'currency-full')} returns${pf.ret ? ' at ' + fmtVal(pf.ret.r, 'percent') : ''})`, pf.product, '−'),
-      line('', 'Shipping &amp; fulfilment', `${fmtVal(Math.round(pf.freeOrders), 'number')} orders where the customer paid no shipping${pf.freeShare !== null ? ` (${fmtVal(pf.freeShare, 'percent')} of ${fmtVal(Math.round(pf.orders), 'number')} orders${pf.estOrders ? ', est.' : ''}${pf.freeFromChannel ? '' : ' — store average'})` : ''} × ${fmtVal(pfPerOrder, 'currency-cents')} per order — ${pfShipWhat} ÷ all orders`, pf.ship, '−'),
+      line('is-rev', 'Revenue', c.plug ? 'Gross Sales − every other channel' : 'As in the Revenue column', pf.R, ''),
+      line('', 'Revenue × 0.8', `Revenue less ${fmtVal(1 - PF_REV_KEEP, 'percent')} (${fmtVal(pf.product, 'currency-full')})`, pf.R - pf.product, ''),
+      line('', 'Orders', `${fmtVal(Math.round(pf.orders), 'number')} orders${pf.estOrders ? ' (est.: revenue ÷ AOV)' : ''}, $1 each`, pf.ship, '−'),
       c.plug && !pf.spend ? '' : line('', 'Ad spend', spendHow, pf.spend, '−'),
       `<div class="c4-pf-line is-profit${pf.profit < 0 ? ' is-neg' : ''}"><span class="c4-pf-lbl">Profit</span><span class="c4-pf-val">${pf.profit < -0.5 ? '−' : ''}${fmtVal(Math.abs(pf.profit), 'currency-full')}</span><span class="c4-pf-pct">${pfMargin(pf.margin)}</span></div>`,
     ].join('');
@@ -5311,26 +5260,28 @@ function renderChannels(monthData) {
     const allPf = pfSum(grouped.flatMap(g => chsByKey[g.key].map(ch => ch.pf)));
     const profitKpi = kpiAct('Profit');
     if (allPf) {
-      const ttRet = pfRetFor('TikTok Affiliates');
-      const ovlProfit = c4Ovl > 0.5 ? c4Ovl - c4Ovl * (1 - (ttRet ? ttRet.r : 0)) * pfCogsRate - (pfAov ? c4Ovl / pfAov * pfPerOrder : 0) : 0;
+      const ovlProfit = c4Ovl > 0.5 ? c4Ovl * PF_REV_KEEP - (pfAov ? c4Ovl / pfAov : 0) : 0;
       const chProfit = allPf.profit - ovlProfit;
-      const chRev = allPf.gross - c4Ovl;
+      const chRev = allPf.R - c4Ovl;
       const diff = profitKpi !== null ? profitKpi - chProfit : null;
       // Fixed costs: the Other Costs lines no channel is charged with (not
       // product cost, shipping / boxes / pick & pack, the PPC agency fee or
       // TikTok gifting); the rest is the estimate / attribution gap.
       let parts = null;
       if (diff !== null) {
-        const fixed = pfCostLines(/./).filter(o => !/product|shipping|^boxes$|pick/i.test(o.label)).reduce((t, o) => t + o.actual, 0);
+        // Since the Revenue × 0.8 rule (2026-11-18) the channels carry only
+        // 20% of revenue as product cost, so shipping, boxes and pick & pack
+        // are costs no channel is charged with too.
+        const fixed = pfCostLines(/./).filter(o => !/product|cogs/i.test(o.label)).reduce((t, o) => t + o.actual, 0);
         parts = { fixed, rest: -diff - fixed };
       }
       const partsHtml = parts ? `<div class="c4-recon-parts">
-          <span><b>${pfMoney(-parts.fixed)}</b> costs no channel is charged with (Other Costs: PPC agency fee, TikTok gifting, tools, development, SEO, customer service, Shopify apps, PR boxes, gratis…)</span>
+          <span><b>${pfMoney(-parts.fixed)}</b> costs no channel is charged with (Other Costs: shipping, boxes, pick &amp; pack, PPC agency fee, TikTok gifting, tools, development, SEO, customer service, Shopify apps, PR boxes, gratis…)</span>
           <span><b>${pfMoney(-parts.rest)}</b> the gap between the channels’ figures and the books: revenue the channels claim beyond the store’s sales (their own attribution overlaps — impact.com, Snapchat, Pinterest and TikTok report their own conversions), discounts outside channel revenue (incl. TikTok-funded ones), the P&amp;L sheet’s marketing costs vs the spend here, and returns vs Shopify’s</span>
         </div>` : '';
       const reconWhy = 'Dashboard Profit − the channels’ profit: costs no single channel causes, plus the gap between the channels’ own figures and the books';
       recon = `<div class="c4-recon" aria-label="Profit from channels and the dashboard’s Profit">
-        <div class="c4-recon-item"><span class="c4-recon-lbl">Profit from channels</span><span class="c4-recon-val">${pfMoney(chProfit)}</span><span class="c4-recon-sub">${fmtVal(chRev ? chProfit / chRev : null, 'percent')} of the channels’ gross sales, after product cost, shipping and ad spend</span></div>
+        <div class="c4-recon-item"><span class="c4-recon-lbl">Profit from channels</span><span class="c4-recon-val">${pfMoney(chProfit)}</span><span class="c4-recon-sub">${fmtVal(chRev ? chProfit / chRev : null, 'percent')} of the channels’ revenue: revenue × 0.8 − orders − ad spend</span></div>
         ${diff !== null ? `<span class="c4-recon-op" aria-hidden="true">${diff < 0 ? '−' : '+'}</span>
         <div class="c4-recon-item" title="${reconWhy}"><span class="c4-recon-lbl">Costs not tied to a channel &amp; other differences</span><span class="c4-recon-val">${fmtVal(Math.abs(diff), 'currency-full')}</span><span class="c4-recon-sub">Made up of the two lines below</span></div>
         <span class="c4-recon-op" aria-hidden="true">=</span>
@@ -5371,7 +5322,7 @@ function renderChannels(monthData) {
       ${monthData.c4_gross ? `<li><b>Organic</b> — Gross Sales (${fmtVal(monthData.c4_gross, 'currency-full')}, as in Key Metrics) minus every other channel above, so the Total always equals Gross Sales.${monthData.c4_tt_overlap > 0.5 ? ` TikTok Ads and TikTok Affiliates both include ${fmtVal(monthData.c4_tt_overlap, 'currency-full')} of TikTok orders (ads on a creator’s content) — counted once in Organic and in the Total.` : ''} The P&amp;L sheet’s Organic row works the same way, but several channels here come live from Triple Whale rather than from the sheet, so it’s recomputed on the dashboard’s own figures${(() => { const o = monthData.channels.find(c => c.plug); return o && o.sheet_revenue != null ? ` (the sheet’s Organic figure: ${fmtVal(o.sheet_revenue, 'currency-full')})` : ''; })()}.${state.month === DATA.meta.current_month ? ' For the month in progress, channels from the sheet run through its last update, so Organic also picks up the days the sheet hasn’t reached yet.' : ''}</li>` : ''}
       <li><b>Changes (switch: vs last year / vs last ${periodWord})</b> — Triple Whale channels compare the same dates last year and ${prevAvailable ? 'in the previous ' + periodWord : '(no previous period here)'}. Channels from the P&amp;L sheet (Organic, TikTok Affiliates, TikTok Organic, Collabs, Attentive…) have no YoY: the sheet’s 2025 columns only hold Gross and Net Sales, not channels. Their ${momLabel()} compares the previous closed ${periodWord} on this dashboard${isCurMonth ? `; for the month in progress the sheet has one month-to-date figure, so it compares per day — this month’s figure ÷ the days it covers against last month’s full figure ÷ its days (ROAS as is). The days covered come from the sheet’s own Gross Sales as a share of Shopify’s so far${pace ? ` (${Math.round(pace.share * 100)}% of ${pace.elapsed} days ≈ ${pace.curDays.toFixed(1)} days)` : ''}. Those chips have a dotted underline; hover one for details` : ''}. The Total’s changes and Avg order cover the Triple Whale channels. Spend changes are grey — more spend isn’t good or bad by itself. Hover a “—” to see why it’s blank.</li>
       <li><b>Orders</b> — the channel’s attributed orders (the same count as Avg order; ≈ = estimated as revenue ÷ AOV).</li>
-      <li><b>Profit / Margin</b> — gross sales from the channel − product cost − shipping (only the orders where the customer paid no shipping) − the channel’s ad spend. Gross sales = the channel’s revenue on Gross Sales’ basis (before discounts, tax and shipping: revenue × gross ÷ order revenue of the channel’s Triple Whale orders, Last Click; TikTok rows use TikTok Shop’s; Organic is already gross; rows without Triple Whale orders as shown). Product cost = ${pfCogsRate !== null ? fmtVal(pfCogsRate, 'percent') : '20%'} of the channel’s net sales (gross − its discounts − its returns), the dashboard’s COGS rule. Shipping = the channel’s orders without paid shipping (Triple Whale’s share for the channel, else the store’s) × ${pfPerOrder !== null ? fmtVal(pfPerOrder, 'currency-cents') : 'the cost'} per order (boxes, shipping and pick &amp; pack in Other Costs ÷ all orders). Margin = profit ÷ gross sales. Click a channel’s row to see its costs. The strip under the summary tiles adds the channels up and shows what’s left to reach Profit in Key Metrics (costs no channel is charged with, like the PPC agency fee and TikTok gifting, and the gap between the channels’ own figures and the books).</li>
+      <li><b>Profit / Margin</b> — Profit = the Revenue column × 0.8 − the channel’s number of orders (the Orders column, $1 each) − its ad spend (Spend column). Margin = profit ÷ revenue. Organic’s revenue is Gross Sales − every other channel. Click a channel’s row to see the lines. The strip under the summary tiles adds the channels up and shows what’s left to reach Profit in Key Metrics (costs no channel is charged with — shipping, boxes, pick &amp; pack, the PPC agency fee, TikTok gifting, tools… — and the gap between the channels’ own figures and the books).</li>
       ${attNote}
       ${monthData.channels_note ? `<li><b>Sources</b> — ${monthData.channels_note}</li>` : ''}
       ${chg && chg.partial ? '<li>Some sites’ Triple Whale data didn’t load, so the changes cover the rest.</li>' : ''}
