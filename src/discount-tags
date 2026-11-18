@@ -35,6 +35,8 @@ const FALLBACK = {
     ['Bi-Annual Reward Sale Glam', 'DISCOUNT-JBD6Q'],
     ["Natasha's Birthday", 'DISCOUNT-YAMQU'],
     ['Fall Sale 2026', 'DISCOUNT-LZ5AG'],
+    ['Black Friday 2026', 'DISCOUNT-O10GA'], // added 2026-11-18
+    ['Black Friday 2026 - Gifts', 'OFFER-04EZ9'],
   ],
   eu: [
     ['HY-GLAM Collection Bundle', 'DISCOUNT-JUM8U'],
@@ -52,6 +54,8 @@ const FALLBACK = {
     ["Natasha's Birthday", 'DISCOUNT-XU5AJ'],
     ['Fall Sale 2026', 'DISCOUNT-1Y9YV'],
     ['Free Makeup Bag', 'DISCOUNT-FREE_MAKEUP_BAG'],
+    ['Black Friday 2026', 'OFFER-V504I'], // added 2026-11-18
+    ['Black Friday 2026 - Free Gifts', 'OFFER-XWGQB'],
   ],
   il: [
     ['HY-GLAM Collection Bundle', 'DISCOUNT-VPXK0'],
@@ -72,19 +76,29 @@ const FALLBACK = {
 
 // Which rows are sales: the name says sale, or it's Natasha's Birthday (a
 // store-wide birthday sale) or Shopping IL (Israel's shopping-festival sale).
-const SALE_NAME_RE = /\bsale\b|birthday|shopping\s*il/i;
+// 2026-11-18 (Tomer: "Pull and reflect the new tags from the spreadsheet for
+// the samples, sales and the free gifts"): Black Friday / Cyber Monday and
+// "15% Students"-style rows are sales too; rows named …sample… are samples
+// and …gift… / makeup bag are free gifts (checked first, so "Black Friday
+// 2026 - Gifts" is a gift, not the sale). Tags are read without spaces (the
+// sheet has "DISCOUNT- O10GA" for the order tag DISCOUNT-O10GA).
+const SALE_NAME_RE = /\bsale\b|birthday|shopping\s*il|black\s*friday|cyber\s*monday|\bstudents?\b|\d+\s*%/i;
 const BUNDLE_NAME_RE = /bundle|\bsets?\b|סטים/i;
+const SAMPLE_NAME_RE = /sample/i;
+const GIFT_NAME_RE = /gift|makeup\s*bag/i;
 
 function classify(rows, source) {
-  const sales = [], bundles = [], all = [];
+  const sales = [], bundles = [], samples = [], gifts = [], all = [];
   for (const [rawName, rawTag] of rows) {
-    const name = String(rawName || '').trim(), tag = String(rawTag || '').trim();
+    const name = String(rawName || '').trim(), tag = String(rawTag || '').replace(/\s+/g, '');
     if (!name || !tag || /^discount name$/i.test(name)) continue;
     all.push({ name, tag });
-    if (SALE_NAME_RE.test(name)) sales.push({ name, tag });
+    if (SAMPLE_NAME_RE.test(name)) samples.push({ name, tag });
+    else if (GIFT_NAME_RE.test(name)) gifts.push({ name, tag });
+    else if (SALE_NAME_RE.test(name)) sales.push({ name, tag });
     else if (BUNDLE_NAME_RE.test(name)) bundles.push({ name, tag });
   }
-  return { sales, bundles, all, source };
+  return { sales, bundles, samples, gifts, all, source };
 }
 
 const cache = new Map(); // site -> { at, value }
