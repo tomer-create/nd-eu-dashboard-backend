@@ -244,9 +244,12 @@
   @media (prefers-reduced-motion: reduce) { .c4-toggle::after { transition:none; } }
   /* same column widths in every block so the blocks line up */
   body:not(.mobile-mode) table.c4-table { table-layout:fixed; min-width:960px; }
-  body:not(.mobile-mode) table.c4-table th:nth-child(1) { width:21%; } body:not(.mobile-mode) table.c4-table th:nth-child(2), body:not(.mobile-mode) table.c4-table th:nth-child(3) { width:15%; }
-  body:not(.mobile-mode) table.c4-table th:nth-child(4) { width:10%; } body:not(.mobile-mode) table.c4-table th:nth-child(5) { width:9%; } body:not(.mobile-mode) table.c4-table th:nth-child(6) { width:11%; }
-  body:not(.mobile-mode) table.c4-table th:nth-child(7) { width:11%; } body:not(.mobile-mode) table.c4-table th:nth-child(8) { width:8%; }
+  /* 9 columns since the Orders column (2026-11-18, Tomer: "fix the borders of
+     the Marketing & Sales Channel Performance section … the margin and profit
+     is out of the chart") — the widths add up to 100% again. */
+  body:not(.mobile-mode) table.c4-table th:nth-child(1) { width:17%; } body:not(.mobile-mode) table.c4-table th:nth-child(2), body:not(.mobile-mode) table.c4-table th:nth-child(3) { width:14%; }
+  body:not(.mobile-mode) table.c4-table th:nth-child(4) { width:10%; } body:not(.mobile-mode) table.c4-table th:nth-child(5) { width:7%; } body:not(.mobile-mode) table.c4-table th:nth-child(6) { width:7%; }
+  body:not(.mobile-mode) table.c4-table th:nth-child(7) { width:11%; } body:not(.mobile-mode) table.c4-table th:nth-child(8) { width:12%; } body:not(.mobile-mode) table.c4-table th:nth-child(9) { width:8%; }
   body.mobile-mode .c4-block { padding:10px 10px 4px; }
   table.c4-table tr.c4-idle td:first-child { font-style:normal; font-weight:650; color:var(--text-secondary); }
   .c4-notes { margin-top:12px; border-top:1px solid var(--gridline); padding-top:10px; }
@@ -7283,6 +7286,20 @@ function renderDiscountSplit(monthData) {
   const itemNote = i => i.key === 'tiktok_samples' && typeof i.retail_value === 'number'
     ? ` <span style="color:var(--text-muted);font-size:10px">(product cost, as in TikTok costs · retail ${fmtVal(i.retail_value, 'currency-full')})</span>`
     : (i.key === 'tiktok_samples' && creator && creator.pending ? ' <span style="color:var(--text-muted);font-size:10px">(retail — loading TikTok costs’ figure…)</span>' : '');
+  // Gifts by product (2026-11-18, Tomer: "in Gifts: GWP breakdown "free gift"
+  // should contain the 3 free gifts that been given from the order details"):
+  // under each GWP item, the products given — value at retail, units, orders.
+  // Months stored before show the item alone until they re-sync.
+  const giftRows = (b, i, open) => b.key !== 'gwp' || !Array.isArray(i.products) || !i.products.length ? ''
+    : i.products.filter(p => Math.abs(p.discount_value || 0) >= 0.005).map(p => `<tr class="disc-prog disc-gift-prod" data-group="${b.key}"${open ? '' : ' hidden'}>
+      <td style="padding-left:44px;font-size:11px;color:var(--text-muted)">${escText(p.label)} <span style="font-size:10px">· ${n(p.units)} unit${p.units === 1 ? '' : 's'}</span></td>
+      <td style="font-size:11px;color:var(--text-muted)">—</td>
+      <td style="font-size:11px;color:var(--text-muted)">${fmtVal(p.discount_value || 0, 'currency-full')}</td>
+      <td style="font-size:11px;color:var(--text-muted)">100.0%</td>
+      <td style="font-size:11px;color:var(--text-muted)">${ofDisc(p.discount_value)}</td>
+      <td style="font-size:11px;color:var(--text-muted)">${n(p.orders)}</td>
+      <td style="font-size:11px;color:var(--text-muted)">${ofGross(p.discount_value)}</td>
+    </tr>`).join('');
   let body = '';
   sp.buckets.forEach(b => {
     const open = !!splitOpen[b.key];
@@ -7303,7 +7320,7 @@ function renderDiscountSplit(monthData) {
       <td>${ofDisc(i.discount_value)}</td>
       <td>${n(i.orders)}</td>
       <td>${ofGross(i.discount_value)}</td>
-    </tr>`).join('');
+    </tr>` + giftRows(b, i, open)).join('');
   });
   const totalRow = `<tr class="total-row">
       <td>Total<div style="font-size:10px;color:var(--text-muted);font-weight:500">= Discounts in Key Metrics · each order once</div></td>
@@ -7327,7 +7344,7 @@ function renderDiscountSplit(monthData) {
     <thead><tr><th style="text-align:left">Bucket</th><th title="Gross sales of the whole orders that got a discount from this bucket / item">Gross Sales</th><th title="At each product's retail price in Shopify (compare-at price when set, otherwise its price)">Discount $</th><th title="Discount $ ÷ the gross sales of the items it was taken off (Pro Artist → 30%, samples and gifts → 100%)">Discount Ratio</th><th>% of Discounts</th><th title="Orders that got a discount from this bucket / item">Orders</th><th title="Discount $ ÷ the period's store-wide Gross Sales">% of Gross Sales</th></tr></thead>
     <tbody>${body}${totalRow}${platformRow}</tbody>
   </table>
-  <div style="margin-top:10px;font-size:11px;color:var(--text-muted)">${monthData.discounts_note ? escText(monthData.discounts_note) + ' ' : ''}Every product discount in Shopify for the period (TikTok Shop orders included; shipping discounts aren't part of Shopify's Discounts), read discount by discount — each discount counts in exactly one item, so the items add up to their bucket and the buckets to the Total. Click a bucket to open its items. Discount Ratio = Discount $ ÷ the gross sales of the items it was taken off (Pro Artist → 30%, samples and gifts → 100%). Orders: an order with discounts from two buckets is in both; the Total counts it once. Samples: Free Sample on site orders, one line per sample product at its retail price in Shopify (the sample SKUs are priced $5 / €5). Gifts: GWP to customers: free gifts (incl. the sheet's gift tags), the free makeup bag and the Glow / Glam tier gifts. Gifts: TikTok creators: TikTok creator samples${state.site === 'com' || state.site === 'all' ? ' — the same figure as “Samples (TikTok Gifting)” in TikTok costs (the products’ cost, 20% of their price), once it has loaded' : ''}. Yotpo Loyalty: points redemptions (8-character upper-case fixed-amount codes in multiples of $0.10 — 10 points = $1), Birthday (any BDAY… code) and Refer a friend (REF…) codes. Sales: one line per sale in the "Evergreen Discounts Tags" sheet (the sale's discounts on orders carrying its tag)${sp.sale_tags_source === 'built-in' ? ' — the sheet couldn’t be read, so the sale list is the copy saved in the dashboard' : ''}; "Other % discounts" are percentage discounts on orders with no sale tag. Regular: TikTok seller discounts (ND pays)${sp.tiktok_funding && sp.tiktok_funding.source !== 'tiktok_orders' ? ' — TikTok’s seller / platform split isn’t available for this period yet, so the line shows both together' : ''}, Attentive's single-use codes, influencer / affiliate / campaign codes (incl. Collabs), Pro Artist, BA, bundles / sets, manual discounts and other offers; free-shipping discounts aren't shown. TikTok platform discounts (TikTok pays): TikTok's vouchers on TikTok Shop orders — shown under the Total and not included in it (Shopify gets them with the seller discounts as one discount per TikTok order; the split follows TikTok's own order data). Values are at each product's retail price in Shopify (its compare-at price when set, otherwise its price). Gross Sales = the gross sales of the whole orders that got a discount from the bucket / item (an order in two buckets is in both; the Total counts it once). Total = the buckets added up — the same figure as the Discounts box in the Goal Tracker.</div>`;
+  <div style="margin-top:10px;font-size:11px;color:var(--text-muted)">${monthData.discounts_note ? escText(monthData.discounts_note) + ' ' : ''}Every product discount in Shopify for the period (TikTok Shop orders included; shipping discounts aren't part of Shopify's Discounts), read discount by discount — each discount counts in exactly one item, so the items add up to their bucket and the buckets to the Total. Click a bucket to open its items. Discount Ratio = Discount $ ÷ the gross sales of the items it was taken off (Pro Artist → 30%, samples and gifts → 100%). Orders: an order with discounts from two buckets is in both; the Total counts it once. Samples: Free Sample on site orders, one line per sample product at its retail price in Shopify (the sample SKUs are priced $5 / €5). Gifts: GWP to customers: free gifts (incl. the sheet's gift tags), the free makeup bag and the Glow / Glam tier gifts, each with the products given under it (units and orders). Gifts: TikTok creators: TikTok creator samples${state.site === 'com' || state.site === 'all' ? ' — the same figure as “Samples (TikTok Gifting)” in TikTok costs (the products’ cost, 20% of their price), once it has loaded' : ''}. Yotpo Loyalty: points redemptions (8-character upper-case fixed-amount codes in multiples of $0.10 — 10 points = $1), Birthday (any BDAY… code) and Refer a friend (REF…) codes. Sales: one line per sale in the "Evergreen Discounts Tags" sheet (the sale's discounts on orders carrying its tag)${sp.sale_tags_source === 'built-in' ? ' — the sheet couldn’t be read, so the sale list is the copy saved in the dashboard' : ''}; "Other % discounts" are percentage discounts on orders with no sale tag. Regular: TikTok seller discounts (ND pays)${sp.tiktok_funding && sp.tiktok_funding.source !== 'tiktok_orders' ? ' — TikTok’s seller / platform split isn’t available for this period yet, so the line shows both together' : ''}, Attentive's single-use codes, influencer / affiliate / campaign codes (incl. Collabs), Pro Artist, BA, bundles / sets, manual discounts and other offers; free-shipping discounts aren't shown. TikTok platform discounts (TikTok pays): TikTok's vouchers on TikTok Shop orders — shown under the Total and not included in it (Shopify gets them with the seller discounts as one discount per TikTok order; the split follows TikTok's own order data). Values are at each product's retail price in Shopify (its compare-at price when set, otherwise its price). Gross Sales = the gross sales of the whole orders that got a discount from the bucket / item (an order in two buckets is in both; the Total counts it once). Total = the buckets added up — the same figure as the Discounts box in the Goal Tracker.</div>`;
   el.querySelectorAll('.disc-toggle').forEach(btn => btn.addEventListener('click', () => {
     const k = btn.dataset.group;
     splitOpen[k] = !splitOpen[k];
