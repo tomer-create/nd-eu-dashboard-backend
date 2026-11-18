@@ -1755,6 +1755,21 @@ async function gmvFill(perfDays, from, end) {
   const refunds = est.some((e) => e.refunds === null || e.refunds === undefined) ? null : est.reduce((a, e) => a + e.refunds, 0);
   return { gmv: est.reduce((a, e) => a + e.gmv, 0), orders: est.reduce((a, e) => a + e.orders, 0), units: est.reduce((a, e) => a + (e.units || 0), 0), refunds, days, runs: est };
 }
+// TikTok order-data units / refunds / GMV for a list of days (YYYY-MM-DD),
+// grouped into runs of consecutive days (2026-11-18).
+async function daysFill(daysList) {
+  const plus = (iso, n) => new Date(Date.parse(iso + 'T00:00:00Z') + n * 86400000).toISOString().slice(0, 10);
+  const runs = [];
+  [...new Set(daysList)].sort().forEach((d) => {
+    const r = runs[runs.length - 1];
+    if (r && r.end === d) r.end = plus(d, 1); else runs.push({ start: d, end: plus(d, 1) });
+  });
+  if (runs.length > 12) throw new Error(`${runs.length} separate days without units — not filled`);
+  const est = await Promise.all(runs.map((r) => fetchGmvEstimate('com', r.start, r.end)));
+  if (est.some((e) => !e)) throw new Error('Triple Whale isn\'t configured');
+  const refunds = est.some((e) => e.refunds === null || e.refunds === undefined) ? null : est.reduce((a, e) => a + e.refunds, 0);
+  return { units: est.reduce((a, e) => a + (e.units || 0), 0), refunds, days: new Set(daysList).size, runs: est };
+}
 app.get('/api/tiktok-shop/seller-center', async (req, res) => {
   try {
     const { start, end } = req.query;
@@ -1787,7 +1802,14 @@ app.get('/api/tiktok-shop/seller-center', async (req, res) => {
         gap = await fetchGmvEstimate('com', gapStart, String(end)).catch((err) => { console.error('seller-center gap fill failed:', err.message); return null; });
       }
     }
-    res.json({ ...p, gap, fill, fill_from: fillFrom, cache: out.cache });
+    // Units / refunds for the days TikTok has a GMV for but no units /
+    // refunds (2026-11-18: days kept from an earlier pull, before these were
+    // pulled) — from TikTok's order data, like the fill.
+    let unitsFill = null;
+    if (Array.isArray(p.units_missing_days) && p.units_missing_days.length) {
+      unitsFill = await daysFill(p.units_missing_days).catch((err) => { console.error('seller-center units fill failed:', err.message); return { error: err.message }; });
+    }
+    res.json({ ...p, gap, fill, fill_from: fillFrom, units_fill: unitsFill, cache: out.cache });
   } catch (err) {
     console.error('seller-center failed:', err.message);
     res.status(err.status || 502).json({ error: err.message });
