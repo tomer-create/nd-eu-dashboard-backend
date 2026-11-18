@@ -664,6 +664,9 @@ async function pullSellerCenter(start, end) {
     perf_refunds: s('refunds_amount'),
     units_days: perf.filter((r) => r.shop_performance_units_sold !== undefined && r.shop_performance_units_sold !== null).length,
     refunds_days: perf.filter((r) => r.shop_performance_refunds_amount !== undefined && r.shop_performance_refunds_amount !== null).length,
+    // Days with a GMV but no units (e.g. kept from a pull before v13) — the
+    // endpoint fills them from TikTok's order data (server.js units_fill).
+    units_missing_days: perf.filter((r) => r.shop_performance_units_sold === undefined || r.shop_performance_units_sold === null).map(realDayOf).filter(Boolean),
     cancellations_and_returns: dsum('cancellations_and_returns'),
     detail_days: detail.length,
     fees: {
