@@ -533,7 +533,8 @@ async function fetchChannelRefunds(site, start, end) {
       SUM(refund_money) AS refunds,
       SUM(gross_product_sales) AS gross,
       SUM(discount_amount_for_product) AS discounts,
-      SUM(taxes) AS taxes
+      SUM(taxes) AS taxes,
+      uniqIf(order_id, shipping_price <= 0) AS free_ship_orders
     FROM pixel_orders_table
     WHERE event_date >= '${start}' AND event_date < '${end}'
       AND model = 'Last Click'
@@ -554,8 +555,10 @@ async function fetchChannelRefunds(site, start, end) {
   }
   const rows = Array.isArray(json) ? json : json.rows || json.data || [];
   if (!Array.isArray(rows)) return null;
-  const F = ['orders', 'revenue', 'refunds', 'gross', 'discounts', 'taxes'];
-  const zero = () => ({ orders: 0, revenue: 0, refunds: 0, gross: 0, discounts: 0, taxes: 0 });
+  // free_ship_orders (2026-11-18): orders where the customer paid no
+  // shipping — channel profit charges shipping only for those.
+  const F = ['orders', 'revenue', 'refunds', 'gross', 'discounts', 'taxes', 'free_ship_orders'];
+  const zero = () => ({ orders: 0, revenue: 0, refunds: 0, gross: 0, discounts: 0, taxes: 0, free_ship_orders: 0 });
   const add = (acc, r) => { F.forEach((f) => { acc[f] += Number(r[f] || 0); }); };
   const labelOf = new Map(Object.entries(REFUND_LABEL_IDS).flatMap(([label, ids]) => ids.map((id) => [id, label])));
   const byLabel = {};
