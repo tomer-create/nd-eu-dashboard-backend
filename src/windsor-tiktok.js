@@ -75,7 +75,8 @@ const STABLE_AFTER_DAYS = 45;
 // Windsor never loses a day (see mergeStoredDays).
 // v12 (2026-10-28): GMV / orders pulled with no other fields (see
 // PERF_CORE_FIELDS) — v11 copies made that day have days missing.
-const PAYLOAD_VERSION = 12;
+// v13 (2026-11-18): perf_units / perf_refunds / units_days / refunds_days.
+const PAYLOAD_VERSION = 13;
 const COMPAT_MIN_VERSION = 8;
 
 // Core Shop Performance fields — the ones the dashboard's numbers come from.
@@ -92,6 +93,17 @@ const PERF_CORE_FIELDS = [
   'date',
   'shop_performance_gmv_amount',
   'shop_performance_orders',
+];
+// Units sold + refunds (2026-11-18, Tomer: "pull the main data that is not
+// calculated data for TikTok Shop section from TikTok seller center"): the
+// details query below drops days (Oct 2026: 26 of 30, Nov 1–16: 4 of 16), so
+// these two come in their own three-field query like GMV / orders, are joined
+// onto the core rows by date and kept with them (units_days / refunds_days =
+// how many of the period's days have them).
+const PERF_UNITS_FIELDS = [
+  'date',
+  'shop_performance_units_sold',
+  'shop_performance_refunds_amount',
 ];
 const PERF_DETAIL_FIELDS = [
   'date',
@@ -447,7 +459,7 @@ async function pullShopPerformance(start, dateTo, coreTo) {
     // (2026-10-29 review): now caught and reported as fees_error.
     let feesError = null;
     const feeCatch = (what) => (err) => { console.error(`windsor-tiktok: ${what} failed:`, err.message); feesError = err.message; return []; };
-    const [perf, detail, traffic, fees, statements] = await Promise.all([
+    const [perf0, unitRows, detail, traffic, fees, statements] = await Promise.all([
       // 2026-10-28: asked through `end` (one more day): Windsor's date filter
       // turned out to apply to the row LABEL (Oct 1–28 returned labels Oct
       // 1–28 = real Sep 30–Oct 27; label Oct 1 = 266 orders / $15.8K ≈ Triple
@@ -455,11 +467,17 @@ async function pullShopPerformance(start, dateTo, coreTo) {
       // in mergeStoredDays, so the extra day is either the period's last real
       // day or dropped — right whichever way Windsor filters.
       windsorQuery(PERF_CORE_FIELDS, from, coreTo || dateTo),
+      windsorQuery(PERF_UNITS_FIELDS, from, coreTo || dateTo).catch((err) => { if (!LOOKBACK_RE.test(err.message)) console.error('windsor-tiktok: units / refunds failed:', err.message); return []; }),
       windsorQuery(PERF_DETAIL_FIELDS, from, dateTo).catch((err) => { if (!LOOKBACK_RE.test(err.message)) console.error('windsor-tiktok: shop performance details failed:', err.message); return []; }),
       windsorQuery(PERF_FIELDS, from, dateTo).catch((err) => { if (!LOOKBACK_RE.test(err.message)) console.error('windsor-tiktok: traffic breakdowns failed:', err.message); return []; }),
       windsorQuery(['date', ...Object.keys(FEE_FIELDS)], from, dateTo).catch(feeCatch('fees')),
       windsorQuery(STATEMENT_FIELDS, from, dateTo).catch(feeCatch('statements')),
     ]);
+    const unitBy = new Map((unitRows || []).filter((r) => r && r.date).map((r) => [String(r.date).slice(0, 10), r]));
+    const perf = perf0.map((r) => {
+      const u = r && r.date ? unitBy.get(String(r.date).slice(0, 10)) : null;
+      return u ? { ...r, shop_performance_units_sold: u.shop_performance_units_sold, shop_performance_refunds_amount: u.shop_performance_refunds_amount } : r;
+    });
     return { perf, detail, traffic, fees, statements, perfFrom: from, perfError: null, feesError };
   };
   let from = start;
@@ -640,6 +658,12 @@ async function pullSellerCenter(start, end) {
     page_views_by_type: tByType('product_page_view_breakdowns'),
     avg_daily_visitors: traffic.length ? visitorDays / traffic.length : null,
     refunds: dsum('refunds_amount'),
+    // From the core rows (2026-11-18, see PERF_UNITS_FIELDS) — complete only
+    // when units_days / refunds_days equal perf_days' length.
+    perf_units: s('units_sold'),
+    perf_refunds: s('refunds_amount'),
+    units_days: perf.filter((r) => r.shop_performance_units_sold !== undefined && r.shop_performance_units_sold !== null).length,
+    refunds_days: perf.filter((r) => r.shop_performance_refunds_amount !== undefined && r.shop_performance_refunds_amount !== null).length,
     cancellations_and_returns: dsum('cancellations_and_returns'),
     detail_days: detail.length,
     fees: {
@@ -794,7 +818,7 @@ function combinePayloads(start, end, parts) {
   const withPerf = parts.filter((p) => p.days_with_data);
   const out = {
     source: 'windsor_tiktok_shop', version: PAYLOAD_VERSION, start, end, combined_months: parts.length,
-    ...sumKeys(parts, ['days_with_data', 'gmv', 'orders', 'units', 'sku_orders', 'buyers', 'impressions', 'page_views', 'refunds', 'cancellations_and_returns']),
+    ...sumKeys(parts, ['days_with_data', 'gmv', 'orders', 'units', 'sku_orders', 'buyers', 'impressions', 'page_views', 'refunds', 'cancellations_and_returns', 'perf_units', 'perf_refunds', 'units_days', 'refunds_days']),
     perf_from: (withPerf[0] && withPerf[0].perf_from) || null,
     perf_partial: parts.some((p) => p.perf_partial),
     perf_through: (parts[parts.length - 1] || {}).perf_through || null,
