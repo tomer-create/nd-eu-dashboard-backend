@@ -76,7 +76,8 @@ const STABLE_AFTER_DAYS = 45;
 // v12 (2026-10-28): GMV / orders pulled with no other fields (see
 // PERF_CORE_FIELDS) — v11 copies made that day have days missing.
 // v13 (2026-11-18): perf_units / perf_refunds / units_days / refunds_days.
-const PAYLOAD_VERSION = 13;
+// v14 (2026-11-18): units_missing_days.
+const PAYLOAD_VERSION = 14;
 const COMPAT_MIN_VERSION = 8;
 
 // Core Shop Performance fields — the ones the dashboard's numbers come from.
