@@ -933,7 +933,9 @@ function aggregate(orders, { tagLabels = DEFAULT_TAG_LABELS, discountTags = null
     // 19 (2026-11-16): bundle_sales (Shopify bundles by lineItemGroup).
     // 20 (2026-11-18): gifts owned by free-shipping tags; sheet gift / sample tags.
     // 21 (2026-11-18): GWP items by product (items[].products).
-    discounts_version: orders.length === 0 ? 21 : (sawDiscountApps ? (byApp && sawSourceName ? 21 : byApp ? 5 : 3) : 1),
+    // 22 (2026-11-18): not a discounts change — Pinterest revenue switched to
+    //   Triple Whale's Pixel CV, so stored months re-pull their channels.
+    discounts_version: orders.length === 0 ? 22 : (sawDiscountApps ? (byApp && sawSourceName ? 22 : byApp ? 5 : 3) : 1),
     discounts_by_app: byApp,
   };
 }
