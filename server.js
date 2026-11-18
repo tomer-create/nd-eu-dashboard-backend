@@ -564,6 +564,9 @@ async function buildDataResponse({ site, start, end, compare }) {
   // kpis, read by the frontend's LIVE_KPI_MAP ('New Users'/'Returning Users').
   current.kpis.new_customers = currentAcquisition.new_customers;
   current.kpis.returning_customers = currentAcquisition.returning_customers;
+  // Gross Sales by new / returning customer (2026-11-18).
+  current.kpis.new_customers_gross = currentAcquisition.new_customers_gross;
+  current.kpis.returning_customers_gross = currentAcquisition.returning_customers_gross;
   const result = { site, start, end, ...current };
 
   // Attach each period-ranked product's YTD return ratio by matching on
@@ -1746,7 +1749,11 @@ async function gmvFill(perfDays, from, end) {
   const est = await Promise.all(runs.map((r) => fetchGmvEstimate('com', r.start, r.end)));
   if (est.some((e) => !e)) throw new Error('Triple Whale isn\'t configured');
   const days = runs.reduce((a, r) => a + Math.round((Date.parse(r.end) - Date.parse(r.start)) / 86400000), 0);
-  return { gmv: est.reduce((a, e) => a + e.gmv, 0), orders: est.reduce((a, e) => a + e.orders, 0), days, runs: est };
+  // units / refunds (2026-11-18): for the Units Sold and Refunds tiles, which
+  // now show Seller Center's figures + these filled days. refunds is null if
+  // any run's refunds couldn't be read.
+  const refunds = est.some((e) => e.refunds === null || e.refunds === undefined) ? null : est.reduce((a, e) => a + e.refunds, 0);
+  return { gmv: est.reduce((a, e) => a + e.gmv, 0), orders: est.reduce((a, e) => a + e.orders, 0), units: est.reduce((a, e) => a + (e.units || 0), 0), refunds, days, runs: est };
 }
 app.get('/api/tiktok-shop/seller-center', async (req, res) => {
   try {
