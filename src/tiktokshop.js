@@ -290,14 +290,26 @@ async function fetchGmvEstimate(site, start, end) {
   const from = new Date(Date.parse(start + 'T00:00:00Z') - 86400000).toISOString().slice(0, 10);
   const to = new Date(Date.parse(end + 'T00:00:00Z') + 86400000).toISOString().slice(0, 10);
   const unpaid = `(fulfillment_status = 'CANCELLED' AND toInt64(toUnixTimestamp(cancelled_at)) - toInt64(toUnixTimestamp(created_at)) BETWEEN 3590 AND 3620)`;
-  const rows = await twSql(TW_SHOP_ID[site], `
+  // 2026-11-18 (Tomer: "pull the main data that is not calculated data for
+  // TikTok Shop section from TikTok seller center"): the TikTok Shop section
+  // now shows Seller Center's units sold and refunds too, so the filled days
+  // also carry them — units on the same orders, refunds by refund day
+  // (refunds_table, the store's day) like Seller Center's refunds.
+  const [rows, ref] = await Promise.all([
+    twSql(TW_SHOP_ID[site], `
     SELECT uniqIf(order_id, NOT ${unpaid}) AS orders,
-           sumIf(gross_product_sales + shipping_price - discount_amount_for_product, NOT ${unpaid}) AS gmv
+           sumIf(gross_product_sales + shipping_price - discount_amount_for_product, NOT ${unpaid}) AS gmv,
+           sumIf(product_quantity_sold_in_order, NOT ${unpaid}) AS units
     FROM orders_table
     WHERE event_date >= '${from}' AND event_date < '${to}' AND platform = 'tiktok-shops'
-      AND created_at >= '${start} 00:00:00' AND created_at < '${end} 00:00:00'`.trim(), from, to);
+      AND created_at >= '${start} 00:00:00' AND created_at < '${end} 00:00:00'`.trim(), from, to),
+    twSql(TW_SHOP_ID[site], `
+    SELECT SUM(total_refunded_price) AS refunds
+    FROM refunds_table
+    WHERE event_date >= '${start}' AND event_date < '${end}' AND platform = 'tiktok-shops'`.trim(), start, end).catch(() => null),
+  ]);
   const r = rows[0] || {};
-  return { start, end, gmv: num(r.gmv), orders: num(r.orders) };
+  return { start, end, gmv: num(r.gmv), orders: num(r.orders), units: num(r.units), refunds: ref ? num((ref[0] || {}).refunds) : null };
 }
 
 // Cancelled and refunded orders (2026-11-16, Tomer: TikTok Shop boxes for
