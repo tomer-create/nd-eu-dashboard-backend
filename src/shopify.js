@@ -1014,10 +1014,36 @@ async function fetchCustomerAcquisition(site, startISO, endISOExclusive) {
   colNames.forEach((name, i) => { obj[name] = values[i]; });
   const customers = Number(obj.customers) || 0;
   const newCustomers = Number(obj.new_customers) || 0;
+  // Gross Sales of new vs returning customers (2026-11-18, Tomer: "To New
+  // users and Returning Users add the Gross sales"): the same sales report
+  // grouped by new_or_returning_customer. Never fails the sync — the tiles
+  // then show no gross line.
+  let newGross = null, returningGross = null;
+  try {
+    const gq = `FROM sales SHOW gross_sales GROUP BY new_or_returning_customer SINCE ${startISO} UNTIL ${untilISO}`;
+    const g = (await graphql(site, gqlQuery, { q: gq })).shopifyqlQuery;
+    if (!(g.parseErrors && g.parseErrors.length)) {
+      const cols = (g.tableData.columns || []).map((c) => c.name);
+      newGross = 0; returningGross = 0;
+      (g.tableData.rows || []).forEach((r) => {
+        const vals = Array.isArray(r) ? r : cols.map((n) => r[n]);
+        const o = {}; cols.forEach((n, i) => { o[n] = vals[i]; });
+        const kind = String(o.new_or_returning_customer || '').toLowerCase();
+        const v = Number(o.gross_sales) || 0;
+        if (kind === 'new') newGross += v; else if (kind === 'returning') returningGross += v;
+      });
+    } else {
+      console.error(`ShopifyQL gross by new/returning parse error for "${site}": ${g.parseErrors.join('; ')}`);
+    }
+  } catch (err) {
+    console.error(`gross by new/returning customer failed for "${site}":`, err.message);
+  }
   return {
     customers,
     new_customers: newCustomers,
     returning_customers: Math.max(0, customers - newCustomers),
+    new_customers_gross: newGross,
+    returning_customers_gross: returningGross,
   };
 }
 
