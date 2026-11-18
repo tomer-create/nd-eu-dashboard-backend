@@ -224,7 +224,8 @@ async function getWithMonthCache({ site, start, end, compare, refresh }, build) 
       // 19 (2026-11-16): bundle_sales (Bundle Products section).
       // 20 (2026-11-18): free-shipping-tagged gifts filed as gifts; the sheet's gift / sample tags.
       // 21 (2026-11-18): GWP items by product.
-      const outdated = !(row.payload && row.payload.discounts_version >= 21) || partial;
+      // 22 (2026-11-18): Pinterest revenue on Pixel CV (channels re-pull).
+      const outdated = !(row.payload && row.payload.discounts_version >= 22) || partial;
       if (recentlyClosed && ageHours > STALE_AFTER_HOURS) {
         pullAndStore(key, args, build).catch((err) => console.error('month-cache: background refresh failed:', err.message));
         return { payload: row.payload, cache: 'stale', fetchedAt: row.fetched_at };
