@@ -2981,47 +2981,36 @@ function renderKPIs(monthData) {
   if (rt) grid.appendChild(rt);
 }
 
-// Net Sales + TikTok Net Sales (2026-11-18, Tomer: "Create a new box … that
-// will include TikTok net sales + Net sales … in the Goal Tracker"; he chose
-// to simply add them). Net Sales = the headline's Shopify Net Sales; TikTok
-// Net Sales = the TikTok Shop section's Net Sales tile (TikTok's own net
-// sales by order date, /api/tiktok-shop/payouts). ND.COM and All Sites.
-// TikTok Shop orders also sync into Shopify, so they're in both parts.
+// Net Sales + TikTok platform discounts (2026-11-18, Tomer: first "Create a
+// new box … that will include TikTok net sales + Net sales … in the Goal
+// Tracker", then the same day: "replace with Net sales + TikTok platform
+// discounts (TikTok pays)"). Net Sales = the headline's Shopify Net Sales,
+// which has TikTok's vouchers taken off as discounts although TikTok pays
+// them back to ND; the box adds them back. TikTok platform discounts = the
+// line under the Discounts Breakdown's Total (discountView → platform).
+// ND.COM and All Sites. No YoY / MoM: the prior periods' platform discounts
+// aren't loaded with this period.
 function combinedNetTile(monthData) {
   if (state.site !== 'com' && state.site !== 'all') return null;
   const netK = (monthData.kpis || []).find(k => k.label === 'Net Sales');
   if (!netK || netK.no_data || typeof netK.actual !== 'number') return null;
-  const pr = ttPriorRanges();
-  if (!pr.r) return null;
-  const ok = e => e && e.status === 'ok' && e.data && typeof e.data.net_sales === 'number' ? e.data : null;
-  const e = ttEnsurePayouts(pr.r);
-  const cur = ok(e);
+  const view = discountView(monthData);
+  const platform = view && view.platform && typeof view.platform.discount_value === 'number' ? view.platform.discount_value : null;
   const tile = document.createElement('div');
-  tile.className = 'kpi-tile' + (cur ? '' : ' no-data');
-  const label = 'Net Sales + TikTok Net Sales';
-  const tip = 'Net Sales (Shopify, as in the headline) + TikTok Shop Net Sales (TikTok’s own net sales of the orders placed in the period, as in the TikTok Shop section). TikTok Shop orders also sync into Shopify, so they are in both parts.';
-  if (!cur) {
+  tile.className = 'kpi-tile' + (platform === null ? ' no-data' : '');
+  const label = 'Net Sales + TikTok Platform Discounts';
+  const tip = 'Net Sales (Shopify, as in the headline) + TikTok platform discounts (TikTok pays) — TikTok’s vouchers on TikTok Shop orders, which Shopify counts as discounts but TikTok pays back to ND in its settlement (the line under the Discounts Breakdown’s Total).';
+  if (platform === null) {
     tile.innerHTML = `<div class="kpi-top"><span class="kpi-label" title="${escText(tip)}">${label}</span></div>
-      <div class="kpi-value" style="font-size:13px;color:var(--text-muted);font-weight:500">${e && e.status === 'error' ? 'TikTok net sales couldn’t be loaded — ' + escText(e.error || '') : 'Loading TikTok net sales…'}</div>`;
+      <div class="kpi-value" style="font-size:13px;color:var(--text-muted);font-weight:500">${monthData.discount_split ? 'No TikTok platform discounts split for this period yet' : 'The Discounts Breakdown for this period isn’t loaded yet — click Sync'}</div>`;
     return tile;
   }
-  const total = netK.actual + cur.net_sales;
-  const priorNet = ch => (ch === null || ch === undefined || (1 + ch) === 0) ? null : netK.actual / (1 + ch);
-  const chg = (kind) => {
-    const r = pr[kind]; if (!r) return null;
-    const p = ok(ttEnsurePayouts(r));
-    const pn = priorNet(netK[kind]);
-    if (!p || !(p.net_sales_orders > 0) || pn === null) return null;
-    const prior = pn + p.net_sales;
-    return prior ? (total - prior) / Math.abs(prior) : null;
-  };
-  const y = chg('yoy'), m = chg('mom');
-  const chip = (v, lbl) => { const str = fmtYoY(v); return str === null ? '' : `<span class="kpi-yoy ${v >= 0 ? 'up' : 'down'}">${lbl} ${str}</span>`; };
+  const total = netK.actual + platform;
   tile.innerHTML = `
-      <div class="kpi-top"><span class="kpi-label" title="${escText(tip)}">${label}</span>${chip(y, 'YoY')}</div>
-      <div class="kpi-mom-row">${chip(m, momLabel())}</div>
+      <div class="kpi-top"><span class="kpi-label" title="${escText(tip)}">${label}</span></div>
+      <div class="kpi-mom-row"></div>
       <div class="kpi-value" title="${escText(fmtTileExact(total, 'currency-cents'))}">${fmtTile(total, 'currency-cents')}</div>
-      <div class="kpi-goal-line">Net Sales ${fmtVal(netK.actual, 'currency-full')} + TikTok Shop ${fmtVal(cur.net_sales, 'currency-full')}</div>`;
+      <div class="kpi-goal-line">Net Sales ${fmtVal(netK.actual, 'currency-full')} + TikTok platform discounts (TikTok pays) ${fmtVal(platform, 'currency-full')}</div>`;
   return tile;
 }
 
