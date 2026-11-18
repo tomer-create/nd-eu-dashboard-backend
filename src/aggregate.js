@@ -346,7 +346,10 @@ function splitItemOf(a, isTikTok, owners, shopCur, ctx) {
     return 'codes';
   }
   const owner = owners.get(appKey(a));
-  if (owner && SPLIT_TAG_ITEM[owner]) return SPLIT_TAG_ITEM[owner];
+  // A line-item discount "owned" by a free-shipping tag isn't a shipping
+  // discount (2026-11-18 QA: Black Friday's "Free gift" on orders tagged
+  // DISCOUNT-ZWKHZ was filed as Free shipping) — the title decides instead.
+  if (owner && SPLIT_TAG_ITEM[owner] && !(SPLIT_TAG_ITEM[owner] === 'free_shipping' && !/ship/i.test(title))) return SPLIT_TAG_ITEM[owner];
   if (owner && ctx.saleTags.has(owner)) return 'sale:' + owner;
   if (owner && ctx.bundleTags.has(owner)) return 'bundles';
   if (/free\s*sample/i.test(title)) return 'free_sample';
@@ -354,6 +357,10 @@ function splitItemOf(a, isTikTok, owners, shopCur, ctx) {
   if (/glow/i.test(title) && /gift/i.test(title)) return 'glow_gift';
   if (/glam/i.test(title) && /gift/i.test(title)) return 'glam_gift';
   if (/free\s*gift|gift\s*with\s*purchase|gwp/i.test(title)) return 'free_gift';
+  // Gift / sample tags from the sheet (2026-11-18): a 100% or "free …"
+  // discount on an order carrying one of them.
+  if (ctx.sampleTags && [...ctx.sampleTags].some((t) => ctx.orderTags.has(t)) && /sample/i.test(title)) return 'free_sample';
+  if (ctx.giftTags && [...ctx.giftTags].some((t) => ctx.orderTags.has(t)) && /100\s*%|\bfree\b/i.test(title)) return 'free_gift';
   if (KNOWN_PROGRAM_TITLES[0].re.test(title)) return 'pro_artist';
   if (/free\s*ship/i.test(title)) return 'free_shipping';
   if (GENERIC_TITLE_RE.test(title) || /sale|bundle|\bsets?\b/i.test(title)) {
@@ -379,6 +386,10 @@ function discountSplit(orders, owners, grossSales, discountTags) {
     : ['DISCOUNT-36SLV', 'DISCOUNT-KB24C', 'DISCOUNT-COLLECTIONBUNDLES', 'DISCOUNT-VPXK0', 'DISCOUNT-UHGUH', 'DISCOUNT-JUM8U'].map((t) => ({ tag: t, name: DEFAULT_TAG_LABELS[t] || t }));
   const saleTags = new Set(saleList.map((x) => x.tag));
   const bundleTags = new Set(bundleList.map((x) => x.tag));
+  // Gift / sample tags from the sheet (2026-11-18), minus the tier gifts and
+  // samples this file already maps by tag.
+  const giftTags = new Set(((discountTags && discountTags.gifts) || []).map((x) => x.tag).filter((t) => !SPLIT_TAG_ITEM[t]));
+  const sampleTags = new Set(((discountTags && discountTags.samples) || []).map((x) => x.tag));
   const saleLabel = new Map(saleList.map((x) => [x.tag, x.name]));
   // discGross (2026-11-04, Tomer: "add another column with discount ratio"):
   // the gross of the line items each item / bucket / the total discounted —
@@ -404,7 +415,7 @@ function discountSplit(orders, owners, grossSales, discountTags) {
     const isTikTok = order.sourceName === 'tiktok';
     const shopCur = order.totalDiscountsSet && order.totalDiscountsSet.shopMoney && order.totalDiscountsSet.shopMoney.currencyCode;
     const perItem = new Map(); // item -> { v, lines:Set }
-    const ctx = { saleTags, bundleTags, saleList, orderTags: new Set(order.tags || []) };
+    const ctx = { saleTags, bundleTags, giftTags, sampleTags, saleList, orderTags: new Set(order.tags || []) };
     // Prices that include VAT (taxesIncluded — ND.IL, ND.EU early 2026):
     // Shopify's Discounts / Gross Sales (Key Metrics) take the VAT out line
     // by line — a line that was taxed counts ÷ (1 + its rate), a line taxed
@@ -560,13 +571,14 @@ function bundleSales(orders) {
 // Pick & Pack (2026-11-16, Tomer: "for the pick and pack cost on the .com
 // should be all the orders from Mainfreight Warehouse location, take the
 // number of lines means the unique number of products you have in the order
-// and multiply it by 5. do the same for the .eu"). Orders whose fulfillment
+// and multiply it by 5. do the same for the .eu"; the rate became 1.8 on
+// 2026-11-18). Orders whose fulfillment
 // is assigned to the Mainfreight Warehouse location; lines = the order's
 // distinct products (variants) still on it (current quantity > 0, so
 // cancelled orders and removed items don't count) that need shipping;
-// cost = lines × 5 in the store's currency ($ / €). Undefined when the
+// cost = lines × PICK_PACK_RATE in the store's currency ($ / €). Undefined when the
 // orders were fetched without locations (stored months / light queries).
-const PICK_PACK_RATE = 5;
+const PICK_PACK_RATE = 1.8; // 2026-11-18, Tomer: "instead of multiply by 5 multiply by 1.8"
 const PICK_PACK_LOCATION = /mainfreight/i;
 function pickPack(orders) {
   let seen = false, orderCount = 0, lines = 0;
@@ -903,7 +915,8 @@ function aggregate(orders, { tagLabels = DEFAULT_TAG_LABELS, discountTags = null
     //                  the 29th/30th), more outages flagged as partial.
     // 18 (2026-11-05): Samples broken down by product.
     // 19 (2026-11-16): bundle_sales (Shopify bundles by lineItemGroup).
-    discounts_version: orders.length === 0 ? 19 : (sawDiscountApps ? (byApp && sawSourceName ? 19 : byApp ? 5 : 3) : 1),
+    // 20 (2026-11-18): gifts owned by free-shipping tags; sheet gift / sample tags.
+    discounts_version: orders.length === 0 ? 20 : (sawDiscountApps ? (byApp && sawSourceName ? 20 : byApp ? 5 : 3) : 1),
     discounts_by_app: byApp,
   };
 }
