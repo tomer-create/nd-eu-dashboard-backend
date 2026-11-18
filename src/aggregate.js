@@ -333,6 +333,8 @@ const SPLIT_TAG_ITEM = {
 // title "attentive") or ND + 6 ("NDYns1cg", "ATTENTIVE15OFF"), always with a
 // lowercase letter (uppercase-only codes are Yotpo / affiliate codes).
 const isAttentiveCode = (code) => /^(ND)?[A-Za-z0-9]{6}$/.test(code) && /[a-z]/.test(code);
+// GWP items broken down by product in the split (2026-11-18).
+const GWP_ITEMS = new Set(['free_gift', 'makeup_bag', 'glow_gift', 'glam_gift']);
 function splitItemOf(a, isTikTok, owners, shopCur, ctx) {
   const title = String(a.title || '').trim();
   if (isTikTok) return /free\s*sample/i.test(title) ? 'tiktok_samples' : 'tiktok_seller';
@@ -395,6 +397,8 @@ function discountSplit(orders, owners, grossSales, discountTags) {
   // the gross of the line items each item / bucket / the total discounted —
   // Discount Ratio = discount ÷ that (Pro Artist → 30%, samples → 100%).
   const itemAcc = new Map(); // item -> { value, orderValue, orders, discGross }
+  // GWP items by product (2026-11-18), see the allocation loop.
+  const giftProducts = new Map(), giftUnitsSeen = new Set();
   const bucketAcc = new Map(SPLIT_BUCKETS.map((b) => [b.key, { value: 0, orderValue: 0, orders: 0, discGross: 0 }]));
   const bucketOf = new Map();
   SPLIT_BUCKETS.forEach((b) => b.items.forEach(([k]) => { bucketOf.set(k, b.key); itemAcc.set(k, { value: 0, orderValue: 0, orders: 0, discGross: 0 }); }));
@@ -467,17 +471,28 @@ function discountSplit(orders, owners, grossSales, discountTags) {
           item = 'sample:' + (String(e.node.title || '').trim() || 'Unnamed product');
           if (!itemAcc.has(item)) { bucketOf.set(item, 'samples'); itemAcc.set(item, { value: 0, orderValue: 0, orders: 0, discGross: 0 }); }
         }
-        allocs.push([item, v]);
+        allocs.push([item, v, String(e.node.title || '').trim() || 'Unnamed product']);
       }
       const retail = Math.max(orig, retailUnit(e.node) * (Number(e.node.quantity) || 0));
       const uplift = allocs.length ? retail - orig : 0;
       lineGross[li] = (orig + uplift) * f;
       const allocSum = allocs.reduce((x, [, v]) => x + v, 0);
-      allocs.forEach(([item, v]) => {
+      allocs.forEach(([item, v, title]) => {
         const up = uplift > 0 && allocSum > 0 ? uplift * (v / allocSum) : 0;
         const p = perItem.get(item) || { v: 0, ov: 0, lines: new Set() };
         p.v += (v + up) * f; p.ov += v * f; p.lines.add(li);
         perItem.set(item, p);
+        // Gifts by product (2026-11-18, Tomer: "in Gifts: GWP breakdown "free
+        // gift" should contain the 3 free gifts that been given from the
+        // order details"): each GWP item also keeps the products it was
+        // taken off — value at retail, units, orders.
+        if (GWP_ITEMS.has(item)) {
+          const m = giftProducts.get(item) || new Map(); giftProducts.set(item, m);
+          const g = m.get(title) || { v: 0, ov: 0, units: 0, orders: new Set() };
+          g.v += (v + up) * f; g.ov += v * f; g.orders.add(order.id || order.name || order);
+          if (!giftUnitsSeen.has(item + '|' + li + '|' + (order.id || order.name))) { giftUnitsSeen.add(item + '|' + li + '|' + (order.id || order.name)); g.units += Number(e.node.quantity) || 0; }
+          m.set(title, g);
+        }
       });
     });
     if (!perItem.size) continue;
@@ -515,7 +530,8 @@ function discountSplit(orders, owners, grossSales, discountTags) {
         : b.key === 'samples'
           // One item per product, biggest first (2026-11-05).
           ? [...itemAcc.keys()].filter((k) => k.startsWith('sample:')).sort((x, y) => itemAcc.get(y).value - itemAcc.get(x).value).map((k) => [k, k.slice(7)])
-          : b.items).map(([k, label]) => ({ key: k, label, discount_value: itemAcc.get(k).value, order_value: itemAcc.get(k).orderValue, orders: itemAcc.get(k).orders, discounted_gross: itemAcc.get(k).discGross, orders_gross: itemAcc.get(k).ordersGross || 0 })),
+          : b.items).map(([k, label]) => ({ key: k, label, discount_value: itemAcc.get(k).value, order_value: itemAcc.get(k).orderValue, orders: itemAcc.get(k).orders, discounted_gross: itemAcc.get(k).discGross, orders_gross: itemAcc.get(k).ordersGross || 0,
+        ...(giftProducts.has(k) ? { products: [...giftProducts.get(k).entries()].sort((x, y) => y[1].v - x[1].v).map(([title, g]) => ({ label: title, discount_value: g.v, order_value: g.ov, units: g.units, orders: g.orders.size })) } : {}) })),
     })),
   };
 }
@@ -916,7 +932,8 @@ function aggregate(orders, { tagLabels = DEFAULT_TAG_LABELS, discountTags = null
     // 18 (2026-11-05): Samples broken down by product.
     // 19 (2026-11-16): bundle_sales (Shopify bundles by lineItemGroup).
     // 20 (2026-11-18): gifts owned by free-shipping tags; sheet gift / sample tags.
-    discounts_version: orders.length === 0 ? 20 : (sawDiscountApps ? (byApp && sawSourceName ? 20 : byApp ? 5 : 3) : 1),
+    // 21 (2026-11-18): GWP items by product (items[].products).
+    discounts_version: orders.length === 0 ? 21 : (sawDiscountApps ? (byApp && sawSourceName ? 21 : byApp ? 5 : 3) : 1),
     discounts_by_app: byApp,
   };
 }
