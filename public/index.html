@@ -3343,6 +3343,18 @@ function renderTikTokShop(monthData, opts = {}) {
     const d = gmvSC && gmvSC.status === 'ok' ? gmvSC.data : null;
     const todayIso = new Date().toISOString().slice(0, 10);
     let covered = false, through = null;
+    // Seller Center units / refunds on TikTok's own days (2026-11-18): TikTok's
+    // figure for the days it has one + TikTok's order data for the days it
+    // doesn't (units_fill); null unless that covers every one of those days.
+    const scPart = (k) => {
+      if (!d || d.perf_error) return null;
+      const v = k === 'units' ? d.perf_units : d.perf_refunds, n = k === 'units' ? d.units_days : d.refunds_days;
+      const uf = d.units_fill && !d.units_fill.error ? d.units_fill : null;
+      const fv = uf ? uf[k] : 0, fd = uf ? uf.days : 0;
+      const need = Array.isArray(d.perf_days) ? d.perf_days.length : d.days_with_data;
+      if (typeof v !== 'number' || typeof fv !== 'number' || n + fd !== need) return null;
+      return v + fv;
+    };
     if (d && !d.perf_error && d.perf_from === gmvRange.start && d.days_with_data) {
       const lastIso = gmvRange.end <= todayIso ? gmvRange.end : new Date(Date.parse(todayIso + 'T00:00:00Z') + 86400000).toISOString().slice(0, 10);
       const expected = Math.round((Date.parse(lastIso + 'T00:00:00Z') - Date.parse(gmvRange.start + 'T00:00:00Z')) / 86400000);
@@ -3376,7 +3388,7 @@ function renderTikTokShop(monthData, opts = {}) {
       // cover every day TikTok has a GMV for (units_days, backend v13), or a
       // payload from before the backend filled them).
       const addF = (scv, fv) => (tikDays && typeof scv !== 'number') || (f.days && typeof fv !== 'number') ? null : (tikDays ? scv : 0) + (f.days ? fv : 0);
-      return { value: (tikDays ? d.gmv : 0) + f.gmv, orders: (tikDays ? d.orders : 0) + f.orders, units: addF(d.units_days === tikDays ? d.perf_units : null, f.units), refunds: addF(d.refunds_days === tikDays ? d.perf_refunds : null, f.refunds), src: !tikDays ? 'TikTok order data' : f.days ? 'TikTok Shop analytics + order data for ' + f.days + ' day' + (f.days === 1 ? '' : 's') : 'TikTok Shop analytics', tiktok: true, note };
+      return { value: (tikDays ? d.gmv : 0) + f.gmv, orders: (tikDays ? d.orders : 0) + f.orders, units: addF(scPart('units'), f.units), refunds: addF(scPart('refunds'), f.refunds), src: !tikDays ? 'TikTok order data' : f.days ? 'TikTok Shop analytics + order data for ' + f.days + ' day' + (f.days === 1 ? '' : 's') : 'TikTok Shop analytics', tiktok: true, note };
     }
     const gap = covered && d.gap && d.gap.gmv !== undefined ? d.gap : null;
     const lastDay = new Date(Date.parse((gmvRange.end <= todayIso ? gmvRange.end : new Date(Date.parse(todayIso + 'T00:00:00Z') + 86400000).toISOString().slice(0, 10)) + 'T00:00:00Z') - 86400000).toISOString().slice(0, 10);
@@ -3386,8 +3398,8 @@ function renderTikTokShop(monthData, opts = {}) {
       : 'TikTok Shop analytics' + (through ? ' · through ' + fmtD(through) : '');
     return covered
       ? { value: d.gmv + (gap ? gap.gmv : 0), orders: d.orders + (gap ? gap.orders : 0),
-          units: d.units_days === d.days_with_data && typeof d.perf_units === 'number' && (!gap || typeof gap.units === 'number') ? d.perf_units + (gap ? gap.units : 0) : null,
-          refunds: d.refunds_days === d.days_with_data && typeof d.perf_refunds === 'number' && (!gap || typeof gap.refunds === 'number') ? d.perf_refunds + (gap ? gap.refunds : 0) : null,
+          units: scPart('units') !== null && (!gap || typeof gap.units === 'number') ? scPart('units') + (gap ? gap.units : 0) : null,
+          refunds: scPart('refunds') !== null && (!gap || typeof gap.refunds === 'number') ? scPart('refunds') + (gap ? gap.refunds : 0) : null,
           src: gap ? 'TikTok Shop analytics + order data for the latest days' : 'TikTok Shop analytics', tiktok: true, note }
       : { value: hasProdDiscEarly ? proxyNow : null, orders: tt.orders, tiktok: false, note: (hasProdDiscEarly ? '≈ estimate from TikTok order data — ' : '') + why };
   })();
