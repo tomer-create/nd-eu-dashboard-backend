@@ -1663,7 +1663,33 @@ function applyCogsRule(site, md) {
 // with no Mainfreight orders (before the move to Mainfreight, Nov 2026) keep
 // the P&L sheet's figure. Like the COGS rule, the Profit KPI keeps using the
 // sheet's Total Cost.
+// ND.IL Pick & Pack (2026-11-19, Tomer: "for the ND.IL the Pick & Pack cost
+// should be calculated by the number of orders multiply by 15"): the
+// period's Number of Orders (Key Metrics) × ₪15, on IL's "Pick & Pack" line.
+const IL_PICK_PACK_PER_ORDER = 15;
+function applyIlPickPackRule(md) {
+  if (!md || !Array.isArray(md.other_costs) || !Array.isArray(md.kpis)) return md;
+  const k = md.kpis.find(x => x.label === 'Number of Orders');
+  const orders = k && !k.no_data && typeof k.actual === 'number' ? k.actual : null;
+  const label = md.other_costs.find(o => o.label === 'Pick & Pack') ? 'Pick & Pack' : md.other_costs.find(o => o.label === 'Pick & Pack Fee') ? 'Pick & Pack Fee' : null;
+  if (!(orders > 0) || !label) return md;
+  const cost = orders * IL_PICK_PACK_PER_ORDER;
+  let delta = 0;
+  const out = Object.assign({}, md);
+  out.other_costs = md.other_costs.map(o => {
+    if (o.label !== label) return o;
+    delta += cost - (o.actual || 0);
+    return Object.assign({}, o, { actual: cost, no_data: false, note: `${Math.round(orders).toLocaleString('en-US')} orders × ₪${IL_PICK_PACK_PER_ORDER}` });
+  });
+  if (delta && typeof md.total_other_costs_actual === 'number') {
+    out.total_other_costs_actual = md.total_other_costs_actual + delta;
+    const t = out.total_other_costs_actual;
+    out.other_costs = out.other_costs.map(o => Object.assign({}, o, { ratio_of_total: t ? (o.actual || 0) / t : null }));
+  }
+  return out;
+}
 function applyPickPackRule(site, md) {
+  if (site === 'il') return applyIlPickPackRule(md);
   const pp = md && md.pick_pack;
   if (!pp || !(pp.orders > 0) || (site !== 'com' && site !== 'eu') || !md.other_costs) return md;
   const label = 'Pick & Pack Fee';
