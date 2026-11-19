@@ -246,8 +246,12 @@ const CHANNEL_MAP = [
   // report means Pinterest's Pixel CV isn't reliable either — same fix,
   // same reasoning, just a channel Tomer didn't call out the first time.
   // Back to Pixel CV 2026-11-18 (Tomer: "for Pinterest revenue use triple
-  // whale cv pixel") — Last-Click order revenue, like Google / Meta / TikTok.
-  { ids: ['pinterest-ads'], label: 'Pinterest', cv: 'pixel' },
+  // whale cv pixel"). 2026-11-19 (Tomer: "for now it's not pulling the right
+  // data"; of the Pixel CVs he matched Triple Whale's to Triple Attribution —
+  // Nov 1–18: $3,070 / 45 orders, vs Last Click $982 / 18): Pinterest's Pixel
+  // CV and orders use the Triple Attribution model (lifetime window); its
+  // spend is the same under every model.
+  { ids: ['pinterest-ads'], label: 'Pinterest', cv: 'pixel', model: 'Triple Attribution' },
   // New rows — not present in the dashboard's existing P&L-sourced Section 4
   // data for any site/month yet. The frontend merge adds these as brand new
   // channel rows the first time a Sync returns data for them.
@@ -273,6 +277,8 @@ const CHANNEL_MAP = [
 ];
 
 const ALL_CHANNEL_IDS = CHANNEL_MAP.flatMap((c) => c.ids);
+// Channels whose Pixel CV uses Triple Attribution instead of Last Click (2026-11-19).
+const TA_CHANNEL_IDS = CHANNEL_MAP.filter((c) => c.model === 'Triple Attribution').flatMap((c) => c.ids);
 
 // Whether an entry's date window overlaps [start, end) (end exclusive).
 function inWindow(c, start, end) {
@@ -325,12 +331,13 @@ async function fetchChannelPerformance(site, start, end) {
       SUM(channel_reported_conversion_value) AS channel_cv,
       SUM(order_revenue) AS pixel_cv,
       SUM(orders_quantity) AS pixel_orders,
-      SUM(channel_reported_conversions) AS channel_orders
+      SUM(channel_reported_conversions) AS channel_orders,
+      model
     FROM pixel_joined_tvf()
     WHERE event_date >= '${start}' AND event_date < '${end}'
-      AND model = 'Last Click'
+      AND (model = 'Last Click'${TA_CHANNEL_IDS.length ? ` OR (model = 'Triple Attribution' AND channel IN (${TA_CHANNEL_IDS.map((id) => `'${id}'`).join(',')}))` : ''})
       AND channel IN (${ALL_CHANNEL_IDS.map((id) => `'${id}'`).join(',')})
-    GROUP BY channel, month_start
+    GROUP BY channel, model, month_start
   `.trim();
 
   let json;
@@ -369,7 +376,15 @@ async function fetchChannelPerformance(site, start, end) {
     const m = String(r.month_start || '').slice(0, 10);
     if (c && m && ((c.from && m < c.from) || (c.until && m >= c.until))) return;
     const acc = byChannelId.get(r.channel) || { channel: r.channel };
-    SUM_FIELDS.forEach((f) => { acc[f] = (acc[f] || 0) + Number(r[f] || 0); });
+    // Triple Attribution rows (2026-11-19, Pinterest): only their Pixel CV /
+    // orders are used — spend and the channel's own figures repeat on every
+    // model's row, so they're taken from the Last Click rows.
+    if (r.model === 'Triple Attribution') {
+      acc.ta_pixel_cv = (acc.ta_pixel_cv || 0) + Number(r.pixel_cv || 0);
+      acc.ta_pixel_orders = (acc.ta_pixel_orders || 0) + Number(r.pixel_orders || 0);
+    } else {
+      SUM_FIELDS.forEach((f) => { acc[f] = (acc[f] || 0) + Number(r[f] || 0); });
+    }
     byChannelId.set(r.channel, acc);
   });
 
@@ -377,15 +392,16 @@ async function fetchChannelPerformance(site, start, end) {
     // Several ids for one entry (e.g. the hidden organic one) are added up.
     const found = c.ids.map((id) => byChannelId.get(id)).filter(Boolean);
     const row = found.length > 1
-      ? found.reduce((t, r) => { ['spend', 'channel_cv', 'pixel_cv', 'pixel_orders', 'channel_orders'].forEach((f) => { t[f] = (t[f] || 0) + Number(r[f] || 0); }); return t; }, {})
+      ? found.reduce((t, r) => { ['spend', 'channel_cv', 'pixel_cv', 'pixel_orders', 'channel_orders', 'ta_pixel_cv', 'ta_pixel_orders'].forEach((f) => { t[f] = (t[f] || 0) + Number(r[f] || 0); }); return t; }, {})
       : found[0];
     if (!row) return { label: c.label, hidden: c.hidden || undefined, no_data: true };
     const spend = Number(row.spend || 0);
-    const revenue = Number((c.cv === 'channel' ? row.channel_cv : row.pixel_cv) || 0);
+    const ta = c.model === 'Triple Attribution';
+    const revenue = Number((c.cv === 'channel' ? row.channel_cv : ta ? row.ta_pixel_cv : row.pixel_cv) || 0);
     // Orders on the same basis as the revenue (added 2026-10-08 for Section
     // 4's AOV): Pixel orders for Pixel-CV channels, channel-reported
     // conversions for Channel-CV channels.
-    const orders = Number((c.cv === 'channel' ? row.channel_orders : row.pixel_orders) || 0);
+    const orders = Number((c.cv === 'channel' ? row.channel_orders : ta ? row.ta_pixel_orders : row.pixel_orders) || 0);
     return {
       label: c.label,
       hidden: c.hidden || undefined,
@@ -394,6 +410,7 @@ async function fetchChannelPerformance(site, start, end) {
       revenue_actual: revenue,
       orders,
       cv_source: c.cv, // 'pixel' or 'channel' — surfaced so the frontend note can say which
+      cv_model: c.cv === 'pixel' ? (c.model || 'Last Click') : undefined,
     };
   });
 }
