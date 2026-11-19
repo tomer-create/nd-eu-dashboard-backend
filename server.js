@@ -1064,6 +1064,23 @@ async function applyTikTokFunding(payload, site, start, end) {
       const gS = f.any_original ? f.seller_original / f.any_original : share, gP = f.any_original ? f.platform_original / f.any_original : 1 - share;
       const seller = { ...item, ...part(share, oS, gS), label: 'TikTok seller discounts (ND pays)' };
       const platform = { ...item, ...part(1 - share, oP, gP), key: 'tiktok_platform', label: 'TikTok platform discounts (TikTok pays)' };
+      // 2026-11-19 (Tomer: "for TikTok platform discounts (TikTok pays) change
+      // for all the tiktok orders from seller central, summarize all SKU
+      // platform discount without cancel orders"): the platform line is
+      // TikTok's own total — every order's platform discount (the sum of its
+      // SKUs'), cancelled orders left out — and its orders are the orders that
+      // had one. The seller line is the rest of Shopify's TikTok discount, so
+      // the two still add up to it.
+      if (typeof f.platform_live === 'number') {
+        const total = item.discount_value || 0;
+        const pv = Math.min(Math.max(0, f.platform_live), Math.max(0, total));
+        platform.discount_value = pv;
+        platform.order_value = pv;
+        platform.orders = f.platform_live_orders;
+        platform.source = 'seller_center_skus_no_cancelled';
+        seller.discount_value = total - pv;
+        if (typeof item.order_value === 'number') seller.order_value = item.order_value - pv;
+      }
       // Orders with a platform voucher only (no seller discount) — 2026-11-16,
       // Tomer: the Discounts Breakdown leaves the platform discounts out, so
       // these orders (and their gross) come off the Regular bucket and Total.
@@ -1075,7 +1092,7 @@ async function applyTikTokFunding(payload, site, start, end) {
       items = bucket.items.slice(0, ii).concat([seller, platform], bucket.items.slice(ii + 1));
     }
     const buckets = sp.buckets.map((b, k) => (k === bi ? { ...b, items } : b));
-    const funding = ok ? { source: 'tiktok_orders', seller: f.seller, platform: f.platform, orders: f.orders } : { source: f === 'timeout' ? 'pending' : 'unavailable' };
+    const funding = ok ? { source: 'tiktok_orders', seller: f.seller, platform: f.platform, platform_live: f.platform_live, cancelled_orders: f.cancelled_orders, orders: f.orders } : { source: f === 'timeout' ? 'pending' : 'unavailable' };
     return { ...payload, discount_split: { ...sp, buckets, tiktok_funding: funding } };
   } catch (err) {
     console.error(`applyTikTokFunding (site=${site}) failed:`, err.message);
