@@ -1290,7 +1290,14 @@ async function pullPayouts(start, end) {
 // like the rest of the TikTok figures) — the Discounts Breakdown then splits
 // Shopify's TikTok discount line in the same proportion. Checked 1–7 Nov
 // 2026: seller $13,770 + platform $19,098 = $32,868 vs Shopify's $36,837.
-const FUNDING_FIELDS = ['order_id', 'order_create_datetime', 'order_is_sample_order', 'order_payment_original_total_product_price', 'order_payment_seller_discount', 'order_payment_platform_discount'];
+// 2026-11-19 (Tomer: "for TikTok platform discounts (TikTok pays) change for
+// all the tiktok orders from seller central, summarize all SKU platform
+// discount without cancel orders"): order_status is read too, and
+// platform_live = the platform discount (TikTok's order-level figure, the sum
+// of its SKUs' platform discounts) of every order that isn't CANCELLED.
+// FUNDING_VERSION 2 — periods stored before it are pulled again.
+const FUNDING_FIELDS = ['order_id', 'order_create_datetime', 'order_is_sample_order', 'order_status', 'order_payment_original_total_product_price', 'order_payment_seller_discount', 'order_payment_platform_discount'];
+const FUNDING_VERSION = 2;
 const fundingCache = new Map(); // start|end -> { at, ttl, promise }
 function fetchDiscountFunding(start, end) {
   if (!process.env.WINDSOR_API_KEY) return Promise.resolve(null);
@@ -1302,7 +1309,7 @@ function fetchDiscountFunding(start, end) {
   // A closed period is kept in the database (it doesn't change), so a restart
   // or a new deploy doesn't have to ask Windsor again (~15–60 s a month).
   const promise = closed
-    ? readFunding(start, end).then((stored) => stored || pullDiscountFunding(start, end).then((v) => { if (v) writeFunding(start, end, v); return v; }))
+    ? readFunding(start, end).then((stored) => (stored && stored.v >= FUNDING_VERSION ? stored : pullDiscountFunding(start, end).then((v) => { if (v) writeFunding(start, end, v); return v; })))
     : pullDiscountFunding(start, end);
   fundingCache.set(key, { at: Date.now(), ttl: closed ? 12 * 3600 * 1000 : 15 * 60 * 1000, promise });
   promise.then((v) => { if (!v) fundingCache.delete(key); }, () => fundingCache.delete(key));
@@ -1345,7 +1352,8 @@ async function writeFunding(start, end, payload) {
 async function pullDiscountFunding(start, end) {
   const rows = await windsorQuery(FUNDING_FIELDS, start, end);
   const seen = new Set();
-  const out = { start, end, orders: 0, seller: 0, platform: 0, original: 0, seller_orders: 0, platform_orders: 0, any_orders: 0, seller_original: 0, platform_original: 0, any_original: 0 };
+  const out = { v: FUNDING_VERSION, start, end, orders: 0, seller: 0, platform: 0, original: 0, seller_orders: 0, platform_orders: 0, any_orders: 0, seller_original: 0, platform_original: 0, any_original: 0,
+    platform_live: 0, platform_live_orders: 0, platform_live_original: 0, cancelled_orders: 0 };
   rows.forEach((r) => {
     const id = String(r.order_id || '');
     if (!id || seen.has(id)) return;
@@ -1359,9 +1367,12 @@ async function pullDiscountFunding(start, end) {
     if (sd > 0) { out.seller_orders++; out.seller_original += orig; }
     if (pd > 0) { out.platform_orders++; out.platform_original += orig; }
     if (sd > 0 || pd > 0) { out.any_orders++; out.any_original += orig; }
+    if (String(r.order_status || '').toUpperCase() === 'CANCELLED') { out.cancelled_orders++; return; }
+    out.platform_live += pd;
+    if (pd > 0) { out.platform_live_orders++; out.platform_live_original += orig; }
   });
   if (!out.orders) return null;
-  console.log(`windsor-tiktok discount funding ${start}..${end}: ${out.orders} orders, seller $${out.seller.toFixed(2)}, platform $${out.platform.toFixed(2)}`);
+  console.log(`windsor-tiktok discount funding ${start}..${end}: ${out.orders} orders, seller $${out.seller.toFixed(2)}, platform $${out.platform.toFixed(2)}, platform without cancelled $${out.platform_live.toFixed(2)} (${out.cancelled_orders} cancelled)`);
   return out;
 }
 
