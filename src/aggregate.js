@@ -935,7 +935,8 @@ function aggregate(orders, { tagLabels = DEFAULT_TAG_LABELS, discountTags = null
     // 21 (2026-11-18): GWP items by product (items[].products).
     // 22 (2026-11-18): not a discounts change — Pinterest revenue switched to
     //   Triple Whale's Pixel CV, so stored months re-pull their channels.
-    discounts_version: orders.length === 0 ? 22 : (sawDiscountApps ? (byApp && sawSourceName ? 22 : byApp ? 5 : 3) : 1),
+    // 23 (2026-11-19): Pinterest revenue on Triple Attribution Pixel CV.
+    discounts_version: orders.length === 0 ? 23 : (sawDiscountApps ? (byApp && sawSourceName ? 23 : byApp ? 5 : 3) : 1),
     discounts_by_app: byApp,
   };
 }
