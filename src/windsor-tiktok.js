@@ -827,6 +827,9 @@ function combinePayloads(start, end, parts) {
     perf_partial: parts.some((p) => p.perf_partial),
     perf_through: (parts[parts.length - 1] || {}).perf_through || null,
     perf_days: parts.every((p) => Array.isArray(p.perf_days)) ? [].concat(...parts.map((p) => p.perf_days)) : undefined,
+    // Days without units (QA 2026-11-19: missing for quarters / YTD, so their
+    // Units Sold / Refunds fell back to Triple Whale) — the endpoint fills them.
+    units_missing_days: parts.every((p) => Array.isArray(p.units_missing_days)) ? [].concat(...parts.map((p) => p.units_missing_days)) : undefined,
     perf_days_from_store: parts.reduce((a, p) => a + num(p.perf_days_from_store), 0),
     perf_error: withPerf.length ? null : ((parts.find((p) => p.perf_error) || {}).perf_error || null),
     fetched_at: parts.map((p) => p.fetched_at).filter(Boolean).sort()[0] || new Date().toISOString(),
