@@ -1990,19 +1990,30 @@ function combineChannels(entries) {
 // labels" for a Set built by iterating entries in that order), and skip
 // (contribute $0, not a crash) any entry missing a given
 // label — mirrors combineChannels()'s `if (!c || c.no_data) return;` guard.
+// ND.IL's sheet calls Pick & Pack "Pick & Pack" (ND.COM / ND.EU: "Pick & Pack
+// Fee") — one row in All Sites (QA 2026-11-19: it showed as two rows).
+const OTHER_COST_ALIAS = { 'Pick & Pack': 'Pick & Pack Fee' };
+const ocLabel = (l) => OTHER_COST_ALIAS[l] || l;
 function combineOtherCosts(entries) {
   const labelSet = new Set();
-  entries.forEach(e => e.monthData.other_costs.forEach(o => labelSet.add(o.label)));
+  entries.forEach(e => e.monthData.other_costs.forEach(o => labelSet.add(ocLabel(o.label))));
   const labels = Array.from(labelSet);
   const items = labels.map(label => {
-    let actual = 0, goal = 0, note = null;
+    let actual = 0, goal = 0, note = null, noteless = false;
+    const notes = new Set();
     entries.forEach(e => {
-      const o = e.monthData.other_costs.find(x => x.label === label);
-      if (!o) return;
+      const os = e.monthData.other_costs.filter(x => ocLabel(x.label) === label);
+      if (!os.length) return;
+      const o = os.length === 1 ? os[0] : { actual: os.reduce((t, x) => t + (x.actual || 0), 0), goal: os.reduce((t, x) => t + (x.goal || 0), 0), note: null };
       actual += (o.actual || 0) * e.fx;
       goal += (o.goal || 0) * e.fx;
-      if (o.note) note = o.note;
+      if (o.note) { note = o.note; notes.add(o.note); } else if (Math.abs(o.actual || 0) >= 0.5) noteless = true;
     });
+    // A note describes one month / store's figure (e.g. Pick & Pack's lines ×
+    // rate, the PPC fee's spend) — when the parts' notes differ it would
+    // describe only one of them (QA 2026-11-19: Q4's Pick & Pack showed
+    // November's lines next to the Oct + Nov total), so it's left off.
+    if (notes.size > 1 || (notes.size && noteless)) note = null;
     return { label, actual, goal, note, ratio_of_total: null };
   });
   const total_other_costs_actual = entries.reduce((s, e) => s + (e.monthData.total_other_costs_actual || 0) * e.fx, 0);
@@ -2324,6 +2335,17 @@ function combineMonthDatas(entries, opts) {
           let ti = tb.items.find(x => x.mk === mk);
           if (!ti) { ti = { key: i.key, mk, label: i.label, discount_value: 0, orders: 0, discounted_gross: 0, orders_gross: 0 }; tb.items.push(ti); }
           ti.discount_value += (i.discount_value || 0) * e.fx; ti.orders += i.orders || 0; ti.discounted_gross += (i.discounted_gross || 0) * e.fx; ti.orders_gross += (i.orders_gross || 0) * e.fx;
+          // GWP gifts by product (QA 2026-11-19: dropped in All Sites / Q4 /
+          // YTD): summed by product name; left out when a month / store with
+          // this item has no product list (stored before 18 Nov 2026).
+          if (Array.isArray(i.products)) {
+            ti.products = ti.products || [];
+            i.products.forEach(q => {
+              let tp = ti.products.find(x => x.label === q.label);
+              if (!tp) { tp = { label: q.label, discount_value: 0, order_value: 0, units: 0, orders: 0 }; ti.products.push(tp); }
+              tp.discount_value += (q.discount_value || 0) * e.fx; tp.order_value += (q.order_value || 0) * e.fx; tp.units += q.units || 0; tp.orders += q.orders || 0;
+            });
+          } else if (Math.abs(i.discount_value || 0) >= 0.005) ti.productsMissing = true;
           // TikTok platform discounts (left out of the Discounts Breakdown,
           // 2026-11-16): their order value and platform-voucher-only orders.
           if (i.key === 'tiktok_platform') {
@@ -2338,6 +2360,11 @@ function combineMonthDatas(entries, opts) {
     // Samples are one item per product (2026-11-05): biggest first after the
     // months / stores are added together.
     discSplit.buckets.forEach(b => { if (b.key === 'samples') b.items.sort((x, y) => (y.discount_value || 0) - (x.discount_value || 0)); });
+    discSplit.buckets.forEach(b => b.items.forEach(i => {
+      if (i.productsMissing) delete i.products;
+      else if (i.products) i.products.sort((x, y) => y.discount_value - x.discount_value);
+      delete i.productsMissing;
+    }));
   }
   // A month stored before the Discount Ratio (no discounted_gross) would make
   // the summed ratio wrong — show it as "—" until every part has it.
@@ -4315,7 +4342,7 @@ function ttEnsurePayouts(range) {
     })()
       .then(d => { payoutsCache[key] = { status: 'ok', data: d }; })
       .catch(err => { payoutsCache[key] = { status: 'error', error: err.message, at: Date.now() }; })
-      .finally(() => { if (state.site === 'com') renderTikTokShop(getMonthData()); if (state.site === 'com' || state.site === 'all') renderKPIs(getMonthData()); });
+      .finally(() => { if (state.site === 'com') renderTikTokShop(getMonthData()); });
   }
   return payoutsCache[key];
 }
