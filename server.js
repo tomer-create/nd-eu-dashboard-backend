@@ -10,7 +10,7 @@ const { fetchCustomAdSpend, fetchRetention, fetchChannelPerformance, fetchChanne
 const { fetchTikTokShop, fetchGmvEstimate, fetchGifting, fetchOrderStatus, fetchAllProducts } = require('./src/tiktokshop');
 const { getSellerCenter, fetchPayouts, fetchDiscountFunding } = require('./src/windsor-tiktok');
 const tiktokApi = require('./src/tiktok-api');
-const { fetchPnlSheetChannels, fetchPnlSheetOtherCosts, fetchPnlSheetTotalCost, fetchPnlSheetMarketingSpend, fetchPnlSheetShopPpc, fetchPnlSheetRtbHouseSpend, fetchPnlSheetGoals } = require('./src/googlesheets');
+const { fetchAttentiveCosts, fetchPnlSheetChannels, fetchPnlSheetOtherCosts, fetchPnlSheetTotalCost, fetchPnlSheetMarketingSpend, fetchPnlSheetShopPpc, fetchPnlSheetRtbHouseSpend, fetchPnlSheetGoals } = require('./src/googlesheets');
 const { VALID_SITES: YOTPO_VALID_SITES, ensureYotpoSchema, recordYotpoEvent, getYotpoSummary, getYotpoCustomerTierMap, getPool: getYotpoPool } = require('./src/yotpo');
 const { registerYotpoWebhooksForSite, addYotpoTopicsForSite } = require('./src/yotpo-setup');
 const { importYotpoHistory } = require('./src/yotpo-import');
@@ -985,6 +985,27 @@ function getAttentiveSplitCached(site, start, end) {
   if (attentiveSplitCache.size > 500) attentiveSplitCache.delete(attentiveSplitCache.keys().next().value);
   return promise;
 }
+// Attentive costs from Attentive itself (2026-11-22 — see fetchAttentiveCosts
+// in src/googlesheets.js): the 4 Attentive rows' spend comes from the daily
+// Attentive feed instead of the P&L sheet, for whole-month periods the feed
+// covers. Applied on every response, like the revenue below.
+async function applyAttentiveCost(payload, site, start, end) {
+  try {
+    if (!payload || !Array.isArray(payload.channels) || !['com', 'eu', 'il'].includes(site)) return payload;
+    const feed = await fetchAttentiveCosts(site, start, end);
+    if (!feed) return payload;
+    const channels = payload.channels.map((c) => {
+      if (!(c.label in feed.costs)) return c;
+      const v = feed.costs[c.label];
+      if (c.no_data && !v) return c;
+      return { ...c, no_data: false, revenue_actual: c.no_data ? 0 : c.revenue_actual, spend_actual: v, spend_sheet: c.no_data ? null : c.spend_actual, spend_source: 'attentive', spend_through: feed.through };
+    });
+    return { ...payload, channels };
+  } catch (err) {
+    console.error(`applyAttentiveCost (site=${site}) failed:`, err.message);
+    return payload;
+  }
+}
 async function applyAttentiveRevenue(payload, site, start, end) {
   try {
     if (!payload || !Array.isArray(payload.channels) || !['com', 'eu', 'il'].includes(site)) return payload;
@@ -1149,7 +1170,7 @@ app.get('/api/data', async (req, res) => {
     );
     res.set('X-Month-Cache', cache);
     if (fetchedAt) res.set('X-Month-Cache-Fetched-At', new Date(fetchedAt).toISOString());
-    res.json(await applySaleTagsSource(await applyTikTokFunding(await applyAttentiveRevenue(payload, req.query.site, req.query.start, req.query.end), req.query.site, req.query.start, req.query.end), req.query.site));
+    res.json(await applySaleTagsSource(await applyTikTokFunding(await applyAttentiveCost(await applyAttentiveRevenue(payload, req.query.site, req.query.start, req.query.end), req.query.site, req.query.start, req.query.end), req.query.site, req.query.start, req.query.end), req.query.site));
   } catch (err) {
     console.error(err);
     res.status(err.status || 502).json({ error: err.message });
@@ -1162,7 +1183,7 @@ app.post('/api/sync', async (req, res) => {
   const { site, start, end, compare = [] } = req.body || {};
   try {
     const result = await buildDataResponse({ site, start, end, compare });
-    res.json(await applySaleTagsSource(await applyTikTokFunding(await applyAttentiveRevenue(result, site, start, end), site, start, end), site));
+    res.json(await applySaleTagsSource(await applyTikTokFunding(await applyAttentiveCost(await applyAttentiveRevenue(result, site, start, end), site, start, end), site, start, end), site));
   } catch (err) {
     console.error(err);
     res.status(err.status || 502).json({ error: err.message });
