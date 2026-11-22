@@ -1296,8 +1296,11 @@ async function pullPayouts(start, end) {
 // platform_live = the platform discount (TikTok's order-level figure, the sum
 // of its SKUs' platform discounts) of every order that isn't CANCELLED.
 // FUNDING_VERSION 2 — periods stored before it are pulled again.
+// 2026-11-22 (Tomer chose "option 2"): the seller line is TikTok's own seller
+// discount too — seller_live = every non-cancelled order's seller discount.
+// FUNDING_VERSION 3.
 const FUNDING_FIELDS = ['order_id', 'order_create_datetime', 'order_is_sample_order', 'order_status', 'order_payment_original_total_product_price', 'order_payment_seller_discount', 'order_payment_platform_discount'];
-const FUNDING_VERSION = 2;
+const FUNDING_VERSION = 3;
 const fundingCache = new Map(); // start|end -> { at, ttl, promise }
 function fetchDiscountFunding(start, end) {
   if (!process.env.WINDSOR_API_KEY) return Promise.resolve(null);
@@ -1353,7 +1356,7 @@ async function pullDiscountFunding(start, end) {
   const rows = await windsorQuery(FUNDING_FIELDS, start, end);
   const seen = new Set();
   const out = { v: FUNDING_VERSION, start, end, orders: 0, seller: 0, platform: 0, original: 0, seller_orders: 0, platform_orders: 0, any_orders: 0, seller_original: 0, platform_original: 0, any_original: 0,
-    platform_live: 0, platform_live_orders: 0, platform_live_original: 0, cancelled_orders: 0 };
+    platform_live: 0, platform_live_orders: 0, platform_live_original: 0, seller_live: 0, seller_live_orders: 0, seller_live_original: 0, cancelled_orders: 0 };
   rows.forEach((r) => {
     const id = String(r.order_id || '');
     if (!id || seen.has(id)) return;
@@ -1370,9 +1373,11 @@ async function pullDiscountFunding(start, end) {
     if (String(r.order_status || '').toUpperCase() === 'CANCELLED') { out.cancelled_orders++; return; }
     out.platform_live += pd;
     if (pd > 0) { out.platform_live_orders++; out.platform_live_original += orig; }
+    out.seller_live += sd;
+    if (sd > 0) { out.seller_live_orders++; out.seller_live_original += orig; }
   });
   if (!out.orders) return null;
-  console.log(`windsor-tiktok discount funding ${start}..${end}: ${out.orders} orders, seller $${out.seller.toFixed(2)}, platform $${out.platform.toFixed(2)}, platform without cancelled $${out.platform_live.toFixed(2)} (${out.cancelled_orders} cancelled)`);
+  console.log(`windsor-tiktok discount funding ${start}..${end}: ${out.orders} orders, seller $${out.seller.toFixed(2)}, platform $${out.platform.toFixed(2)}, platform without cancelled $${out.platform_live.toFixed(2)}, seller without cancelled $${out.seller_live.toFixed(2)} (${out.cancelled_orders} cancelled)`);
   return out;
 }
 
