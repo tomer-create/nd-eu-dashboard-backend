@@ -669,4 +669,40 @@ async function fetchRetention(site, start, end) {
   return { site, start, end, base_start: baseStart, base_customers: base, period_customers: Number(r.period_customers) || 0, retained, rate: base ? retained / base : null };
 }
 
-module.exports = { fetchRetention, fetchChannelRefunds, fetchCountryConversion, fetchChannelPerformance, fetchAttentiveSplit, attentiveBucket, attentiveRevenueKeys, ATTENTIVE_LABEL_KEYS, CHANNEL_MAP, TW_SHOP_ID, twSqlRequest };
+// RTB House spend (2026-11-22, Tomer: "RTB House Ads ... directly from
+// Triple Whale"): RTB House isn't an ad integration in Triple Whale — its
+// spend comes in as custom ad spend (Cost Settings), which is the
+// "custom-expenses" platform's custom_ad_spend in summary_metrics_tvf.
+// Checked live: ND.COM Oct 2026 $3,204 vs the P&L sheet's RTB House Ads
+// $3,200; it starts Oct 2026 with RTB House and is the only custom ad spend
+// on any of the 3 stores. Returns the period's total, 0 when none, or null
+// when Triple Whale fails.
+async function fetchCustomAdSpend(site, start, end) {
+  if (!process.env.TRIPLEWHALE_API_KEY) return null;
+  if (!ISO_DAY.test(String(start)) || !ISO_DAY.test(String(end))) return null;
+  const shopId = TW_SHOP_ID[site];
+  if (!shopId) return null;
+  const query = `
+    SELECT SUM(custom_ad_spend) AS spend
+    FROM summary_metrics_tvf()
+    WHERE event_date >= '${start}' AND event_date < '${end}'
+      AND platform = 'custom-expenses'
+  `.trim();
+  try {
+    const res = await twSqlRequest(shopId, query, start, end);
+    if (!res.ok) {
+      const body = await res.text().catch(() => '');
+      console.error(`Triple Whale custom ad spend failed for site=${site} (${res.status}): ${body.slice(0, 300)}`);
+      return null;
+    }
+    const json = await res.json();
+    const rows = Array.isArray(json) ? json : json.rows || json.data || [];
+    if (!Array.isArray(rows)) return null;
+    return rows.reduce((t, r) => t + Number((r && r.spend) || 0), 0);
+  } catch (err) {
+    console.error(`Triple Whale custom ad spend errored for site=${site}:`, err.message);
+    return null;
+  }
+}
+
+module.exports = { fetchCustomAdSpend, fetchRetention, fetchChannelRefunds, fetchCountryConversion, fetchChannelPerformance, fetchAttentiveSplit, attentiveBucket, attentiveRevenueKeys, ATTENTIVE_LABEL_KEYS, CHANNEL_MAP, TW_SHOP_ID, twSqlRequest };
