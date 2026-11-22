@@ -1203,7 +1203,73 @@ async function fetchPnlSheetGoals(site) {
   return out;
 }
 
+// Attentive costs feed (2026-11-22, Tomer: "SMS Jurney, SMS Campaign, Email
+// Jurney, Email Campaign - Newsletter ... pull directly from the source"; he
+// chose a daily scheduled task). Attentive has no API this server can call,
+// so a scheduled task reads Attentive's own reporting every morning (all 3
+// accounts) and writes one row per store per month to the "ND Dashboard -
+// Attentive feed" sheet (shared as view-by-link, read here as CSV):
+//   sms_journey_cost   = Journeys & Received Billable Spend (Text)
+//   sms_campaign_cost  = Campaign Billable Spend (Text)
+//   email_*_cost       = Email sends / 1000 x $0.70 (Attentive doesn't bill
+//                        email by journey vs campaign — same formula as the
+//                        P&L sheet)
+// Checked 2026-11-22 against the P&L sheet for Oct 2026: COM $1,196 / $4,263
+// / $72 / $2,003 and EU $2,095 / $2,879 / $32 / $255 — identical. Amounts are
+// in USD as Attentive reports them, unconverted (same as the sheet). ND.IL
+// has no Attentive SMS (its SMS Campaign row is Adscale's, kept from the P&L
+// sheet) — blank cells are left alone.
+const ATTENTIVE_FEED_ID = process.env.ATTENTIVE_FEED_SHEET_ID || '1YM6rM8VlcmiPby_A9KuQbqPr6l2KKeOECEFd12cGD0A';
+const ATTENTIVE_FEED_TTL_MS = 10 * 60 * 1000;
+let attentiveFeedCache = null; // { at, promise }
+function fetchAttentiveFeed() {
+  if (attentiveFeedCache && Date.now() - attentiveFeedCache.at < ATTENTIVE_FEED_TTL_MS) return attentiveFeedCache.promise;
+  const promise = (async () => {
+    try {
+      const res = await fetch(`https://docs.google.com/spreadsheets/d/${ATTENTIVE_FEED_ID}/export?format=csv`, { signal: AbortSignal.timeout(30000) });
+      if (!res.ok) { console.error(`googlesheets: Attentive feed request failed (${res.status})`); return null; }
+      const text = await res.text();
+      if (!looksLikeCsv(text)) { console.error('googlesheets: Attentive feed came back as HTML — is it shared as "Anyone with the link"?'); return null; }
+      const rows = parseCsv(text);
+      const head = (rows[0] || []).map((h) => String(h || '').trim());
+      return rows.slice(1).filter((r) => r && r[0]).map((r) => Object.fromEntries(head.map((h, i) => [h, r[i] == null ? '' : String(r[i]).trim()])));
+    } catch (err) {
+      console.error('googlesheets: Attentive feed fetch threw:', err.message);
+      return null;
+    }
+  })();
+  promise.then((v) => { if (!v) attentiveFeedCache = null; });
+  attentiveFeedCache = { at: Date.now(), promise };
+  return promise;
+}
+const ATTENTIVE_FEED_COLS = {
+  'Attentive - SMS Journey': 'sms_journey_cost',
+  'Attentive - SMS Campaign': 'sms_campaign_cost',
+  'Attentive - Email Journey': 'email_journey_cost',
+  'Attentive - Email Campaign (Newsletter)': 'email_campaign_cost',
+};
+// Costs for whole calendar months only (start = a month's 1st, end = a later
+// month's 1st, every month in the feed); null otherwise, so the P&L sheet's
+// figures stay. Returns { costs: { label: amount }, through }.
+async function fetchAttentiveCosts(site, start, end) {
+  if (!/^\d{4}-\d{2}-01$/.test(String(start)) || !/^\d{4}-\d{2}-01$/.test(String(end)) || end <= start) return null;
+  const feed = await fetchAttentiveFeed();
+  if (!feed) return null;
+  const months = [];
+  for (let d = new Date(`${start}T00:00:00Z`); d.toISOString().slice(0, 10) < end; d.setUTCMonth(d.getUTCMonth() + 1)) months.push(d.toISOString().slice(0, 7));
+  const rows = months.map((m) => feed.find((r) => r.site === site && r.month === m));
+  if (rows.some((r) => !r)) return null;
+  const costs = {};
+  Object.entries(ATTENTIVE_FEED_COLS).forEach(([label, col]) => {
+    if (rows.some((r) => r[col] === '')) return;
+    costs[label] = rows.reduce((t, r) => t + (Number(r[col]) || 0), 0);
+  });
+  const through = rows.map((r) => r.through).filter(Boolean).sort().pop() || null;
+  return Object.keys(costs).length ? { costs, through } : null;
+}
+
 module.exports = {
+  fetchAttentiveCosts,
   fetchPnlSheetChannels,
   fetchPnlSheetOtherCosts,
   fetchPnlSheetTotalCost,
