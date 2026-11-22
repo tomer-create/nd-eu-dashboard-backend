@@ -2,11 +2,11 @@ require('dotenv').config();
 const path = require('path');
 const express = require('express');
 const cors = require('cors');
-const { fetchProductImages, fetchSalesTimeseries, fetchRefundSplitByProduct, fetchCountrySessions, fetchOrders, fetchVoidedOrders, fetchOrdersLight, fetchOrdersForTierRevenue, fetchSalesReversals, fetchCostOfGoodsSold, fetchTopReturnsByProduct, fetchCountryBreakdown, fetchUsStateBreakdown, fetchSalesSummary, fetchCustomerAcquisition, fetchProductRetailPrices, fetchCollabsCodeSales, fetchTopProductsAnalytics, fetchSalesByProductForTags, getAuthorizeUrl, exchangeCodeForToken } = require('./src/shopify');
+const { fetchProductImages, fetchSalesTimeseries, fetchRefundSplitByProduct, fetchCountrySessions, fetchOrders, fetchVoidedOrders, fetchOrdersLight, fetchOrdersForTierRevenue, fetchSalesReversals, fetchCostOfGoodsSold, fetchShopCampaignSpend, fetchTopReturnsByProduct, fetchCountryBreakdown, fetchUsStateBreakdown, fetchSalesSummary, fetchCustomerAcquisition, fetchProductRetailPrices, fetchCollabsCodeSales, fetchTopProductsAnalytics, fetchSalesByProductForTags, getAuthorizeUrl, exchangeCodeForToken } = require('./src/shopify');
 const { aggregate } = require('./src/aggregate');
 const { singleFlight } = require('./src/singleflight');
 const { fetchDiscountTags, classify: classifyDiscountTags, FALLBACK: DISCOUNT_TAGS_COPY } = require('./src/discount-tags');
-const { fetchRetention, fetchChannelPerformance, fetchChannelRefunds, fetchAttentiveSplit, attentiveRevenueKeys, ATTENTIVE_LABEL_KEYS, fetchCountryConversion } = require('./src/triplewhale');
+const { fetchCustomAdSpend, fetchRetention, fetchChannelPerformance, fetchChannelRefunds, fetchAttentiveSplit, attentiveRevenueKeys, ATTENTIVE_LABEL_KEYS, fetchCountryConversion } = require('./src/triplewhale');
 const { fetchTikTokShop, fetchGmvEstimate, fetchGifting, fetchOrderStatus, fetchAllProducts } = require('./src/tiktokshop');
 const { getSellerCenter, fetchPayouts, fetchDiscountFunding } = require('./src/windsor-tiktok');
 const tiktokApi = require('./src/tiktok-api');
@@ -527,18 +527,30 @@ async function buildDataResponse({ site, start, end, compare }) {
     // channel rows show spend/revenue "actual" only, no MoM/YoY comparison
     // view for this section. Same independent try/catch as every other
     // sheet-backed call above.
-    fetchPnlSheetShopPpc(site, start).catch((err) => {
-      console.error(`fetchPnlSheetShopPpc threw for site=${site}:`, err.message);
-      return null;
-    }),
+    // 2026-11-22 (Tomer: "Shop PPC ... pull directly"): Shopify's own Shop
+    // campaigns spend for the exact period (fetchShopCampaignSpend); the
+    // sheet's Shop PPC row only if Shopify's report can't be read.
+    fetchShopCampaignSpend(site, start, end)
+      .then((v) => ({ no_data: false, actual: v, source: 'shopify' }))
+      .catch((err) => {
+        console.error(`fetchShopCampaignSpend failed for site=${site}, using the P&L sheet:`, err.message);
+        return fetchPnlSheetShopPpc(site, start).catch((e) => {
+          console.error(`fetchPnlSheetShopPpc threw for site=${site}:`, e.message);
+          return null;
+        });
+      }),
     // RTB House spend from the sheet's "RTB House Ads" row (2026-10-18) —
     // only for periods from October 2026, when RTB House replaced Criteo
     // (before that the same sheet row holds Criteo's cost).
     start >= RTB_HOUSE_FROM
-      ? fetchPnlSheetRtbHouseSpend(site, start).catch((err) => {
+      // 2026-11-22 (Tomer: "RTB House Ads ... directly from Triple Whale"):
+      // Triple Whale's custom ad spend for the exact period
+      // (fetchCustomAdSpend); the sheet's row only if Triple Whale fails.
+      ? fetchCustomAdSpend(site, start, end).then((v) => (v !== null ? { no_data: false, actual: v, source: 'triple_whale' }
+        : fetchPnlSheetRtbHouseSpend(site, start).catch((err) => {
           console.error(`fetchPnlSheetRtbHouseSpend threw for site=${site}:`, err.message);
           return null;
-        })
+        })))
       : Promise.resolve(null),
   ]));
 
@@ -722,6 +734,7 @@ async function buildDataResponse({ site, start, end, compare }) {
       mergedChannels[shopAppIdx] = {
         ...mergedChannels[shopAppIdx],
         spend_actual: pnlSheetShopPpc.actual,
+        spend_source: pnlSheetShopPpc.source === 'shopify' ? 'shopify' : 'pnl_sheet',
       };
     }
   }
@@ -733,10 +746,10 @@ async function buildDataResponse({ site, start, end, compare }) {
   if (pnlSheetRtbHouse && !pnlSheetRtbHouse.no_data) {
     const list = mergedChannels || [];
     const i = list.findIndex((c) => c.label === 'RTB House' && !c.no_data);
-    if (i !== -1) list[i] = { ...list[i], spend_actual: pnlSheetRtbHouse.actual, spend_source: 'pnl_sheet' };
+    if (i !== -1) list[i] = { ...list[i], spend_actual: pnlSheetRtbHouse.actual, spend_source: pnlSheetRtbHouse.source === 'triple_whale' ? 'triple_whale' : 'pnl_sheet' };
     else if (pnlSheetRtbHouse.actual) {
       const j = list.findIndex((c) => c.label === 'RTB House');
-      const row = { label: 'RTB House', no_data: false, spend_actual: pnlSheetRtbHouse.actual, revenue_actual: 0, orders: 0, cv_source: 'pixel', spend_source: 'pnl_sheet' };
+      const row = { label: 'RTB House', no_data: false, spend_actual: pnlSheetRtbHouse.actual, revenue_actual: 0, orders: 0, cv_source: 'pixel', spend_source: pnlSheetRtbHouse.source === 'triple_whale' ? 'triple_whale' : 'pnl_sheet' };
       if (j !== -1) list[j] = row; else list.push(row);
     }
     if (!mergedChannels && list.length) result.channels = list;
