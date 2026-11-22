@@ -557,7 +557,7 @@ async function buildDataResponse({ site, start, end, compare }) {
   // the sheet can't be read) — src/discount-tags.js.
   const discountTags = await fetchDiscountTags(site).catch((err) => { console.error('fetchDiscountTags threw:', err.message); return null; });
   const voidedOrders = await voidedOrdersP;
-  const current = applySalesReversals(applySalesSummary(aggregate(orders, { discountTags, splitExtraOrders: voidedOrders }), currentSalesSummary), currentReversals);
+  const current = applySalesReversals(applySalesSummary(aggregate(orders, { discountTags, splitExtraOrders: voidedOrders, site }), currentSalesSummary), currentReversals);
   current.kpis.cogs = resolveCogs(site, current.top_products, retailPrices, currentCogs);
   // New vs. returning customers (added 2026-09-06) — see fetchCustomerAcquisition
   // in src/shopify.js. Attached the same way COGS is above: a plain field on
