@@ -1311,6 +1311,7 @@ function mergeLiveIntoMonthData(monthData, live, site) {
           revenue_actual: revenue,
           // Attentive rows whose revenue now comes from Triple Whale (2026-10-20)
           revenue_source: lc.revenue_source || undefined,
+          spend_source: lc.spend_source || undefined,
           roas: roas,
           revenue_ratio: revenue_ratio,
           has_spend: true,
@@ -1327,6 +1328,7 @@ function mergeLiveIntoMonthData(monthData, live, site) {
           no_data: false,
           spend_actual: spend,
           spend_goal: 'spend_goal' in pg ? pg.spend_goal : null,
+          spend_source: lc.spend_source || undefined,
           revenue_actual: revenue,
           revenue_goal: 'revenue_goal' in pg ? pg.revenue_goal : null,
           roas_goal: 'roas_goal' in pg ? pg.roas_goal : null,
@@ -4066,10 +4068,10 @@ function renderTikTokShop(monthData, opts = {}) {
     const al = srcLines.find(l => l.name === 'Affiliate');
     const m = al ? lineMetrics(al) : null;
     const partial = !!(tt.months_with_data && tt.months_total && tt.months_with_data < tt.months_total);
-    if (!al) return { why: scPending ? 'Loading TikTok’s order data…' : (lowCoverageMsg || 'TikTok’s affiliate order data isn’t available for this period') };
+    if (!al) return { why: scPending ? 'Loading TikTok’s order data…' : (lowCoverageMsg || 'TikTok’s affiliate order data isn’t available for this period'), commission: commApi };
     const cy = chgFor(al, 'yoy'), cm = chgFor(al, 'mom');
     return { aov: m && m.aov !== null ? m.aov : null, rev: m && m.aov !== null ? al.rev * al.nr : 0, orders: al.orders,
-      gross: al.rev, yoy: cy.rev ?? null, mom: cm.rev ?? null, partial, api: !!(aff && aff.creator_src === 'api'), overlap: ovlShown || 0 };
+      gross: al.rev, yoy: cy.rev ?? null, mom: cm.rev ?? null, partial, api: !!(aff && aff.creator_src === 'api'), overlap: ovlShown || 0, commission: commApi };
   }
   const rcChip = (v, neutral) => { if (v === null || v === undefined) return '<span class="kpi-yoy flat">—</span>'; const c = ttChange(v, true); return `<span class="kpi-yoy ${neutral ? 'neutral' : c.dir}">${c.str}</span>`; };
   const rcChg = (line, key) => { const y = chgFor(line, 'yoy')[key], m = chgFor(line, 'mom')[key]; return `<div class="tt-rc-chg"><span class="lbl">YoY</span>${rcChip(y, key === 'cost')}<span class="lbl">${mLabel}</span>${rcChip(m, key === 'cost')}</div>`; };
@@ -4780,14 +4782,26 @@ function c4OrganicPlug(md, hidden) {
 // sheet. Kept as the sheet figure while TikTok's order data is loading, or
 // when a quarter / YTD isn't fully covered by TikTok data. Done before the
 // Organic plug, so Organic (= Gross − every other channel) follows.
+// Spend (2026-11-22, Tomer: "TikTok Affiliates / Commision cost (should pull
+// directly from TIKTOK)"): TikTok Affiliate Center's estimated commission for
+// the period — the same figure as the TikTok Shop section's "Affiliate
+// commission" row (creator + shop-ads commission, incl. any manual additions
+// in TT_COMMISSION_ADJUST) — replaces the P&L sheet's TikTok Affiliate
+// Commission row whenever TikTok's figure has loaded.
 function c4TikTokAffiliatesLive(md) {
   if (!md || !md.channels) return md;
   const i = md.channels.findIndex(c => c.label === 'TikTok Affiliates' && !c.no_data);
   if (i === -1) return md;
   const f = ttAffiliateAovFor();
-  if (!f || typeof f.gross !== 'number' || f.partial) return md;
-  const c = md.channels[i];
+  if (!f) return md;
+  const c0 = md.channels[i];
+  const c = typeof f.commission === 'number' ? Object.assign({}, c0, { spend_actual: f.commission, spend_sheet: c0.spend_actual, spend_source: 'tiktok' }) : c0;
   const channels = md.channels.slice();
+  if (typeof f.gross !== 'number' || f.partial) {
+    if (c === c0) return md;
+    channels[i] = Object.assign({}, c, { roas: c.spend_actual ? (c.revenue_actual || 0) / c.spend_actual : null });
+    return Object.assign({}, md, { channels });
+  }
   channels[i] = Object.assign({}, c, { revenue_actual: f.gross, revenue_sheet: c.revenue_actual, revenue_source: 'tiktok', tt_rev_yoy: f.yoy, tt_rev_mom: f.mom, roas: c.spend_actual ? f.gross / c.spend_actual : null });
   // Orders both TikTok Ads (Triple Whale CV) and TikTok Affiliates claim (ads
   // on a creator's content) — counted once in Organic and the Total
@@ -4956,7 +4970,7 @@ function renderChannels(monthData) {
   const whyBlank = (ch, which) => {
     if (ch.group) return 'Not enough of this group has this comparison (needs channels making up at least 80% of the group)';
     if (chgFailed && !ch.attentive && !ch.pnl) return 'Triple Whale comparison data didn’t load — try Sync';
-    if (ch.ttRevLive) return 'Revenue is live from TikTok and spend comes from the P&amp;L sheet, so ROAS has no like-for-like comparison';
+    if (ch.ttRevLive) return 'Revenue (and spend, once TikTok’s commission loads) are live from TikTok, so ROAS has no like-for-like comparison';
     if (ch.attRevMixed) return 'This Attentive revenue is partly from Triple Whale and partly from the P&amp;L sheet (ND.IL, and anything before August 2026, stay on the sheet), so there’s no like-for-like comparison';
     if (which === 'yoy' && ch.attRevFull) return 'Attentive started in January 2026 — no Triple Whale Attentive figures for last year';
     if (which === 'yoy') return ch.tw ? 'No figures for this channel in the same period last year'
@@ -4987,13 +5001,17 @@ function renderChannels(monthData) {
         : c.revenue_source === 'mixed' ? 'Triple Whale + P&amp;L sheet · spend from sheet' : 'P&amp;L sheet · Avg order: Triple Whale';
     }
     if (ch.collabs || c.label === 'Collabs Affiliate') return c.spend_est ? 'P&amp;L sheet · spend est. 9% commission (sheet behind) · Avg order: Collabs codes' : 'P&amp;L sheet · Avg order: Collabs codes';
-    if (ch.ttRevLive) return (ch.ttApi ? 'TikTok Affiliate Center' : 'TikTok order data (est.)') + ' · spend from P&amp;L sheet';
-    if (ch.ttAff && ch.aov !== null) return 'P&amp;L sheet · Avg order: TikTok order data';
+    if (ch.ttRevLive) return (ch.ttApi ? 'TikTok Affiliate Center' : 'TikTok order data (est.)') + (c.spend_source === 'tiktok' ? ' · spend: TikTok est. commission' : ' · spend from P&amp;L sheet');
+    if (ch.ttAff && ch.aov !== null) return (c.spend_source === 'tiktok' ? 'P&amp;L sheet · spend: TikTok est. commission' : 'P&amp;L sheet') + ' · Avg order: TikTok order data';
     if (c.plug) return 'Gross sales − all other channels';
     // Before / without the comparison data, fall back to the channels Triple
     // Whale normally supplies (see channels_note).
     const tw = ch.tw || (chgFailed && C4_TW_CHANNELS.includes(c.label));
-    if (tw) return c.label === 'Shop App' || c.label === 'RTB House' ? 'Triple Whale · spend from P&amp;L sheet' : c.label === 'Pinterest' ? 'Triple Whale · Triple Attribution' : 'Triple Whale';
+    // Shop App / RTB House spend (2026-11-22): Shopify's Shop campaigns spend
+    // and Triple Whale's custom ad spend; the P&L sheet only as a fallback.
+    if (tw) return c.label === 'Shop App' ? (c.spend_source === 'shopify' ? 'Triple Whale · spend: Shopify Shop campaigns' : 'Triple Whale · spend from P&amp;L sheet')
+      : c.label === 'RTB House' ? (c.spend_source === 'triple_whale' ? 'Triple Whale · spend: Triple Whale custom ad spend' : 'Triple Whale · spend from P&amp;L sheet')
+      : c.label === 'Pinterest' ? 'Triple Whale · Triple Attribution' : 'Triple Whale';
     return 'P&amp;L sheet';
   };
   const isIdle = (c) => !c.no_data && !c.spend_actual && !c.revenue_actual && !c.spend_goal && !c.revenue_goal;
