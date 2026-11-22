@@ -1064,6 +1064,7 @@ async function applyTikTokFunding(payload, site, start, end) {
       const gS = f.any_original ? f.seller_original / f.any_original : share, gP = f.any_original ? f.platform_original / f.any_original : 1 - share;
       const seller = { ...item, ...part(share, oS, gS), label: 'TikTok seller discounts (ND pays)' };
       const platform = { ...item, ...part(1 - share, oP, gP), key: 'tiktok_platform', label: 'TikTok platform discounts (TikTok pays)' };
+      let gap = null;
       // 2026-11-19 (Tomer: "for TikTok platform discounts (TikTok pays) change
       // for all the tiktok orders from seller central, summarize all SKU
       // platform discount without cancel orders"): the platform line is
@@ -1080,6 +1081,24 @@ async function applyTikTokFunding(payload, site, start, end) {
         platform.source = 'seller_center_skus_no_cancelled';
         seller.discount_value = total - pv;
         if (typeof item.order_value === 'number') seller.order_value = item.order_value - pv;
+        // 2026-11-22 (Tomer chose "option 2"): the seller line is TikTok's own
+        // seller discount (every non-cancelled order's, from Seller Center)
+        // instead of the rest of Shopify's figure. What Shopify has on top of
+        // TikTok's two figures (cancelled orders' discounts, retail-price
+        // valuation) gets its own line, so the bucket and the Total still
+        // equal Shopify's discounts.
+        if (typeof f.seller_live === 'number') {
+          const sv = Math.min(Math.max(0, f.seller_live), Math.max(0, total - pv));
+          seller.discount_value = sv;
+          seller.order_value = sv;
+          seller.orders = f.seller_live_orders;
+          seller.source = 'seller_center_no_cancelled';
+          const gapV = total - pv - sv;
+          if (Math.abs(gapV) >= 0.5) {
+            gap = { key: 'tiktok_gap', label: 'TikTok discounts: Shopify vs TikTok gap', discount_value: gapV, order_value: gapV,
+              orders: null, discounted_gross: null, orders_gross: null, cancelled_orders: f.cancelled_orders };
+          }
+        }
       }
       // Orders with a platform voucher only (no seller discount) — 2026-11-16,
       // Tomer: the Discounts Breakdown leaves the platform discounts out, so
@@ -1089,10 +1108,10 @@ async function applyTikTokFunding(payload, site, start, end) {
       platform.only_orders = Math.round((item.orders || 0) * oOnly);
       platform.only_orders_gross = typeof item.orders_gross === 'number' ? item.orders_gross * gOnly : null;
       platform.only_discounted_gross = typeof item.discounted_gross === 'number' ? item.discounted_gross * gOnly : null;
-      items = bucket.items.slice(0, ii).concat([seller, platform], bucket.items.slice(ii + 1));
+      items = bucket.items.slice(0, ii).concat(gap ? [seller, gap, platform] : [seller, platform], bucket.items.slice(ii + 1));
     }
     const buckets = sp.buckets.map((b, k) => (k === bi ? { ...b, items } : b));
-    const funding = ok ? { source: 'tiktok_orders', seller: f.seller, platform: f.platform, platform_live: f.platform_live, cancelled_orders: f.cancelled_orders, orders: f.orders } : { source: f === 'timeout' ? 'pending' : 'unavailable' };
+    const funding = ok ? { source: 'tiktok_orders', seller: f.seller, platform: f.platform, platform_live: f.platform_live, seller_live: f.seller_live, cancelled_orders: f.cancelled_orders, orders: f.orders } : { source: f === 'timeout' ? 'pending' : 'unavailable' };
     return { ...payload, discount_split: { ...sp, buckets, tiktok_funding: funding } };
   } catch (err) {
     console.error(`applyTikTokFunding (site=${site}) failed:`, err.message);
