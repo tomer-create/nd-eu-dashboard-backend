@@ -706,6 +706,40 @@ async function fetchCostOfGoodsSold(site, startISO, endISOExclusive) {
   return Math.abs(Number(rawValue));
 }
 
+// Shop campaign ad spend (2026-11-22, Tomer: "Shop PPC ... pull directly"):
+// Shopify's own Shop Campaigns spend, the same figure as the P&L sheet's
+// "Shop PPC" row (checked: ND.COM Oct 2026 $42,817 both). Triple Whale's
+// "shop_app" channel carries no spend, so the figure comes from Shopify's
+// shop_campaign_insights report. Returns a number, 0 when the store has no
+// Shop campaigns; throws if the report can't be read.
+async function fetchShopCampaignSpend(site, startISO, endISOExclusive) {
+  const untilDate = new Date(endISOExclusive + 'T00:00:00Z');
+  untilDate.setUTCDate(untilDate.getUTCDate() - 1);
+  const untilISO = untilDate.toISOString().slice(0, 10);
+  const q = `FROM shop_campaign_insights SHOW shop_campaign_ad_spend SINCE ${startISO} UNTIL ${untilISO}`;
+  const gqlQuery = `
+    query ShopCampaignSpend($q: String!) {
+      shopifyqlQuery(query: $q) {
+        parseErrors
+        tableData {
+          columns { name }
+          rows
+        }
+      }
+    }
+  `;
+  const data = await graphql(site, gqlQuery, { q });
+  const result = data.shopifyqlQuery;
+  if (result.parseErrors && result.parseErrors.length) {
+    throw new Error(`ShopifyQL parse error for "${site}" (query: ${q}): ${result.parseErrors.join('; ')}`);
+  }
+  const rows = result.tableData && result.tableData.rows;
+  if (!rows || !rows.length) return 0;
+  const raw = Array.isArray(rows[0]) ? rows[0][0] : Object.values(rows[0])[0];
+  const v = Number(raw);
+  return Number.isFinite(v) ? Math.abs(v) : 0;
+}
+
 // Per-product Returns breakdown (Section 3 "Top Return Products" on the
 // dashboard), live via ShopifyQL — added 2026-08-24 after Tomer reported
 // ND.EU's Top 15 Return Products section "doesn't show at all." That section
@@ -1641,6 +1675,7 @@ module.exports = {
   fetchCustomerAcquisition,
   fetchSalesReversals,
   fetchCostOfGoodsSold,
+  fetchShopCampaignSpend,
   fetchTopReturnsByProduct,
   fetchCountryBreakdown,
   fetchSalesSummary,
