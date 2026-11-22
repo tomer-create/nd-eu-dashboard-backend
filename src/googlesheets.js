@@ -331,6 +331,8 @@ const OTHER_COST_ROWS = {
     // Leaving it here too would double-count it. ND.IL's own 'Commision'
     // line is untouched -- Tomer only asked for this on ND.COM.
     { sheetLabel: 'TikTok Gifting', dashboardLabel: 'TikTok Gifting' },
+    // Line 58, added to the sheet 2026-11 (TikTok's settlement referral fee).
+    { sheetLabel: 'TikTok Shop transaction fee', dashboardLabel: 'TikTok Shop Transaction Fee' },
     { sheetLabel: 'PR Box cost', dashboardLabel: 'PR Box Cost' }, // combined with live COGS client-side, see note above
   ],
   eu: [
@@ -369,6 +371,7 @@ const OTHER_COST_ROWS = {
     { sheetLabel: 'Development', dashboardLabel: 'Development' },
     { sheetLabel: 'Yotpo Loyalty Program', dashboardLabel: 'Yotpo Loyalty Program' },
     { sheetLabel: 'Yotpo Reviews', dashboardLabel: 'Yotpo Reviews' },
+    { sheetLabel: 'TikTok Shop transaction fee', dashboardLabel: 'TikTok Shop Transaction Fee' }, // line 58
   ],
   il: [
     { sheetLabel: 'Boxes', dashboardLabel: 'Boxes' },
@@ -416,6 +419,7 @@ const OTHER_COST_ROWS = {
     // reintroduce the double-counting the 2026-09-08 fix removed.
     { sheetLabel: 'Commision', dashboardLabel: 'Commission (TikTok Affiliate)' }, // sheet has this typo (same as COM)
     { sheetLabel: 'TikTok Gifting', dashboardLabel: 'TikTok Gifting' },
+    { sheetLabel: 'TikTok Shop transaction fee', dashboardLabel: 'TikTok Shop Transaction Fee' }, // line 58
     { sheetLabel: 'PR Box cost', dashboardLabel: 'PR Box Cost' }, // standalone on IL, not combined with COGS
   ],
 };
@@ -1203,6 +1207,52 @@ async function fetchPnlSheetGoals(site) {
   return out;
 }
 
+// A closed month exactly as the P&L sheet has it (2026-11-22, Tomer: "the
+// numbers should be equal and the sources should be the same, you should use
+// the same numbers the P&L Spreadsheet is using"; he chose "Sheet for closed
+// months"). Reads the month's Actual column: every channel's revenue and
+// cost (GOAL_CHANNELS — the same sheet rows the goals come from), every
+// Other Costs line (OTHER_COST_ROWS, incl. line 58 TikTok Shop transaction
+// fee), Product Cost and Gross Sales. A row that exists but shows "-" is 0,
+// as in the sheet. Returns null when the month has no Gross Sales actual.
+async function fetchPnlSheetMonthActuals(site, start) {
+  if (!TAB_GID[site] || !start) return null;
+  const rows = await fetchSheetRows(site);
+  if (!rows) return null;
+  const col = findActualColIdx(rows, start, site);
+  if (col === -1) return null;
+  const { revenueRows, costRows, revStart, labelCol } = findRevenueAndCostRows(rows);
+  const topRows = new LabelRows();
+  for (let i = 0; i < (revStart === -1 ? rows.length : revStart); i++) {
+    const v = rows[i] && rows[i][labelCol] != null ? rows[i][labelCol].trim() : '';
+    if (v && topRows.get(v) === undefined) topRows.set(v, i);
+  }
+  const cell = (map, labels) => { const i = map.get(labels); return i === undefined ? undefined : (parseNum(rows[i] ? rows[i][col] : undefined) ?? 0); };
+  const gross = cell(topRows, 'Gross Sales');
+  if (!gross) return null;
+  const monIdx = new Date(`${start}T00:00:00Z`).getUTCMonth();
+  const channels = {};
+  for (const c of GOAL_CHANNELS) {
+    if (c.months && (monIdx < c.months[0] || monIdx > c.months[1])) continue;
+    let revenue = c.rev ? cell(revenueRows, c.rev) : undefined;
+    if (revenue === undefined && c.revSum) { const vs = c.revSum.map((l) => cell(revenueRows, l)).filter((v) => v !== undefined); revenue = vs.length ? vs.reduce((t, v) => t + v, 0) : undefined; }
+    let spend;
+    if (c.spendZero) spend = 0;
+    else if (c.cost && (!c.costSites || c.costSites.includes(site))) {
+      // The channel's own cost row only (costPlus is for the goals; Impact
+      // TBU is its own Other Costs line).
+      spend = cell(costRows, c.cost);
+    }
+    if (revenue === undefined && spend === undefined) continue;
+    channels[c.label] = { revenue: revenue === undefined ? null : revenue, spend: spend === undefined ? null : spend };
+  }
+  const other_costs = (OTHER_COST_ROWS[site] || []).map((e) => {
+    const v = cell(costRows, e.sheetLabel);
+    return v === undefined ? { label: e.dashboardLabel, no_data: true } : { label: e.dashboardLabel, no_data: false, actual: v, source: 'pnl_sheet' };
+  });
+  return { gross, channels, other_costs, product_cost: cell(costRows, 'Product Cost') ?? null, total_cost: cell(costRows, 'Total Cost') ?? null, updated: sheetUpdatedDate(rows) };
+}
+
 // Attentive costs feed (2026-11-22, Tomer: "SMS Jurney, SMS Campaign, Email
 // Jurney, Email Campaign - Newsletter ... pull directly from the source"; he
 // chose a daily scheduled task). Attentive has no API this server can call,
@@ -1270,6 +1320,7 @@ async function fetchAttentiveCosts(site, start, end) {
 
 module.exports = {
   fetchAttentiveCosts,
+  fetchPnlSheetMonthActuals,
   fetchPnlSheetChannels,
   fetchPnlSheetOtherCosts,
   fetchPnlSheetTotalCost,
