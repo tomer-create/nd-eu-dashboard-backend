@@ -379,7 +379,16 @@ function splitItemOf(a, isTikTok, owners, shopCur, ctx) {
   if (a.__typename === 'ManualDiscountApplication') return 'manual';
   return 'offers';
 }
-function discountSplit(orders, owners, grossSales, discountTags) {
+// An order's tags plus each DISCOUNT-x / OFFER-x tag's other spelling
+// (2026-11-22: the EU sheet lists Black Friday as "OFFER-V504I" / "OFFER-XWGQB"
+// while the orders carry DISCOUNT-V504I / DISCOUNT-XWGQB — the same discount),
+// so a sheet row matches whichever prefix it was written with.
+function tagVariants(tags) {
+  const s = new Set(tags);
+  tags.forEach((t) => { const m = /^(DISCOUNT|OFFER)-\s*(.+)$/i.exec(String(t)); if (m) { s.add('DISCOUNT-' + m[2]); s.add('OFFER-' + m[2]); } });
+  return s;
+}
+function discountSplit(orders, owners, grossSales, discountTags, site) {
   // Sale programs and bundle tags: from the sheet (discountTags), or — when a
   // caller passes none — this file's own sale-group tags and bundle tags.
   const saleList = discountTags && Array.isArray(discountTags.sales) ? discountTags.sales
@@ -405,6 +414,18 @@ function discountSplit(orders, owners, grossSales, discountTags) {
   // Sale items in sheet order, then the untagged % discounts.
   const saleKeys = saleList.map((x) => 'sale:' + x.tag).concat('sale:other');
   saleKeys.forEach((k) => { bucketOf.set(k, 'sales'); itemAcc.set(k, { value: 0, orderValue: 0, orders: 0, discGross: 0 }); });
+  // The sheet's gift rows as their own lines in "Gifts: GWP to customers"
+  // (2026-11-22, Tomer: "on ND.IL sync Discounts Breakdown from the
+  // Spreadsheet … for ND.EU pull the discounts from the Spreadsheet"): ND.IL /
+  // ND.EU only, the rows the code doesn't already map (tier gifts, the makeup
+  // bag, samples). A free line (discount = the whole line) on an order
+  // carrying the row's tag goes to the row — e.g. ND.IL "Black Friday Gifts
+  // 2026" (DISCOUNT-J9RR2), ND.EU "Black Friday 2026 - Free Gifts".
+  const giftRows = (site === 'eu' || site === 'il') && discountTags && Array.isArray(discountTags.gifts)
+    ? discountTags.gifts.filter((x) => x.tag && !SPLIT_TAG_ITEM[x.tag] && !/tier|makeup\s*bag|sample/i.test(x.name || '')) : [];
+  const giftKeys = giftRows.map((x) => 'gift:' + x.tag);
+  const giftLabel = new Map(giftRows.map((x) => ['gift:' + x.tag, String(x.name || x.tag).trim()]));
+  giftKeys.forEach((k) => { bucketOf.set(k, 'gwp'); itemAcc.set(k, { value: 0, orderValue: 0, orders: 0, discGross: 0 }); });
   let total = 0, totalOrders = 0, totalDiscGross = 0, totalOrderValue = 0, totalOrdersGross = 0;
   // TikTok Shop discounts by Shopify discount title (2026-11-15, Tomer: split
   // TikTok's seller- and platform-funded discounts) — what the TikTok channel
@@ -419,7 +440,7 @@ function discountSplit(orders, owners, grossSales, discountTags) {
     const isTikTok = order.sourceName === 'tiktok';
     const shopCur = order.totalDiscountsSet && order.totalDiscountsSet.shopMoney && order.totalDiscountsSet.shopMoney.currencyCode;
     const perItem = new Map(); // item -> { v, lines:Set }
-    const ctx = { saleTags, bundleTags, giftTags, sampleTags, saleList, orderTags: new Set(order.tags || []) };
+    const ctx = { saleTags, bundleTags, giftTags, sampleTags, saleList, orderTags: tagVariants(order.tags || []) };
     // Prices that include VAT (taxesIncluded — ND.IL, ND.EU early 2026):
     // Shopify's Discounts / Gross Sales (Key Metrics) take the VAT out line
     // by line — a line that was taxed counts ÷ (1 + its rate), a line taxed
@@ -464,6 +485,13 @@ function discountSplit(orders, owners, grossSales, discountTags) {
           const d = ttTitles.get(t) || { value: 0, allocations: 0 };
           d.value += v * f; d.allocations += 1; ttTitles.set(t, d);
         }
+        // The sheet's gift rows (ND.IL / ND.EU, 2026-11-22): a free line on an
+        // order with the row's tag, unless it's a sample, a tier gift, the
+        // makeup bag, a points code or a TikTok order's discount.
+        if (giftRows.length && !isTikTok && orig > 0 && v >= orig * 0.99 && (item === 'free_gift' || item === 'offers' || item === 'manual' || item.startsWith('sale:'))) {
+          const g = giftRows.find((x) => ctx.orderTags.has(x.tag));
+          if (g) item = 'gift:' + g.tag;
+        }
         // Samples by product (2026-11-05, Tomer: "for the samples on the
         // discount breakdown show all the samples breakdown by item"): each
         // free-sample discount goes to the product it was taken off.
@@ -486,7 +514,7 @@ function discountSplit(orders, owners, grossSales, discountTags) {
         // gift" should contain the 3 free gifts that been given from the
         // order details"): each GWP item also keeps the products it was
         // taken off — value at retail, units, orders.
-        if (GWP_ITEMS.has(item)) {
+        if (GWP_ITEMS.has(item) || item.startsWith('gift:')) {
           const m = giftProducts.get(item) || new Map(); giftProducts.set(item, m);
           const g = m.get(title) || { v: 0, ov: 0, units: 0, orders: new Set() };
           g.v += (v + up) * f; g.ov += v * f; g.orders.add(order.id || order.name || order);
@@ -530,6 +558,7 @@ function discountSplit(orders, owners, grossSales, discountTags) {
         : b.key === 'samples'
           // One item per product, biggest first (2026-11-05).
           ? [...itemAcc.keys()].filter((k) => k.startsWith('sample:')).sort((x, y) => itemAcc.get(y).value - itemAcc.get(x).value).map((k) => [k, k.slice(7)])
+          : b.key === 'gwp' ? giftKeys.map((k) => [k, giftLabel.get(k)]).concat(b.items)
           : b.items).map(([k, label]) => ({ key: k, label, discount_value: itemAcc.get(k).value, order_value: itemAcc.get(k).orderValue, orders: itemAcc.get(k).orders, discounted_gross: itemAcc.get(k).discGross, orders_gross: itemAcc.get(k).ordersGross || 0,
         ...(giftProducts.has(k) ? { products: [...giftProducts.get(k).entries()].sort((x, y) => y[1].v - x[1].v).map(([title, g]) => ({ label: title, discount_value: g.v, order_value: g.ov, units: g.units, orders: g.orders.size })) } : {}) })),
     })),
@@ -623,7 +652,7 @@ function pickPack(orders) {
   return { location: 'Mainfreight Warehouse', orders: orderCount, lines, rate: PICK_PACK_RATE, cost: lines * PICK_PACK_RATE };
 }
 
-function aggregate(orders, { tagLabels = DEFAULT_TAG_LABELS, discountTags = null, splitExtraOrders = null } = {}) {
+function aggregate(orders, { tagLabels = DEFAULT_TAG_LABELS, discountTags = null, splitExtraOrders = null, site = null } = {}) {
   let grossSales = 0;
   let discountsTotal = 0;
   let unitsSold = 0;
@@ -899,7 +928,7 @@ function aggregate(orders, { tagLabels = DEFAULT_TAG_LABELS, discountTags = null
     // The five-bucket split of every discount (2026-11-04). Needs discount
     // titles / allocations (byApp) and each order's channel (sourceName).
     // splitExtraOrders: the period's voided orders — in the split only.
-    discount_split: byApp && sawSourceName ? discountSplit(Array.isArray(splitExtraOrders) && splitExtraOrders.length ? orders.concat(splitExtraOrders.filter((o) => orderApps(o))) : orders, owners, grossSales, discountTags) : undefined,
+    discount_split: byApp && sawSourceName ? discountSplit(Array.isArray(splitExtraOrders) && splitExtraOrders.length ? orders.concat(splitExtraOrders.filter((o) => orderApps(o))) : orders, owners, grossSales, discountTags, site) : undefined,
     discounts_programs_total: sawDiscountApps ? {
       gross_sales: tableAcc.grossSales,
       discount_value: tableAcc.value,
@@ -936,7 +965,9 @@ function aggregate(orders, { tagLabels = DEFAULT_TAG_LABELS, discountTags = null
     // 22 (2026-11-18): not a discounts change — Pinterest revenue switched to
     //   Triple Whale's Pixel CV, so stored months re-pull their channels.
     // 23 (2026-11-19): Pinterest revenue on Triple Attribution Pixel CV.
-    discounts_version: orders.length === 0 ? 23 : (sawDiscountApps ? (byApp && sawSourceName ? 23 : byApp ? 5 : 3) : 1),
+    // 24 (2026-11-22): sheet tags match DISCOUNT-/OFFER- spellings; ND.IL /
+    //   ND.EU sheet gift rows as their own GWP lines.
+    discounts_version: orders.length === 0 ? 24 : (sawDiscountApps ? (byApp && sawSourceName ? 24 : byApp ? 5 : 3) : 1),
     discounts_by_app: byApp,
   };
 }
