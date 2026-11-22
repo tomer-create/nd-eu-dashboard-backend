@@ -3278,13 +3278,14 @@ function renderTikTokShop(monthData, opts = {}) {
   // sheet's TikTok Affiliates cost is only the fallback when the API isn't
   // available (it lags: Nov showed $780).
   const commRange = ttPeriodRange();
-  const commApiOf = (r) => { const d = r ? ttCreatorApiOk(ttEnsureCreatorApi(r)) : null; return d && typeof d.est_commission === 'number' ? d.est_commission + (d.est_ads_commission || 0) : null; };
+  const commApiOf = (r) => { const d = r ? ttCreatorApiOk(ttEnsureCreatorApi(r)) : null; return d && typeof d.est_commission === 'number' ? d.est_commission + (d.est_ads_commission || 0) + ttCommissionAdj(r) : null; };
   const commApi = commApiOf(commRange);
   // QA 2026-11-12: while TikTok's figure is still loading, show "loading"
   // instead of flashing the P&L sheet's (often stale) number first.
   const commE = commRange ? ttEnsureCreatorApi(commRange) : null;
   const commPending = commApi === null && !!commE && commE.status === 'loading';
-  const commission = commApi !== null ? commApi : commPending ? null : (chan && !chan.no_data ? (chan.spend_actual || 0) : null);
+  const commission = commApi !== null ? commApi : commPending ? null : (chan && !chan.no_data ? (chan.spend_actual || 0) + ttCommissionAdj(commRange) : null);
+  const commAdjNow = ttCommissionAdj(commRange);
   // Samples (TikTok Gifting) — 2026-10-26, Tomer: "take all the $0 orders
   // from Channel TikTok and take their product costs, add them together".
   // From /api/tiktok-shop/gifting (Shopify product cost of the $0 TikTok-
@@ -3827,7 +3828,7 @@ function renderTikTokShop(monthData, opts = {}) {
   const costRows = [
     { label: 'TikTok Ads spend', v: tt.ads_spend, yoy: tt.yoy ? tt.yoy.ads_spend : null, mom: tt.mom ? tt.mom.ads_spend : null, py: null, pm: null },
     { label: 'Affiliate commission', v: commission, yoy: commChg.yoy, mom: commChg.mom, pm: commApi === null && commChg.mom === null && sheetPrev ? sheetPrev.commission : null,
-      sub: commApi !== null ? 'TikTok Affiliate Center est. commission' : commPending ? 'loading TikTok’s figure…' : (commission !== null ? 'P&L sheet — TikTok’s figure unavailable' : '') },
+      sub: (commApi !== null ? 'TikTok Affiliate Center est. commission' : commPending ? 'loading TikTok’s figure…' : (commission !== null ? 'P&L sheet — TikTok’s figure unavailable' : '')) + (commAdjNow && commission !== null ? ` + ${fmtVal(commAdjNow, 'currency-full')} added (${TT_COMMISSION_ADJUST.filter(x => commRange && x.day >= commRange.start && x.day < commRange.end).map(x => c4RangeText({ start: x.day, end: new Date(Date.parse(x.day + 'T00:00:00Z') + 86400000).toISOString().slice(0, 10) })).join(', ')})` : '') },
     { label: 'Samples (TikTok Gifting)', v: samples, yoy: giftChg.yoy, mom: giftChg.mom, pm: !giftCur && giftChg.mom === null && sheetPrev ? sheetPrev.gifting : null,
       sub: giftCur ? (giftCur.cost_pct === 1 ? `Retail price of the ${fmtVal(giftCur.units || 0, 'number')} products in ${fmtVal(giftCur.orders, 'number')} $0 TikTok orders${giftCur.units_no_price ? ` · ${fmtVal(giftCur.units_no_price, 'number')} without a price` : ''}` : giftCur.cost_pct ? `${Math.round(giftCur.cost_pct * 100)}% of the ${fmtVal(giftCur.retail_value || 0, 'currency-full')} price of the ${fmtVal(giftCur.units || 0, 'number')} products in ${fmtVal(giftCur.orders, 'number')} $0 TikTok orders${giftCur.units_no_price ? ` · ${fmtVal(giftCur.units_no_price, 'number')} without a price` : ''}` : `product cost of ${fmtVal(giftCur.orders, 'number')} $0 TikTok orders`) : giftFromSheet ? 'P&L sheet — $0-order figure unavailable' : '' },
     { label: 'Sample shipping cost', v: sampleShip, py: shipY, pm: shipM, sub: giftCur ? `${fmtVal(giftCur.orders,'number')} creators = ${fmtVal(giftCur.orders,'number')} $0 TikTok orders × $${SHIP_PER}` : '' },
@@ -4342,6 +4343,14 @@ function ttEnsureOrderStatus(range) {
       .finally(() => { if (state.site === 'com' || state.site === 'all') renderTikTokShop(getMonthData()); });
   }
   return orderStatusCache[key];
+}
+// Manual additions to TikTok's Affiliate commission (2026-11-22, Tomer: "to
+// Affiliate commission on November 26 only add $1500"): added whenever the
+// period on screen includes the day.
+const TT_COMMISSION_ADJUST = [{ day: '2026-11-26', amount: 1500 }];
+function ttCommissionAdj(r) {
+  if (!r || !r.start || !r.end) return 0;
+  return TT_COMMISSION_ADJUST.reduce((t, x) => t + (x.day >= r.start && x.day < r.end ? x.amount : 0), 0);
 }
 function ttEnsurePayouts(range) {
   const key = range.start + '|' + range.end;
@@ -6123,6 +6132,39 @@ function topProductsPeriodData() {
   }
   return 'loading';
 }
+// Top Selling Products without gifts and samples (2026-11-22, Tomer: "On the
+// Top 10 Selling Products exclude all the gifts and the samples"):
+//  - sample products (title "… SAMPLE" / "דוגמית") are left out;
+//  - the units given free as gifts (the Discounts Breakdown's gift lines by
+//    product — GWP, the sheet's gift rows, tier gifts) come off each
+//    product's gross sales and units, so a product that is also sold keeps
+//    its sold units only;
+//  - a product with nothing left (only ever given free) is left out.
+const GIFT_SAMPLE_TITLE_RE = /\bsamples?\b|דוגמית/i;
+function topProductsWithoutGifts(list, monthData) {
+  const keyOf = t => String(t || '').replace(/\s+-\s+[^\x00-\x7F].*$/, '').trim().toUpperCase();
+  const gifts = new Map();
+  const sp = monthData && monthData.discount_split;
+  (sp && Array.isArray(sp.buckets) ? sp.buckets : []).forEach(b => (b.items || []).forEach(i => (Array.isArray(i.products) ? i.products : []).forEach(p => {
+    const g = gifts.get(keyOf(p.label)) || { gross: 0, units: 0 };
+    g.gross += p.discount_value || 0; g.units += p.units || 0;
+    gifts.set(keyOf(p.label), g);
+  })));
+  return list.filter(p => !GIFT_SAMPLE_TITLE_RE.test(p.title || '')).map(p => {
+    const g = gifts.get(keyOf(p.title));
+    if (!g) return p;
+    const gross = Math.max(0, (p.gross_sales || 0) - g.gross);
+    const prior = (ch) => (ch === null || ch === undefined || (1 + ch) === 0) ? null : (p.gross_sales || 0) / (1 + ch);
+    const rel = (ch) => { const pr = prior(ch); return pr ? (gross - pr) / pr : (ch === null || ch === undefined ? ch : null); };
+    return Object.assign({}, p, {
+      gross_sales: gross,
+      units_sold: typeof p.units_sold === 'number' ? Math.max(0, p.units_sold - g.units) : p.units_sold,
+      pct_of_total: typeof p.pct_of_total === 'number' && p.gross_sales ? p.pct_of_total * gross / p.gross_sales : p.pct_of_total,
+      yoy: rel(p.yoy), mom: rel(p.mom), gifts_removed: g.gross,
+    });
+  }).filter(p => (p.gross_sales || 0) >= 0.5 && !(typeof p.net_sales_est === 'number' && p.net_sales_est < 0.5 && p.gifts_removed))
+    .sort((a, b) => (b.gross_sales || 0) - (a.gross_sales || 0));
+}
 function renderTopProducts(monthData) {
   const el = document.getElementById('section-2');
   let periodErr = null;
@@ -6143,6 +6185,7 @@ function renderTopProducts(monthData) {
     if (tp && tp.list) monthData = Object.assign({}, monthData, { top_products: tp.list, top_products_source: 'shopify_period' });
     else periodErr = tp && tp.error;
   }
+  if (monthData.top_products) monthData = Object.assign({}, monthData, { top_products: topProductsWithoutGifts(monthData.top_products, monthData) });
   const errTail = periodErr && monthData.top_products_source !== 'combined' ? ' Shopify’s product report didn’t load (' + String(periodErr).replace(/</g, '&lt;') + '), so this is the order-based list instead.' : '';
   if (!monthData.top_products) {
     el.innerHTML = `<div class="placeholder">
@@ -6229,7 +6272,7 @@ function renderTopProducts(monthData) {
     <thead><tr><th style="text-align:left">Product</th><th>Gross Sales</th><th>${monthData.top_products_source === 'shopify_period' ? 'Net Sales' : 'Net Sales (est.)'}</th><th>Units Sold</th><th>% of Total Sales</th><th>YoY</th><th>${momLabel()}</th></tr></thead>
     <tbody>${rows}${tpMore}${totalRow}</tbody>
   </table>
-  <div style="margin-top:10px;font-size:11px;color:var(--text-muted)">${srcNote}${errTail}</div>`;
+  <div style="margin-top:10px;font-size:11px;color:var(--text-muted)">${srcNote}${errTail} Gifts and samples are left out: sample products aren't listed, and the units given free as gifts (the Discounts Breakdown's gift lines) come off each product's gross sales and units.</div>`;
   const tpBtn = document.getElementById('top-products-more');
   if (tpBtn) tpBtn.addEventListener('click', () => { topProductsOpen[tpKey] = !tpOpen; renderTopProducts(getMonthData()); if (typeof applyMobileTableLabels === 'function') applyMobileTableLabels(el); });
 }
@@ -7211,7 +7254,9 @@ function discountView(md) {
   if (!sp0 || !Array.isArray(sp0.buckets)) return null;
   const num = v => (typeof v === 'number' ? v : 0);
   const clone = b => ({ ...b, items: (b.items || []).map(i => ({ ...i })) });
-  const buckets = sp0.buckets.map(clone);
+  // ND.IL / ND.EU have no TikTok Shop (2026-11-22, Tomer: "on ND.IL and on
+  // ND.EU hide the TikTok Creators gifts") — the bucket is always empty there.
+  const buckets = sp0.buckets.filter(b => !(b.key === 'tiktok_creators' && (state.site === 'eu' || state.site === 'il'))).map(clone);
   const total = { ...sp0.total };
   const sub = (x, i, opts = {}) => {
     x.discount_value = num(x.discount_value) - num(i.discount_value);
