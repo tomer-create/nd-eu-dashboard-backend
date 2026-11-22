@@ -10,7 +10,7 @@ const { fetchCustomAdSpend, fetchRetention, fetchChannelPerformance, fetchChanne
 const { fetchTikTokShop, fetchGmvEstimate, fetchGifting, fetchOrderStatus, fetchAllProducts } = require('./src/tiktokshop');
 const { getSellerCenter, fetchPayouts, fetchDiscountFunding } = require('./src/windsor-tiktok');
 const tiktokApi = require('./src/tiktok-api');
-const { fetchAttentiveCosts, fetchPnlSheetChannels, fetchPnlSheetOtherCosts, fetchPnlSheetTotalCost, fetchPnlSheetMarketingSpend, fetchPnlSheetShopPpc, fetchPnlSheetRtbHouseSpend, fetchPnlSheetGoals } = require('./src/googlesheets');
+const { fetchAttentiveCosts, fetchPnlSheetMonthActuals, fetchPnlSheetChannels, fetchPnlSheetOtherCosts, fetchPnlSheetTotalCost, fetchPnlSheetMarketingSpend, fetchPnlSheetShopPpc, fetchPnlSheetRtbHouseSpend, fetchPnlSheetGoals } = require('./src/googlesheets');
 const { VALID_SITES: YOTPO_VALID_SITES, ensureYotpoSchema, recordYotpoEvent, getYotpoSummary, getYotpoCustomerTierMap, getPool: getYotpoPool } = require('./src/yotpo');
 const { registerYotpoWebhooksForSite, addYotpoTopicsForSite } = require('./src/yotpo-setup');
 const { importYotpoHistory } = require('./src/yotpo-import');
@@ -985,6 +985,51 @@ function getAttentiveSplitCached(site, start, end) {
   if (attentiveSplitCache.size > 500) attentiveSplitCache.delete(attentiveSplitCache.keys().next().value);
   return promise;
 }
+// Closed months = the P&L sheet (2026-11-22, Tomer: "the numbers should be
+// equal and the sources should be the same"; he chose "Sheet for closed
+// months"). For a whole calendar month that has ended, every Marketing &
+// Sales Channel row's revenue and spend and every Other Costs line are the
+// sheet's Actual figures (fetchPnlSheetMonthActuals), so Section 4 — Organic
+// included — and Other Costs equal the sheet exactly. The current month stays
+// live. Applied last, on every response (stored months too).
+async function applyPnlClosedMonth(payload, site, start, end) {
+  try {
+    if (!payload || !['com', 'eu', 'il'].includes(site)) return payload;
+    if (!/^\d{4}-\d{2}-01$/.test(String(start)) || !/^\d{4}-\d{2}-01$/.test(String(end))) return payload;
+    const next = new Date(`${start}T00:00:00Z`);
+    next.setUTCMonth(next.getUTCMonth() + 1);
+    if (next.toISOString().slice(0, 10) !== end || end > new Date().toISOString().slice(0, 10)) return payload;
+    const s = await fetchPnlSheetMonthActuals(site, start);
+    if (!s) return payload;
+    const list = Array.isArray(payload.channels) ? payload.channels.slice() : [];
+    Object.entries(s.channels).forEach(([label, v]) => {
+      const i = list.findIndex((c) => c.label === label);
+      if (i === -1 && !v.revenue && !v.spend) return;
+      const base = i === -1 ? { label } : list[i];
+      const row = {
+        ...base,
+        no_data: false,
+        revenue_actual: v.revenue !== null ? v.revenue : (base.no_data ? 0 : base.revenue_actual || 0),
+        spend_actual: v.spend !== null ? v.spend : (base.no_data ? 0 : base.spend_actual || 0),
+        revenue_live: base.no_data ? null : base.revenue_actual,
+        spend_live: base.no_data ? null : base.spend_actual,
+        revenue_source: v.revenue !== null ? 'pnl_sheet' : base.revenue_source,
+        spend_source: v.spend !== null ? 'pnl_sheet' : base.spend_source,
+        closed_sheet: true,
+      };
+      if (i === -1) list.push(row); else list[i] = row;
+    });
+    return {
+      ...payload,
+      channels: list,
+      other_costs: s.other_costs.some((o) => !o.no_data) ? s.other_costs : payload.other_costs,
+      pnl_closed: { month: start.slice(0, 7), gross: s.gross, product_cost: s.product_cost, total_cost: s.total_cost, updated: s.updated },
+    };
+  } catch (err) {
+    console.error(`applyPnlClosedMonth (site=${site}) failed:`, err.message);
+    return payload;
+  }
+}
 // Attentive costs from Attentive itself (2026-11-22 — see fetchAttentiveCosts
 // in src/googlesheets.js): the 4 Attentive rows' spend comes from the daily
 // Attentive feed instead of the P&L sheet, for whole-month periods the feed
@@ -1170,7 +1215,7 @@ app.get('/api/data', async (req, res) => {
     );
     res.set('X-Month-Cache', cache);
     if (fetchedAt) res.set('X-Month-Cache-Fetched-At', new Date(fetchedAt).toISOString());
-    res.json(await applySaleTagsSource(await applyTikTokFunding(await applyAttentiveCost(await applyAttentiveRevenue(payload, req.query.site, req.query.start, req.query.end), req.query.site, req.query.start, req.query.end), req.query.site, req.query.start, req.query.end), req.query.site));
+    res.json(await applyPnlClosedMonth(await applySaleTagsSource(await applyTikTokFunding(await applyAttentiveCost(await applyAttentiveRevenue(payload, req.query.site, req.query.start, req.query.end), req.query.site, req.query.start, req.query.end), req.query.site, req.query.start, req.query.end), req.query.site), req.query.site, req.query.start, req.query.end));
   } catch (err) {
     console.error(err);
     res.status(err.status || 502).json({ error: err.message });
@@ -1183,7 +1228,7 @@ app.post('/api/sync', async (req, res) => {
   const { site, start, end, compare = [] } = req.body || {};
   try {
     const result = await buildDataResponse({ site, start, end, compare });
-    res.json(await applySaleTagsSource(await applyTikTokFunding(await applyAttentiveCost(await applyAttentiveRevenue(result, site, start, end), site, start, end), site, start, end), site));
+    res.json(await applyPnlClosedMonth(await applySaleTagsSource(await applyTikTokFunding(await applyAttentiveCost(await applyAttentiveRevenue(result, site, start, end), site, start, end), site, start, end), site), site, start, end));
   } catch (err) {
     console.error(err);
     res.status(err.status || 502).json({ error: err.message });
