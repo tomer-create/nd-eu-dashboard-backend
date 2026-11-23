@@ -625,10 +625,23 @@ function bundleSales(orders) {
 // orders were fetched without locations (stored months / light queries).
 const PICK_PACK_RATE = 1.8; // 2026-11-18, Tomer: "instead of multiply by 5 multiply by 1.8"
 const PICK_PACK_LOCATION = /mainfreight/i;
+// ND.IL (2026-11-23, Tomer: "for the Pick & Pack on IL Calculate 4.5 multiply
+// per line"): every order's lines, whatever the location — all_orders /
+// all_lines, the same line definition; the frontend multiplies by ₪4.5.
 function pickPack(orders) {
-  let seen = false, orderCount = 0, lines = 0;
+  let seen = false, orderCount = 0, lines = 0, allOrders = 0, allLines = 0;
   for (const order of orders) {
     if (!order) continue;
+    {
+      const all = new Set();
+      for (const e of (order.lineItems && order.lineItems.edges) || []) {
+        const n = e.node || {};
+        const q = n.currentQuantity !== undefined && n.currentQuantity !== null ? Number(n.currentQuantity) : Number(n.quantity);
+        if (!(q > 0) || n.requiresShipping === false) continue;
+        all.add((n.variant && n.variant.id) || n.title);
+      }
+      if (all.size) { allOrders += 1; allLines += all.size; }
+    }
     // fulfillmentOrders (assigned warehouse) when the token can read them;
     // otherwise the location of the order's fulfillments (shipped orders).
     let locs;
@@ -648,8 +661,8 @@ function pickPack(orders) {
     orderCount += 1;
     lines += ids.size;
   }
-  if (!seen) return undefined;
-  return { location: 'Mainfreight Warehouse', orders: orderCount, lines, rate: PICK_PACK_RATE, cost: lines * PICK_PACK_RATE };
+  if (!seen) return allOrders ? { location: null, orders: 0, lines: 0, rate: PICK_PACK_RATE, cost: 0, all_orders: allOrders, all_lines: allLines } : undefined;
+  return { location: 'Mainfreight Warehouse', orders: orderCount, lines, rate: PICK_PACK_RATE, cost: lines * PICK_PACK_RATE, all_orders: allOrders, all_lines: allLines };
 }
 
 function aggregate(orders, { tagLabels = DEFAULT_TAG_LABELS, discountTags = null, splitExtraOrders = null, site = null } = {}) {
