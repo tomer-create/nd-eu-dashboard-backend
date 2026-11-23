@@ -3866,9 +3866,13 @@ function renderTikTokShop(monthData, opts = {}) {
     const items = sp && Array.isArray(sp.buckets) ? sp.buckets.flatMap(b => b.items || []) : [];
     const seller = items.find(i => i.key === 'tiktok_seller');
     const platform = items.find(i => i.key === 'tiktok_platform');
-    return { seller, platform, split: !!(seller && platform), funding: sp && sp.tiktok_funding };
+    const price = items.find(i => i.key === 'tiktok_price');
+    return { seller, platform, price, split: !!(seller && platform), funding: sp && sp.tiktok_funding };
   })();
-  const sellerDisc = ttDiscItems.split ? Math.abs(ttDiscItems.seller.discount_value || 0) : null;
+  // 2026-11-23 (Tomer: "yes"): ND pays the TikTok product price discounts
+  // too (listing price below the Shopify price), so they're part of this cost.
+  const priceDisc = ttDiscItems.price ? Math.abs(ttDiscItems.price.discount_value || 0) : 0;
+  const sellerDisc = ttDiscItems.split ? Math.abs(ttDiscItems.seller.discount_value || 0) + priceDisc : null;
   const platformDisc = ttDiscItems.split ? Math.abs(ttDiscItems.platform.discount_value || 0) : null;
   const costRows = [
     { label: 'TikTok Ads spend', v: tt.ads_spend, yoy: tt.yoy ? tt.yoy.ads_spend : null, mom: tt.mom ? tt.mom.ads_spend : null, py: null, pm: null },
@@ -3878,7 +3882,7 @@ function renderTikTokShop(monthData, opts = {}) {
       sub: giftClosed !== null ? 'P&L sheet (closed month)' : giftCur ? (giftCur.cost_pct === 1 ? `Retail price of the ${fmtVal(giftCur.units || 0, 'number')} products in ${fmtVal(giftCur.orders, 'number')} $0 TikTok orders${giftCur.units_no_price ? ` · ${fmtVal(giftCur.units_no_price, 'number')} without a price` : ''}` : giftCur.cost_pct ? `${Math.round(giftCur.cost_pct * 100)}% of the ${fmtVal(giftCur.retail_value || 0, 'currency-full')} price of the ${fmtVal(giftCur.units || 0, 'number')} products in ${fmtVal(giftCur.orders, 'number')} $0 TikTok orders${giftCur.units_no_price ? ` · ${fmtVal(giftCur.units_no_price, 'number')} without a price` : ''}` : `product cost of ${fmtVal(giftCur.orders, 'number')} $0 TikTok orders`) : giftFromSheet ? 'P&L sheet — $0-order figure unavailable' : '' },
     { label: 'Sample shipping cost', v: sampleShip, py: shipY, pm: shipM, sub: giftCur ? `${fmtVal(giftCur.orders,'number')} creators = ${fmtVal(giftCur.orders,'number')} $0 TikTok orders × $${SHIP_PER}` : '' },
     { label: 'TikTok Shop transaction fee', v: txCur ? txCur.v : null, py: txY ? txY.v : null, pm: txM ? txM.v : null, sub: txCur ? txCur.sub : '' },
-    { label: 'TikTok seller discounts (ND pays)', v: sellerDisc, yoy: tt.yoy ? tt.yoy.product_discounts : null, mom: tt.mom ? tt.mom.product_discounts : null, py: null, pm: null, sub: ttDiscItems.seller && ttDiscItems.seller.source === 'seller_center_no_cancelled' ? 'TikTok Seller Center seller discount (cancelled orders left out)' : 'Discounts Breakdown' },
+    { label: 'TikTok seller discounts (ND pays)', v: sellerDisc, yoy: tt.yoy ? tt.yoy.product_discounts : null, mom: tt.mom ? tt.mom.product_discounts : null, py: null, pm: null, sub: (ttDiscItems.seller && ttDiscItems.seller.source === 'seller_center_no_cancelled' ? 'TikTok Seller Center seller discount (cancelled orders left out)' : 'Discounts Breakdown') + (priceDisc ? ` + ${fmtVal(priceDisc, 'currency-full')} product price discounts` : '') },
   ];
   const pctCh = (cur, prev) => (cur === null || cur === undefined || prev === null || prev === undefined || !prev) ? null : (cur - prev) / Math.abs(prev);
   costRows.forEach(r => {
