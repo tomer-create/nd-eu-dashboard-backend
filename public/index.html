@@ -3630,6 +3630,16 @@ function renderTikTokShop(monthData, opts = {}) {
           'While TikTok Shop analytics load or don’t cover the period: refunds ÷ gross sales (before discounts), TikTok order data via Triple Whale; refunds are counted on the day they were issued.'),
     tileV('Discount Ratio', fmtVal(discRatio, 'percent'), discRatioYoy, discRatioMom, false, hasProdDisc ? fmtVal(prodDisc, 'currency-full') + ' product discounts ÷ gross sales before discounts (excl. ' + fmtVal((tt.discounts || 0) - prodDisc, 'currency-full') + ' shipping discounts)' : 'Product discounts not loaded yet — click Sync', 'Product discounts ÷ Gross Sales TikTok (shipping discounts not included)'),
     tile('New-Customer Orders', tt.new_customer_orders, 'number', 'new_customer_orders', true, (tt.orders && typeof tt.new_customer_orders === 'number') ? fmtVal(tt.new_customer_orders / tt.orders, 'percent') + ' of orders' : ''),
+    // Returning-Customer Orders (2026-11-23, Tomer: "add Returning customer
+    // orders box next to the new-customer orders box"): TikTok Shop orders −
+    // new-customer orders (Triple Whale, same source as the box beside it).
+    // YoY / MoM from the two figures' prior-period values.
+    (() => {
+      const ret = typeof tt.orders === 'number' && typeof tt.new_customer_orders === 'number' ? Math.max(0, tt.orders - tt.new_customer_orders) : null;
+      const pri = (v, ch) => (v === null || v === undefined || ch === null || ch === undefined || (1 + ch) === 0) ? null : v / (1 + ch);
+      const chg = (kind) => { const c = tt[kind]; if (!c || ret === null) return null; const po = pri(tt.orders, c.orders), pn = pri(tt.new_customer_orders, c.new_customer_orders); if (po === null || pn === null) return null; const p0 = po - pn; return p0 > 0 ? (ret - p0) / p0 : null; };
+      return tileV('Returning-Customer Orders', ret === null ? '—' : fmtVal(ret, 'number'), chg('yoy'), chg('mom'), true, ret !== null && tt.orders ? fmtVal(ret / tt.orders, 'percent') + ' of orders' : '', 'TikTok Shop orders from customers who had ordered before: orders − new-customer orders (Triple Whale).');
+    })(),
   ];
 
   // Revenue by source — updated 2026-10-07 per Tomer: TTS Ads conversion
@@ -4128,13 +4138,14 @@ function renderTikTokShop(monthData, opts = {}) {
   const comboRow = (l) => l.overlapLine ? `<tr class="tt-ovl-row">
       <td><span class="tt-src-name"><i style="background:transparent;border:1px dashed var(--text-muted)"></i>Counted by both</span><div class="tt-rc-sub">orders in both TikTok Ads and Affiliate — counted once${overlapEstimated ? ' (partly estimated)' : ''}</div></td>
       <td>−${fmtVal(-l.rev, 'currency-full')}<div class="tt-rc-sub">${gmvBase ? fmtVal(-l.rev / gmvBase, 'percent') + ' of GMV' : ''}</div></td>
-      <td>${dash('')}</td><td>${dash('')}</td><td>${dash('Already counted in TikTok Ads and Affiliate')}</td>
+      <td>${dash('')}</td><td>${dash('')}</td><td>${dash('')}</td><td>${dash('Already counted in TikTok Ads and Affiliate')}</td>
     </tr>` : `<tr>
       <td><span class="tt-src-name"><i style="background:${l.color}"></i>${l.name}</span>
         <span class="tt-rc-bars" aria-hidden="true"><span class="tt-rc-rev" style="width:${barW(l.rev)}%;background:${l.color}"></span><span class="tt-rc-cost" style="width:${barW(l.cost)}%"></span></span></td>
       <td>${fmtVal(l.rev, 'currency-full')}<div class="tt-rc-sub">${gmvBase ? fmtVal((l.rev || 0) / gmvBase, 'percent') + ' of GMV' : ''}</div>${rcChg(l, 'rev')}</td>
       <td>${l.cost === null || l.cost === undefined ? dash(l.name === 'Organic' ? 'Organic sales have no direct TikTok cost' : 'No cost figures for this period') : fmtVal(l.cost, 'currency-full')}<div class="tt-rc-sub">${l.costSub || ''}</div>${l.cost === null || l.cost === undefined ? '' : rcChg(l, 'cost')}</td>
       <td>${l.cost ? fmtVal(l.rev / l.cost, 'ratio') + rcChg(l, 'roas') : dash(l.name === 'Organic' ? 'No cost, so no ROAS' : 'No cost for this period')}</td>
+      <td>${typeof l.orders === 'number' && l.orders > 0 ? fmtVal(Math.round(l.orders), 'number') + (l.ordersEst ? '<div class="tt-rc-sub">est.</div>' : '') : dash(l.ordersWhy || 'No order count for this source')}</td>
       <td>${aovNet(l, 'cur') !== null ? fmtVal(aovNet(l, 'cur'), 'currency') + `<div class="tt-rc-sub">≈ ${fmtVal(Math.round(l.orders * netOrdK.cur), 'number')} net orders${l.ordersEst ? ' (est.)' : ''}</div>` + rcChg(l, 'aov') : (l.orders && osPending ? '…' : dash(l.orders ? (osWhy || 'Needs the cancelled / refunded orders') : l.ordersWhy))}</td>
     </tr>`;
   // 2026-10-20 per Tomer: the "Revenue by source" table is removed — only its
@@ -4144,10 +4155,10 @@ function renderTikTokShop(monthData, opts = {}) {
   const comboTable = `
     <div class="tt-legend tt-rc-legend"><span><i class="tt-rc-key-rev"></i>Revenue</span><span><i class="tt-rc-key-cost"></i>Cost</span></div>
     <table class="dtable tt-rc-table">
-      <thead><tr><th style="text-align:left">Source</th><th>Revenue</th><th>Cost</th><th>ROAS</th><th title="Net Sales ÷ orders after cancelled and refunded orders">AOV (Net Orders)</th></tr></thead>
+      <thead><tr><th style="text-align:left">Source</th><th>Revenue</th><th>Cost</th><th>ROAS</th><th title="Orders per source — TikTok Ads: TikTok's own Shop conversions for its ads; Affiliate: TikTok's affiliate orders; Organic: estimated (Organic revenue ÷ the non-affiliate average order)">Orders</th><th title="Net Sales ÷ orders after cancelled and refunded orders">AOV (Net Orders)</th></tr></thead>
       <tbody>
         ${srcLines.map(comboRow).join('')}
-        <tr class="total-row"><td>Total <span style="color:var(--text-muted)">(TikTok Shop GMV)</span></td><td>${fmtVal(gmvBase, 'currency-full')}${rcChg(totalLine, 'rev')}</td><td>${fmtVal(comboTotalCost, 'currency-full')}${rcChg(totalLine, 'cost')}</td><td>${comboTotalCost ? fmtVal(gmvBase / comboTotalCost, 'ratio') + rcChg(totalLine, 'roas') : '—'}</td><td>${aovNet(totalLine, 'cur') !== null ? fmtVal(aovNet(totalLine, 'cur'), 'currency') + `<div class="tt-rc-sub">${fmtVal(netOrdersShown, 'number')} net orders</div>` + rcChg(totalLine, 'aov') : (osPending ? '…' : '—')}</td></tr>
+        <tr class="total-row"><td>Total <span style="color:var(--text-muted)">(TikTok Shop GMV)</span></td><td>${fmtVal(gmvBase, 'currency-full')}${rcChg(totalLine, 'rev')}</td><td>${fmtVal(comboTotalCost, 'currency-full')}${rcChg(totalLine, 'cost')}</td><td>${comboTotalCost ? fmtVal(gmvBase / comboTotalCost, 'ratio') + rcChg(totalLine, 'roas') : '—'}</td><td>${typeof tt.orders === 'number' ? fmtVal(tt.orders, 'number') + '<div class="tt-rc-sub">TikTok Shop orders</div>' : '—'}</td><td>${aovNet(totalLine, 'cur') !== null ? fmtVal(aovNet(totalLine, 'cur'), 'currency') + `<div class="tt-rc-sub">${fmtVal(netOrdersShown, 'number')} net orders</div>` + rcChg(totalLine, 'aov') : (osPending ? '…' : '—')}</td></tr>
       </tbody>
     </table>
     <div class="tt-note">Revenue: TikTok Ads = Triple Whale's TikTok Ads conversion value (the same figure as in Marketing &amp; Sales Channel Performance); ${creatorMode
