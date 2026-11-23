@@ -1396,7 +1396,7 @@ function mergeLiveIntoMonthData(monthData, live, site) {
     // hardcoded list, so it already reads correctly now that ND.COM's
     // Microsoft Ads has real Triple Whale data (still sheet-sourced for
     // ND.EU/ND.IL, which have no 'bing' rows in Triple Whale yet).
-    merged.channels_note = 'Spend and CV for Google Ads, TikTok Ads, Meta Ads, Microsoft Ads, impact.com, Criteo, Pinterest, Snapchat, ChatGPT Ads, and Shop App are pulled live from Triple Whale (Pixel CV via Last-Click attribution, except Snapchat and impact.com which use Triple Whale\'s Channel CV, and Pinterest which uses Pixel CV with the Triple Attribution model since 2026-11-19). Shop App\'s spend comes from the P&L sheet\'s "Shop PPC" row instead — Triple Whale doesn\'t track ad spend for Shopify\'s own on-platform Shop channel — so it\'s as current as the sheet\'s last update, not live-live like its revenue. impact.com has no ad spend to report — its ROAS will always show "—". Attentive\'s 4 channels, Microsoft Ads, Pinterest, Organic, TikTok Affiliates and TikTok Organic are read directly from the P&L Google Sheet instead when Triple Whale has no data for them — as current as the sheet\'s last update, not live-live like the channels above. Spend/goal figures for every other channel still come from the P&L sheet.';
+    merged.channels_note = 'Spend and CV for Google Ads, TikTok Ads, Meta Ads, Microsoft Ads, impact.com, Criteo, Pinterest, Snapchat, ChatGPT Ads, and Shop App are pulled live from Triple Whale (Pixel CV via Last-Click attribution, except Snapchat, impact.com and Pinterest (since 2026-11-23), which use the platform\'s own CV via Triple Whale). Shop App\'s spend comes from the P&L sheet\'s "Shop PPC" row instead — Triple Whale doesn\'t track ad spend for Shopify\'s own on-platform Shop channel — so it\'s as current as the sheet\'s last update, not live-live like its revenue. impact.com has no ad spend to report — its ROAS will always show "—". Attentive\'s 4 channels, Microsoft Ads, Pinterest, Organic, TikTok Affiliates and TikTok Organic are read directly from the P&L Google Sheet instead when Triple Whale has no data for them — as current as the sheet\'s last update, not live-live like the channels above. Spend/goal figures for every other channel still come from the P&L sheet.';
   }
 
   // Section 7 (Other Costs) live sync — added 2026-09-03 per Tomer: "fix
@@ -5074,7 +5074,7 @@ function renderChannels(monthData) {
     // and Triple Whale's custom ad spend; the P&L sheet only as a fallback.
     if (tw) return c.label === 'Shop App' ? (c.spend_source === 'shopify' ? 'Triple Whale · spend: Shopify Shop campaigns' : 'Triple Whale · spend from P&amp;L sheet')
       : c.label === 'RTB House' ? (c.spend_source === 'triple_whale' ? 'Triple Whale · spend: Triple Whale custom ad spend' : 'Triple Whale · spend from P&amp;L sheet')
-      : 'Triple Whale';
+      : c.label === 'Pinterest' ? 'Triple Whale · Pinterest platform CV' : 'Triple Whale';
     return 'P&amp;L sheet';
   };
   const isIdle = (c) => !c.no_data && !c.spend_actual && !c.revenue_actual && !c.spend_goal && !c.revenue_goal;
