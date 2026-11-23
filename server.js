@@ -2,13 +2,13 @@ require('dotenv').config();
 const path = require('path');
 const express = require('express');
 const cors = require('cors');
-const { fetchProductImages, fetchSalesTimeseries, fetchRefundSplitByProduct, fetchCountrySessions, fetchOrders, fetchVoidedOrders, fetchOrdersLight, fetchOrdersForTierRevenue, fetchSalesReversals, fetchCostOfGoodsSold, fetchShopCampaignSpend, fetchTopReturnsByProduct, fetchCountryBreakdown, fetchUsStateBreakdown, fetchSalesSummary, fetchCustomerAcquisition, fetchProductRetailPrices, fetchCollabsCodeSales, fetchTopProductsAnalytics, fetchSalesByProductForTags, getAuthorizeUrl, exchangeCodeForToken } = require('./src/shopify');
+const { fetchProductImages, fetchSalesTimeseries, fetchRefundSplitByProduct, fetchCountrySessions, fetchOrders, fetchVoidedOrders, fetchOrdersLight, fetchOrdersForTierRevenue, fetchSalesReversals, fetchCostOfGoodsSold, fetchShopCampaignSpend, fetchTopReturnsByProduct, fetchCountryBreakdown, fetchUsStateBreakdown, fetchSalesSummary, fetchCustomerAcquisition, fetchProductRetailPrices, fetchCollabsCodeSales, fetchTopProductsAnalytics, fetchSalesByProductForTags, getAuthorizeUrl, exchangeCodeForToken, graphql: shopifyGraphql } = require('./src/shopify');
 const { aggregate } = require('./src/aggregate');
 const { singleFlight } = require('./src/singleflight');
 const { fetchDiscountTags, classify: classifyDiscountTags, FALLBACK: DISCOUNT_TAGS_COPY } = require('./src/discount-tags');
 const { fetchCustomAdSpend, fetchRetention, fetchChannelPerformance, fetchChannelRefunds, fetchAttentiveSplit, attentiveRevenueKeys, ATTENTIVE_LABEL_KEYS, fetchCountryConversion } = require('./src/triplewhale');
 const { fetchTikTokShop, fetchGmvEstimate, fetchGifting, fetchOrderStatus, fetchAllProducts } = require('./src/tiktokshop');
-const { getSellerCenter, fetchPayouts, fetchDiscountFunding } = require('./src/windsor-tiktok');
+const { getSellerCenter, fetchPayouts, fetchDiscountFunding, fetchFundingRows } = require('./src/windsor-tiktok');
 const tiktokApi = require('./src/tiktok-api');
 const { fetchAttentiveCosts, fetchPnlSheetMonthActuals, fetchPnlSheetChannels, fetchPnlSheetOtherCosts, fetchPnlSheetTotalCost, fetchPnlSheetMarketingSpend, fetchPnlSheetShopPpc, fetchPnlSheetRtbHouseSpend, fetchPnlSheetGoals } = require('./src/googlesheets');
 const { VALID_SITES: YOTPO_VALID_SITES, ensureYotpoSchema, recordYotpoEvent, getYotpoSummary, getYotpoCustomerTierMap, getPool: getYotpoPool } = require('./src/yotpo');
@@ -1990,6 +1990,113 @@ app.get('/api/tiktok-shop/creator-gmv/diag', async (req, res) => {
   } catch (err) {
     res.status(err.status || 502).json({ error: err.message });
   }
+});
+
+// GET /api/diag/tiktok-discount-gap?start=2026-11-01&end=2026-11-23 (ND.COM)
+// — where the Discounts Breakdown's "TikTok discounts: Shopify vs TikTok gap"
+// comes from (2026-11-23, Tomer asked for the exact breakdown). Every Shopify
+// TikTok order of the period (voided ones too, as the Discounts Breakdown
+// reads them) is matched to TikTok's own order (tag "TikTokOrderID:…") and
+// its non-sample discount compared with TikTok's seller + platform discount.
+// Runs in the background (≈8k orders); call again until status is "done".
+// Aggregates and Shopify order numbers only — no customer data.
+const ttGapJobs = new Map();
+const TT_GAP_QUERY = `
+  query TtGap($cursor: String, $q: String!) {
+    orders(first: 50, after: $cursor, query: $q, sortKey: CREATED_AT) {
+      pageInfo { hasNextPage endCursor }
+      nodes {
+        name
+        displayFinancialStatus
+        cancelledAt
+        tags
+        customAttributes { key value }
+        discountApplications(first: 15) { nodes { index ... on ManualDiscountApplication { title } ... on AutomaticDiscountApplication { title } ... on ScriptDiscountApplication { title } ... on DiscountCodeApplication { code } } }
+        lineItems(first: 40) { nodes { discountAllocations { allocatedAmountSet { shopMoney { amount } } discountApplication { index } } } }
+      }
+    }
+  }
+`;
+async function runTtGap(start, end) {
+  const last = new Date(Date.parse(`${end}T00:00:00Z`) - 86400000).toISOString().slice(0, 10);
+  const days = [];
+  for (let d = start; d <= last; d = new Date(Date.parse(`${d}T00:00:00Z`) + 86400000).toISOString().slice(0, 10)) days.push(d);
+  const shop = [];
+  let i = 0;
+  await Promise.all([0, 1, 2].map(async () => {
+    while (i < days.length) {
+      const d = days[i++];
+      let cursor = null, more = true;
+      while (more) {
+        const data = await shopifyGraphql('com', TT_GAP_QUERY, { cursor, q: `source_name:tiktok created_at:>=${d} created_at:<=${d}` });
+        data.orders.nodes.forEach((o) => shop.push(o));
+        more = data.orders.pageInfo.hasNextPage;
+        cursor = data.orders.pageInfo.endCursor;
+      }
+    }
+  }));
+  const tt = new Map((await fetchFundingRows(start, end)).map((r) => [r.id, r]));
+  const money = (v) => Math.abs(Number(String(v || '').replace(/[^0-9.-]/g, '')) || 0);
+  const cats = {};
+  const add = (k, o, shopDisc, ttDisc, extra) => {
+    const c = cats[k] || (cats[k] = { orders: 0, shopify_discount: 0, tiktok_discount: 0, gap: 0, examples: [] });
+    c.orders++; c.shopify_discount += shopDisc; c.tiktok_discount += ttDisc; c.gap += shopDisc - ttDisc;
+    if (o && c.examples.length < 6 && Math.abs(shopDisc - ttDisc) >= 0.01) c.examples.push(extra ? `${o.name} (${extra})` : o.name);
+  };
+  const titlesGap = {};
+  const seenTt = new Set();
+  let shopTotal = 0;
+  for (const o of shop) {
+    const apps = new Map((o.discountApplications.nodes || []).map((a) => [a.index, a.title || a.code || '']));
+    let disc = 0;
+    const titles = new Set();
+    for (const li of o.lineItems.nodes || []) for (const al of li.discountAllocations || []) {
+      const t = apps.get(al.discountApplication && al.discountApplication.index) || '';
+      if (/free\s*sample/i.test(t)) continue;
+      const v = money(al.allocatedAmountSet && al.allocatedAmountSet.shopMoney && al.allocatedAmountSet.shopMoney.amount);
+      if (!v) continue;
+      disc += v; titles.add(t || '(no title)');
+    }
+    shopTotal += disc;
+    const tag = (o.tags || []).find((x) => /^TikTokOrderID:/i.test(x));
+    const id = tag ? tag.split(':')[1].trim() : null;
+    const m = id ? tt.get(id) : null;
+    if (m) seenTt.add(id);
+    const attr = (k) => { const a = (o.customAttributes || []).find((x) => x.key === k); return a ? money(a.value) : null; };
+    if (!disc && (!m || (!m.sd && !m.pd))) { add('no discount either side', o, 0, 0); continue; }
+    if (!m) { add(id ? 'Shopify order, no TikTok order found' : 'Shopify order without a TikTok order ID (e.g. replacement / manual)', o, disc, 0, o.displayFinancialStatus); continue; }
+    if (m.sample) { add('TikTok sample order (TikTok counts no discount)', o, disc, 0); continue; }
+    if (m.status === 'CANCELLED') { add('Cancelled in TikTok (left out of TikTok’s figures)', o, disc, 0, o.displayFinancialStatus); continue; }
+    if (!m.day || m.day < start || m.day >= end) { add('TikTok dates the order in another period', o, disc, 0, m.day); continue; }
+    const ttd = m.sd + m.pd;
+    if (Math.abs(disc - ttd) < 0.05) { add('Matched, same discount', o, disc, ttd); continue; }
+    const at = (attr('TikTok Shop Discount') || 0) + (attr('Seller Discount') || 0);
+    const key = [...titles].sort().join(' + ') || '(none)';
+    const k2 = Math.abs(disc - at) < 0.05 ? 'Shopify = its TikTok attributes, TikTok data differs' : 'Shopify ≠ its TikTok attributes';
+    add(`Matched, different discount — ${k2}`, o, disc, ttd, `Shopify ${disc.toFixed(2)} vs TikTok ${ttd.toFixed(2)}; ${key}`);
+    const tg = titlesGap[key] || (titlesGap[key] = { orders: 0, gap: 0 });
+    tg.orders++; tg.gap += disc - ttd;
+  }
+  for (const [id, m] of tt) {
+    if (seenTt.has(id) || m.sample || m.status === 'CANCELLED' || !m.day || m.day < start || m.day >= end || (!m.sd && !m.pd)) continue;
+    add('TikTok order in the period, not in Shopify’s period', null, 0, m.sd + m.pd);
+  }
+  const r2 = (x) => Math.round(x * 100) / 100;
+  Object.values(cats).forEach((c) => { c.shopify_discount = r2(c.shopify_discount); c.tiktok_discount = r2(c.tiktok_discount); c.gap = r2(c.gap); });
+  Object.values(titlesGap).forEach((c) => { c.gap = r2(c.gap); });
+  return { start, end, shopify_orders: shop.length, tiktok_orders: tt.size, shopify_discount: r2(shopTotal), gap: r2(Object.values(cats).reduce((t, c) => t + c.gap, 0)), categories: cats, matched_diff_by_shopify_titles: titlesGap };
+}
+app.get('/api/diag/tiktok-discount-gap', (req, res) => {
+  const start = String(req.query.start || ''), end = String(req.query.end || '');
+  if (!US_STATES_DATE.test(start) || !US_STATES_DATE.test(end) || end <= start) return res.status(400).json({ error: 'start and end as YYYY-MM-DD' });
+  const key = `${start}|${end}`;
+  let job = ttGapJobs.get(key);
+  if (!job || (job.status === 'error' && Date.now() - job.at > 60000)) {
+    job = { status: 'running', at: Date.now() };
+    ttGapJobs.set(key, job);
+    runTtGap(start, end).then((r) => { job.status = 'done'; job.result = r; }).catch((err) => { job.status = 'error'; job.error = err.message; console.error('tiktok-discount-gap failed:', err.message); });
+  }
+  res.json({ status: job.status, error: job.error, seconds: Math.round((Date.now() - job.at) / 1000), result: job.result });
 });
 
 // GET /api/tiktok-shop/payouts?start=2026-10-01&end=2026-11-01 (ND.COM) —
