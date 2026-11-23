@@ -1381,4 +1381,28 @@ async function pullDiscountFunding(start, end) {
   return out;
 }
 
-module.exports = { getSellerCenter, pullSellerCenter, fetchPayouts, fetchDiscountFunding };
+// Per-order rows behind the discount funding (2026-11-23, for the "Shopify vs
+// TikTok gap" breakdown — /api/diag/tiktok-discount-gap). Two days either
+// side of the period, so orders Shopify and TikTok date differently still
+// match. Numbers and enums only.
+async function fetchFundingRows(start, end) {
+  const pad = (d, n) => new Date(Date.parse(`${d}T00:00:00Z`) + n * 86400000).toISOString().slice(0, 10);
+  const rows = await windsorQuery(FUNDING_FIELDS, pad(start, -2), pad(end, 2));
+  const out = new Map();
+  rows.forEach((r) => {
+    const id = String(r.order_id || '');
+    if (!id || out.has(id)) return;
+    out.set(id, {
+      id,
+      day: orderDay(r.order_create_datetime),
+      sample: truthy(r.order_is_sample_order),
+      status: String(r.order_status || '').toUpperCase(),
+      sd: Math.abs(num(r.order_payment_seller_discount)),
+      pd: Math.abs(num(r.order_payment_platform_discount)),
+      orig: num(r.order_payment_original_total_product_price),
+    });
+  });
+  return [...out.values()];
+}
+
+module.exports = { getSellerCenter, pullSellerCenter, fetchPayouts, fetchDiscountFunding, fetchFundingRows };
