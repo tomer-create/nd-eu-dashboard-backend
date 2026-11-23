@@ -433,6 +433,10 @@ function discountSplit(orders, owners, grossSales, discountTags, site) {
   // platform voucher together) and "Free sample". The split itself is done in
   // server.js (applyTikTokFunding) from TikTok's own order data.
   const ttTitles = new Map();
+  // TikTok orders cancelled in Shopify (2026-11-23, Tomer: split the "Shopify
+  // vs TikTok gap" line): their non-sample TikTok discount, same valuation as
+  // the "TikTok seller discounts" item — the "Cancelled TikTok orders" line.
+  const ttCancelled = { v: 0, ov: 0, orders: new Set() };
   for (const order of orders) {
     const nodes = (order.discountApplications && order.discountApplications.nodes) || [];
     const byIdx = new Map();
@@ -509,6 +513,7 @@ function discountSplit(orders, owners, grossSales, discountTags, site) {
         const up = uplift > 0 && allocSum > 0 ? uplift * (v / allocSum) : 0;
         const p = perItem.get(item) || { v: 0, ov: 0, lines: new Set() };
         p.v += (v + up) * f; p.ov += v * f; p.lines.add(li);
+        if (isTikTok && order.cancelledAt && item === 'tiktok_seller') { ttCancelled.v += (v + up) * f; ttCancelled.ov += v * f; ttCancelled.orders.add(order.id || order.name); }
         perItem.set(item, p);
         // Gifts by product (2026-11-18, Tomer: "in Gifts: GWP breakdown "free
         // gift" should contain the 3 free gifts that been given from the
@@ -548,6 +553,7 @@ function discountSplit(orders, owners, grossSales, discountTags, site) {
     // discounts at the order's own prices (what Shopify / Key Metrics count).
     total: { discount_value: total, order_value: totalOrderValue, orders: totalOrders, gross_sales: grossSales, discounted_gross: totalDiscGross, orders_gross: totalOrdersGross },
     valued_at: 'retail',
+    tiktok_cancelled: { discount_value: ttCancelled.v, order_value: ttCancelled.ov, orders: ttCancelled.orders.size },
     tiktok_titles: [...ttTitles.entries()].sort((x, y) => y[1].value - x[1].value).slice(0, 25).map(([k, d]) => ({ key: k, value: Math.round(d.value * 100) / 100, allocations: d.allocations })),
     sale_tags_source: discountTags ? discountTags.source : 'built-in',
     buckets: SPLIT_BUCKETS.map((b) => ({
@@ -980,7 +986,7 @@ function aggregate(orders, { tagLabels = DEFAULT_TAG_LABELS, discountTags = null
     // 23 (2026-11-19): Pinterest revenue on Triple Attribution Pixel CV.
     // 24 (2026-11-22): sheet tags match DISCOUNT-/OFFER- spellings; ND.IL /
     //   ND.EU sheet gift rows as their own GWP lines.
-    discounts_version: orders.length === 0 ? 25 : (sawDiscountApps ? (byApp && sawSourceName ? 25 : byApp ? 5 : 3) : 1),
+    discounts_version: orders.length === 0 ? 26 : (sawDiscountApps ? (byApp && sawSourceName ? 26 : byApp ? 5 : 3) : 1),
     discounts_by_app: byApp,
   };
 }
