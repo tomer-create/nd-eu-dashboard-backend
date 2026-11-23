@@ -288,6 +288,7 @@ const ORDERS_QUERY = `
           id
           name
           createdAt
+          cancelledAt
           tags
           sourceName
           sourceIdentifier
