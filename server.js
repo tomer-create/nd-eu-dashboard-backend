@@ -1143,7 +1143,7 @@ async function applyTikTokFunding(payload, site, start, end) {
       const gS = f.any_original ? f.seller_original / f.any_original : share, gP = f.any_original ? f.platform_original / f.any_original : 1 - share;
       const seller = { ...item, ...part(share, oS, gS), label: 'TikTok seller discounts (ND pays)' };
       const platform = { ...item, ...part(1 - share, oP, gP), key: 'tiktok_platform', label: 'TikTok platform discounts (TikTok pays)' };
-      let gap = null;
+      let gap = null; // [price line, cancelled line]
       // 2026-11-19 (Tomer: "for TikTok platform discounts (TikTok pays) change
       // for all the tiktok orders from seller central, summarize all SKU
       // platform discount without cancel orders"): the platform line is
@@ -1173,9 +1173,27 @@ async function applyTikTokFunding(payload, site, start, end) {
           seller.orders = f.seller_live_orders;
           seller.source = 'seller_center_no_cancelled';
           const gapV = total - pv - sv;
+          // 2026-11-23 (Tomer: "yes" to splitting the gap; matched order by
+          // order with /api/diag/tiktok-discount-gap — Nov 1–22: $34,170 on
+          // 1,664 orders where TikTok's listing price was below Shopify's
+          // price, $6,253 on 284 cancelled orders, −$496 time-zone dating,
+          // $150 retail valuation): two lines instead of one gap line.
+          //  - "Cancelled TikTok orders": the discounts on TikTok orders
+          //    cancelled in Shopify (aggregate tiktok_cancelled); TikTok's own
+          //    figures leave cancelled orders out. Months stored before it:
+          //    TikTok's cancelled-order discounts instead.
+          //  - "TikTok product price discounts (ND pays)": the rest — the
+          //    TikTok listing price below the Shopify price, which Shopify
+          //    books as discount and TikTok's seller / platform figures don't
+          //    include.
           if (Math.abs(gapV) >= 0.5) {
-            gap = { key: 'tiktok_gap', label: 'TikTok discounts: Shopify vs TikTok gap', discount_value: gapV, order_value: gapV,
-              orders: null, discounted_gross: null, orders_gross: null, cancelled_orders: f.cancelled_orders };
+            const tc = sp.tiktok_cancelled;
+            const ttCanc = Math.max(0, (f.seller || 0) - (f.seller_live || 0)) + Math.max(0, (f.platform || 0) - (f.platform_live || 0));
+            const cv = Math.max(0, Math.min(gapV, tc && typeof tc.discount_value === 'number' ? tc.discount_value : ttCanc));
+            const prV = gapV - cv;
+            gap = [];
+            if (Math.abs(prV) >= 0.5) gap.push({ key: 'tiktok_price', label: 'TikTok product price discounts (ND pays)', discount_value: prV, order_value: prV, orders: null, discounted_gross: null, orders_gross: null });
+            if (cv >= 0.5) gap.push({ key: 'tiktok_cancelled', label: 'Cancelled TikTok orders', discount_value: cv, order_value: cv, orders: tc && typeof tc.orders === 'number' ? tc.orders : f.cancelled_orders, discounted_gross: null, orders_gross: null, source: tc ? 'shopify_cancelled' : 'tiktok_cancelled' });
           }
         }
       }
@@ -1187,7 +1205,7 @@ async function applyTikTokFunding(payload, site, start, end) {
       platform.only_orders = Math.round((item.orders || 0) * oOnly);
       platform.only_orders_gross = typeof item.orders_gross === 'number' ? item.orders_gross * gOnly : null;
       platform.only_discounted_gross = typeof item.discounted_gross === 'number' ? item.discounted_gross * gOnly : null;
-      items = bucket.items.slice(0, ii).concat(gap ? [seller, gap, platform] : [seller, platform], bucket.items.slice(ii + 1));
+      items = bucket.items.slice(0, ii).concat([seller].concat(gap || [], [platform]), bucket.items.slice(ii + 1));
     }
     const buckets = sp.buckets.map((b, k) => (k === bi ? { ...b, items } : b));
     const funding = ok ? { source: 'tiktok_orders', seller: f.seller, platform: f.platform, platform_live: f.platform_live, seller_live: f.seller_live, cancelled_orders: f.cancelled_orders, orders: f.orders } : { source: f === 'timeout' ? 'pending' : 'unavailable' };
