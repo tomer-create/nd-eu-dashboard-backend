@@ -1312,6 +1312,7 @@ function mergeLiveIntoMonthData(monthData, live, site) {
           // Attentive rows whose revenue now comes from Triple Whale (2026-10-20)
           revenue_source: lc.revenue_source || undefined,
           spend_source: lc.spend_source || undefined,
+          closed_sheet: lc.closed_sheet || undefined,
           roas: roas,
           revenue_ratio: revenue_ratio,
           has_spend: true,
@@ -1329,6 +1330,7 @@ function mergeLiveIntoMonthData(monthData, live, site) {
           spend_actual: spend,
           spend_goal: 'spend_goal' in pg ? pg.spend_goal : null,
           spend_source: lc.spend_source || undefined,
+          closed_sheet: lc.closed_sheet || undefined,
           revenue_actual: revenue,
           revenue_goal: 'revenue_goal' in pg ? pg.revenue_goal : null,
           roas_goal: 'roas_goal' in pg ? pg.roas_goal : null,
@@ -1446,6 +1448,8 @@ function mergeLiveIntoMonthData(monthData, live, site) {
         return Object.assign({}, row, { actual: prBox && !prBox.no_data ? prBox.actual : 0, _pr_only: true });
       }
       if (row.label === 'Product Cost') {
+        // Closed month (2026-11-22): the P&L sheet's Product Cost.
+        if (live.pnl_closed && typeof live.pnl_closed.product_cost === 'number') return Object.assign({}, row, { actual: live.pnl_closed.product_cost });
         if (cogs === undefined || cogs === null) return row;
         return Object.assign({}, row, { actual: cogs });
       }
@@ -1599,6 +1603,10 @@ function mergeLiveIntoMonthData(monthData, live, site) {
   }
 
   // TikTok Shop block (ND.COM only, added 2026-10-07 — see src/tiktokshop.js).
+  // Closed month served from the P&L sheet (2026-11-22, applyPnlClosedMonth in
+  // server.js): the formula rules below leave its Other Costs / channels as
+  // the sheet has them.
+  merged.pnl_closed = live.pnl_closed || undefined;
   if (live.tiktok_shop) merged.tiktok_shop = ttFillDiscountChange(ttNormalizeNet(live.tiktok_shop), monthData && monthData.tiktok_shop);
   return merged;
 }
@@ -1633,6 +1641,9 @@ function applyCogsRule(site, md) {
   if (pct == null || !md || !md.kpis) return md;
   const net = md.kpis.find(k => k.label === 'Net Sales');
   if (!net || net.no_data || typeof net.actual !== 'number') return md;
+  // 2026-11-23 (Tomer: "for product cost both should be 20% out of the Net
+  // Sales"): closed months too (not the sheet's 20%-of-gross row).
+  const closedPc = null;
   const cogs = net.actual * pct;
   const out = Object.assign({}, md);
   out.kpis = md.kpis.map(k => k.label !== 'COGS' ? k : Object.assign({}, k, {
@@ -1645,7 +1656,7 @@ function applyCogsRule(site, md) {
       if (o.label === 'PR Box Cost + Product Cost') return Object.assign({}, o, { note: 'PR boxes and the products in them, from the P&L sheet' });
       if (o.label !== 'Product Cost') return o;
       delta += cogs - (o.actual || 0);
-      return Object.assign({}, o, { actual: cogs, no_data: false, note: '20% of Net Sales' });
+      return Object.assign({}, o, { actual: cogs, no_data: false, note: closedPc !== null ? 'P&L sheet (closed month)' : '20% of Net Sales' });
     });
     if (delta && typeof md.total_other_costs_actual === 'number') {
       out.total_other_costs_actual = md.total_other_costs_actual + delta;
@@ -1690,19 +1701,24 @@ function applyIlPickPackRule(md) {
   }
   return out;
 }
+// 2026-11-23 (Tomer: "for the Pick & Pack Mainfreight lines should be
+// multiply by 1.8 per line"): $1.80 / €1.80 per line (was 5).
+const PICK_PACK_PER_LINE = 1.8;
 function applyPickPackRule(site, md) {
+  if (md && md.pnl_closed) return md; // closed month: the P&L sheet's figure
   if (site === 'il') return applyIlPickPackRule(md);
   const pp = md && md.pick_pack;
   if (!pp || !(pp.orders > 0) || (site !== 'com' && site !== 'eu') || !md.other_costs) return md;
   const label = 'Pick & Pack Fee';
   if (!md.other_costs.some(o => o.label === label)) return md;
+  const ppCost = (pp.lines || 0) * PICK_PACK_PER_LINE;
   let delta = 0;
   const out = Object.assign({}, md);
   out.other_costs = md.other_costs.map(o => {
     if (o.label !== label) return o;
-    delta += pp.cost - (o.actual || 0);
-    return Object.assign({}, o, { actual: pp.cost, no_data: false,
-      note: `${pp.lines.toLocaleString('en-US')} lines (distinct products) in ${pp.orders.toLocaleString('en-US')} Mainfreight Warehouse orders × ${site === 'eu' ? '€' : '$'}${Number(pp.rate).toFixed(2)}` });
+    delta += ppCost - (o.actual || 0);
+    return Object.assign({}, o, { actual: ppCost, no_data: false,
+      note: `${pp.lines.toLocaleString('en-US')} lines (distinct products) in ${pp.orders.toLocaleString('en-US')} Mainfreight Warehouse orders × ${site === 'eu' ? '€' : '$'}${PICK_PACK_PER_LINE.toFixed(2)}` });
   });
   if (delta && typeof md.total_other_costs_actual === 'number') {
     out.total_other_costs_actual = md.total_other_costs_actual + delta;
@@ -1721,7 +1737,7 @@ function applyPickPackRule(site, md) {
 // month keeps the sheet's figure.
 const COLLABS_COMMISSION = 0.09;
 function applyCollabsSpendRule(site, md) {
-  if (!md || !Array.isArray(md.channels)) return md;
+  if (!md || !Array.isArray(md.channels) || md.pnl_closed) return md;
   const i = md.channels.findIndex(c => c.label === 'Collabs Affiliate' && !c.no_data && (c.revenue_actual || 0) > 0);
   if (i < 0) return md;
   const c = md.channels[i];
@@ -1740,9 +1756,12 @@ function applyCollabsSpendRule(site, md) {
 // Performance (the same spend figures as that section). Was the P&L sheet's
 // 9% of Google + Meta + TikTok Ads.
 const PPC_FEE_PCT = 0.09;
-const PPC_FEE_CHANNELS = ['TikTok Ads', 'Google Ads', 'Meta Ads', 'Snapchat', 'Microsoft Ads', 'Pinterest', 'ChatGPT Ads'];
+// 2026-11-23 (Tomer: "PPC Agency Fee should be 9% of meta ads + google ads +
+// Pinterest ads + snapchat ads + Microsoft ads + TikTok ads"): ChatGPT Ads
+// no longer counted.
+const PPC_FEE_CHANNELS = ['TikTok Ads', 'Google Ads', 'Meta Ads', 'Snapchat', 'Microsoft Ads', 'Pinterest'];
 function applyPpcFeeRule(site, md) {
-  if (!md || !Array.isArray(md.other_costs) || !Array.isArray(md.channels)) return md;
+  if (!md || !Array.isArray(md.other_costs) || !Array.isArray(md.channels) || md.pnl_closed) return md;
   const label = 'PPC Agency Fee';
   if (!md.other_costs.some(o => o.label === label)) return md;
   const used = md.channels.filter(c => PPC_FEE_CHANNELS.includes(c.label) && !c.no_data && typeof c.spend_actual === 'number');
@@ -3284,12 +3303,20 @@ function renderTikTokShop(monthData, opts = {}) {
   // shop-ads commission, GMT-8 days, /api/tiktok-shop/creator-gmv). The P&L
   // sheet's TikTok Affiliates cost is only the fallback when the API isn't
   // available (it lags: Nov showed $780).
+  // 2026-11-22 (Tomer: "use the same numbers the P&L Spreadsheet is using"):
+  // the sheet's TikTok Affiliate Commission is TikTok's settlement figure —
+  // affiliate commission + affiliate ads commission (Nov 1–17: $16,821.55 +
+  // $1,270.95 = $18,093 on both) — so that's the figure here too, from the
+  // same Seller Center statements as the transaction fee. A closed month is
+  // the sheet's own figure (Section 4's TikTok Affiliates spend).
   const commRange = ttPeriodRange();
-  const commApiOf = (r) => { const d = r ? ttCreatorApiOk(ttEnsureCreatorApi(r)) : null; return d && typeof d.est_commission === 'number' ? d.est_commission + (d.est_ads_commission || 0) + ttCommissionAdj(r) : null; };
-  const commApi = commApiOf(commRange);
+  const ttSettleComm = (e) => { const d = e && e.status === 'ok' && e.data ? e.data : null, f = d && d.fees; if (!f || !Array.isArray(f.lines) || !f.statements) return null; return f.lines.filter(l => l.key === 'affiliate_commission' || l.key === 'affiliate_ads_commission').reduce((a, l) => a + (l.amount || 0), 0); };
+  const commClosed = chan && chan.closed_sheet && !chan.no_data ? (chan.spend_actual || 0) : null;
+  const commApiOf = (r) => { const v = r ? ttSettleComm(ttEnsureSC(r)) : null; return v === null ? null : v + ttCommissionAdj(r); };
+  const commApi = commClosed !== null ? commClosed : commApiOf(commRange);
   // QA 2026-11-12: while TikTok's figure is still loading, show "loading"
   // instead of flashing the P&L sheet's (often stale) number first.
-  const commE = commRange ? ttEnsureCreatorApi(commRange) : null;
+  const commE = commRange && commClosed === null ? ttEnsureSC(commRange) : null;
   const commPending = commApi === null && !!commE && commE.status === 'loading';
   const commission = commApi !== null ? commApi : commPending ? null : (chan && !chan.no_data ? (chan.spend_actual || 0) + ttCommissionAdj(commRange) : null);
   const commAdjNow = ttCommissionAdj(commRange);
@@ -3305,7 +3332,9 @@ function renderTikTokShop(monthData, opts = {}) {
   const giftPending = !!giftE && giftE.status === 'loading';
   const sheetGift = (monthData.other_costs || []).find(o => o.label === 'TikTok Gifting');
   const giftFromSheet = !giftCur && !giftPending && !!sheetGift;
-  const samples = giftCur ? giftCur.cost : giftFromSheet ? (sheetGift.actual || 0) : null;
+  // Closed month (2026-11-22): the P&L sheet's TikTok Gifting.
+  const giftClosed = monthData.pnl_closed && sheetGift && !sheetGift.no_data ? (sheetGift.actual || 0) : null;
+  const samples = giftClosed !== null ? giftClosed : giftCur ? giftCur.cost : giftFromSheet ? (sheetGift.actual || 0) : null;
   const mLabel = momLabel();
   const tile = (label, value, fmt, key, higherIsBetter, extra) => {
     const y = ttChange(tt.yoy ? tt.yoy[key] : null, higherIsBetter);
@@ -3807,7 +3836,11 @@ function renderTikTokShop(monthData, opts = {}) {
   // still reports them, plus the refund administration fee. By statement
   // (settlement) date, so a period's figure covers the orders TikTok settled
   // in it. YoY / MoM: same lines for the comparison period.
-  const TX_FEE_KEYS = { referral_fee: 'referral fee', transaction_fee: 'transaction fee', platform_commission: 'platform commission', refund_administration_fee: 'refund admin fee' };
+  // 2026-11-22: the same lines as the P&L sheet's "TikTok Shop transaction
+  // fee" (line 58) — the referral fee (Nov 1–17 $15,441.54 = $15,442), plus
+  // transaction fee / platform commission if TikTok reports them; the refund
+  // administration fee isn't part of it. A closed month is the sheet's figure.
+  const TX_FEE_KEYS = { referral_fee: 'referral fee', transaction_fee: 'transaction fee', platform_commission: 'platform commission' };
   const txFeeOf = (e) => {
     const d = scOk(e), f = d && d.fees;
     if (!f || !Array.isArray(f.lines) || !f.statements) return null;
@@ -3815,7 +3848,8 @@ function renderTikTokShop(monthData, opts = {}) {
     const v = ls.reduce((a, l) => a + l.amount, 0);
     return { v, sub: ls.length > 1 ? ls.map(l => TX_FEE_KEYS[l.key] + ' ' + fmtVal(l.amount, 'currency-full')).join(' + ') : (ls.length ? TX_FEE_KEYS[ls[0].key] : '') };
   };
-  const txCur = txFeeOf(sc), txY = txFeeOf(scY), txM = txFeeOf(scM);
+  const sheetTx = (monthData.other_costs || []).find(o => o.label === 'TikTok Shop Transaction Fee');
+  const txCur = monthData.pnl_closed && sheetTx && !sheetTx.no_data ? { v: sheetTx.actual || 0, sub: 'P&L sheet (closed month)' } : txFeeOf(sc), txY = txFeeOf(scY), txM = txFeeOf(scM);
   // TikTok seller discounts (2026-11-16, Tomer: "add to the Costs the
   // discounts from the discount breakdown that contain TikTok discounts"; he
   // chose the seller discounts only): the Discounts Breakdown's "TikTok
@@ -3835,9 +3869,9 @@ function renderTikTokShop(monthData, opts = {}) {
   const costRows = [
     { label: 'TikTok Ads spend', v: tt.ads_spend, yoy: tt.yoy ? tt.yoy.ads_spend : null, mom: tt.mom ? tt.mom.ads_spend : null, py: null, pm: null },
     { label: 'Affiliate commission', v: commission, yoy: commChg.yoy, mom: commChg.mom, pm: commApi === null && commChg.mom === null && sheetPrev ? sheetPrev.commission : null,
-      sub: (commApi !== null ? 'TikTok Affiliate Center est. commission' : commPending ? 'loading TikTok’s figure…' : (commission !== null ? 'P&L sheet — TikTok’s figure unavailable' : '')) + (commAdjNow && commission !== null ? ` + ${fmtVal(commAdjNow, 'currency-full')} added (${TT_COMMISSION_ADJUST.filter(x => commRange && x.day >= commRange.start && x.day < commRange.end).map(x => c4RangeText({ start: x.day, end: new Date(Date.parse(x.day + 'T00:00:00Z') + 86400000).toISOString().slice(0, 10) })).join(', ')})` : '') },
+      sub: (commClosed !== null ? 'P&L sheet (closed month)' : commApi !== null ? 'TikTok settlement: affiliate + affiliate ads commission' : commPending ? 'loading TikTok’s figure…' : (commission !== null ? 'P&L sheet — TikTok’s figure unavailable' : '')) + (commAdjNow && commission !== null ? ` + ${fmtVal(commAdjNow, 'currency-full')} added (${TT_COMMISSION_ADJUST.filter(x => commRange && x.day >= commRange.start && x.day < commRange.end).map(x => c4RangeText({ start: x.day, end: new Date(Date.parse(x.day + 'T00:00:00Z') + 86400000).toISOString().slice(0, 10) })).join(', ')})` : '') },
     { label: 'Samples (TikTok Gifting)', v: samples, yoy: giftChg.yoy, mom: giftChg.mom, pm: !giftCur && giftChg.mom === null && sheetPrev ? sheetPrev.gifting : null,
-      sub: giftCur ? (giftCur.cost_pct === 1 ? `Retail price of the ${fmtVal(giftCur.units || 0, 'number')} products in ${fmtVal(giftCur.orders, 'number')} $0 TikTok orders${giftCur.units_no_price ? ` · ${fmtVal(giftCur.units_no_price, 'number')} without a price` : ''}` : giftCur.cost_pct ? `${Math.round(giftCur.cost_pct * 100)}% of the ${fmtVal(giftCur.retail_value || 0, 'currency-full')} price of the ${fmtVal(giftCur.units || 0, 'number')} products in ${fmtVal(giftCur.orders, 'number')} $0 TikTok orders${giftCur.units_no_price ? ` · ${fmtVal(giftCur.units_no_price, 'number')} without a price` : ''}` : `product cost of ${fmtVal(giftCur.orders, 'number')} $0 TikTok orders`) : giftFromSheet ? 'P&L sheet — $0-order figure unavailable' : '' },
+      sub: giftClosed !== null ? 'P&L sheet (closed month)' : giftCur ? (giftCur.cost_pct === 1 ? `Retail price of the ${fmtVal(giftCur.units || 0, 'number')} products in ${fmtVal(giftCur.orders, 'number')} $0 TikTok orders${giftCur.units_no_price ? ` · ${fmtVal(giftCur.units_no_price, 'number')} without a price` : ''}` : giftCur.cost_pct ? `${Math.round(giftCur.cost_pct * 100)}% of the ${fmtVal(giftCur.retail_value || 0, 'currency-full')} price of the ${fmtVal(giftCur.units || 0, 'number')} products in ${fmtVal(giftCur.orders, 'number')} $0 TikTok orders${giftCur.units_no_price ? ` · ${fmtVal(giftCur.units_no_price, 'number')} without a price` : ''}` : `product cost of ${fmtVal(giftCur.orders, 'number')} $0 TikTok orders`) : giftFromSheet ? 'P&L sheet — $0-order figure unavailable' : '' },
     { label: 'Sample shipping cost', v: sampleShip, py: shipY, pm: shipM, sub: giftCur ? `${fmtVal(giftCur.orders,'number')} creators = ${fmtVal(giftCur.orders,'number')} $0 TikTok orders × $${SHIP_PER}` : '' },
     { label: 'TikTok Shop transaction fee', v: txCur ? txCur.v : null, py: txY ? txY.v : null, pm: txM ? txM.v : null, sub: txCur ? txCur.sub : '' },
     { label: 'TikTok seller discounts (ND pays)', v: sellerDisc, yoy: tt.yoy ? tt.yoy.product_discounts : null, mom: tt.mom ? tt.mom.product_discounts : null, py: null, pm: null, sub: ttDiscItems.seller && ttDiscItems.seller.source === 'seller_center_no_cancelled' ? 'TikTok Seller Center seller discount (cancelled orders left out)' : 'Discounts Breakdown' },
@@ -4772,6 +4806,13 @@ function c4OrganicPlug(md, hidden) {
   // TikTok Ads + TikTok Affiliates overlap counted once (see c4TikTokAffiliatesLive).
   const ovl = !hidden.includes('TikTok Affiliates') && !hidden.includes('TikTok Ads') ? (md.c4_tt_overlap || 0) : 0;
   const plug = gross - others + ovl;
+  // A closed month's Organic is the P&L sheet's own "Organic Revenue (P.N)"
+  // (2026-11-22, Tomer chose "Sheet for closed months") — every other row is
+  // the sheet's too, so the rows still add up to the sheet's Gross Sales.
+  if (md.channels.some(c => c.label === 'Organic' && c.closed_sheet && !c.no_data)) {
+    const channels = md.channels.map(c => Object.assign({}, c, c.no_data ? {} : { revenue_ratio: (c.revenue_actual || 0) / gross }));
+    return Object.assign({}, md, { channels, c4_gross: gross });
+  }
   let channels = md.channels.map(c => c.label === 'Organic'
     ? Object.assign({}, c, { no_data: false, revenue_actual: plug, sheet_revenue: c.no_data ? null : c.revenue_actual, spend_actual: c.spend_actual || 0, roas: c.spend_actual ? plug / c.spend_actual : null, plug: true })
     : Object.assign({}, c));
@@ -4797,6 +4838,8 @@ function c4TikTokAffiliatesLive(md) {
   if (!md || !md.channels) return md;
   const i = md.channels.findIndex(c => c.label === 'TikTok Affiliates' && !c.no_data);
   if (i === -1) return md;
+  // A closed month keeps the P&L sheet's figures (2026-11-22).
+  if (md.channels[i].closed_sheet) return md;
   const f = ttAffiliateAovFor();
   if (!f) return md;
   const c0 = md.channels[i];
@@ -4842,7 +4885,10 @@ function renderChannels(monthData) {
   // TikTok Organic isn't shown on its own (2026-10-19, Tomer: "for the organic
   // section, leave only one line ... don't show the TikTok Organic"): Organic
   // = Gross Sales − every other channel shown, so it includes TikTok Organic.
-  const hidden = (HIDDEN_CHANNELS_BY_SITE[state.site] || []).concat(C4_HIDDEN_ALWAYS);
+  // TikTok Organic is still shown when it has revenue (2026-11-22): the P&L
+  // sheet has its own TikTok Organic line (e.g. COM Oct $7,277), and without
+  // it the rows wouldn't add up to the sheet's figures.
+  const hidden = (HIDDEN_CHANNELS_BY_SITE[state.site] || []).concat(C4_HIDDEN_ALWAYS.filter(l => !((monthData && monthData.channels) || []).some(c => c.label === l && !c.no_data && Math.abs(c.revenue_actual || 0) >= 0.5)));
   monthData = c4TikTokAffiliatesLive(monthData);
   monthData = c4OrganicPlug(monthData, hidden);
   const visibleChannels = hidden.length ? monthData.channels.filter(c => !hidden.includes(c.label)) : monthData.channels;
@@ -5001,6 +5047,7 @@ function renderChannels(monthData) {
   const chip = (ch, key, kind) => `<span class="ch-chg c4-chg"><span class="lbl">${cmpLbl}</span>${oneChip(ch, key, kind)}</span>`;
   const sourceTag = (c, ch) => {
     if (ch.loading) return '';
+    if (c.closed_sheet) return 'P&amp;L sheet (closed month)';
     if (ch.attentive) {
       // Spend from Attentive itself (2026-11-22, daily Attentive feed — see
       // fetchAttentiveCosts in src/googlesheets.js); the P&L sheet otherwise.
@@ -5009,8 +5056,8 @@ function renderChannels(monthData) {
         : c.revenue_source === 'mixed' ? 'Triple Whale + P&amp;L sheet · ' + sp : 'P&amp;L sheet' + (c.spend_source === 'attentive' ? ' · spend: Attentive' : '') + ' · Avg order: Triple Whale';
     }
     if (ch.collabs || c.label === 'Collabs Affiliate') return c.spend_est ? 'P&amp;L sheet · spend est. 9% commission (sheet behind) · Avg order: Collabs codes' : 'P&amp;L sheet · Avg order: Collabs codes';
-    if (ch.ttRevLive) return (ch.ttApi ? 'TikTok Affiliate Center' : 'TikTok order data (est.)') + (c.spend_source === 'tiktok' ? ' · spend: TikTok est. commission' : ' · spend from P&amp;L sheet');
-    if (ch.ttAff && ch.aov !== null) return (c.spend_source === 'tiktok' ? 'P&amp;L sheet · spend: TikTok est. commission' : 'P&amp;L sheet') + ' · Avg order: TikTok order data';
+    if (ch.ttRevLive) return (ch.ttApi ? 'TikTok Affiliate Center' : 'TikTok order data (est.)') + (c.spend_source === 'tiktok' ? ' · spend: TikTok settlement commission' : ' · spend from P&amp;L sheet');
+    if (ch.ttAff && ch.aov !== null) return (c.spend_source === 'tiktok' ? 'P&amp;L sheet · spend: TikTok settlement commission' : 'P&amp;L sheet') + ' · Avg order: TikTok order data';
     if (c.plug) return 'Gross sales − all other channels';
     // Before / without the comparison data, fall back to the channels Triple
     // Whale normally supplies (see channels_note).
@@ -5019,7 +5066,7 @@ function renderChannels(monthData) {
     // and Triple Whale's custom ad spend; the P&L sheet only as a fallback.
     if (tw) return c.label === 'Shop App' ? (c.spend_source === 'shopify' ? 'Triple Whale · spend: Shopify Shop campaigns' : 'Triple Whale · spend from P&amp;L sheet')
       : c.label === 'RTB House' ? (c.spend_source === 'triple_whale' ? 'Triple Whale · spend: Triple Whale custom ad spend' : 'Triple Whale · spend from P&amp;L sheet')
-      : c.label === 'Pinterest' ? 'Triple Whale · Triple Attribution' : 'Triple Whale';
+      : 'Triple Whale';
     return 'P&amp;L sheet';
   };
   const isIdle = (c) => !c.no_data && !c.spend_actual && !c.revenue_actual && !c.spend_goal && !c.revenue_goal;
