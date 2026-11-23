@@ -251,10 +251,11 @@ const CHANNEL_MAP = [
   // Nov 1–18: $3,070 / 45 orders, vs Last Click $982 / 18): Pinterest's Pixel
   // CV and orders use the Triple Attribution model (lifetime window); its
   // spend is the same under every model.
-  // Pinterest back on Last Click (2026-11-22, Tomer: "the sources should be
-  // the same" as the P&L sheet — its Pinterest row is Triple Whale's Last
-  // Click Pixel CV: Nov 1–17 $982 both). Was Triple Attribution since 11-19.
-  { ids: ['pinterest-ads'], label: 'Pinterest', cv: 'pixel' },
+  // Pinterest revenue = Pinterest's own platform CV (Triple Whale's channel-
+  // reported conversion value) — 2026-11-23, Tomer: "for Pinterest ads
+  // revenue pull the platform cv and not from the triple whale pixel cv".
+  // Was Last Click Pixel CV (11-22), Triple Attribution (11-19).
+  { ids: ['pinterest-ads'], label: 'Pinterest', cv: 'channel' },
   // New rows — not present in the dashboard's existing P&L-sourced Section 4
   // data for any site/month yet. The frontend merge adds these as brand new
   // channel rows the first time a Sync returns data for them.
