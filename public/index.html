@@ -1567,7 +1567,11 @@ function mergeLiveIntoMonthData(monthData, live, site) {
         && live.mom.pnl_total_cost_actual !== undefined && live.mom.pnl_total_cost_actual !== null) {
       const netSalesMomPrior = netSales / (1 + live.mom.net_sales_change);
       const grossSalesMomPrior = grossSales / (1 + live.mom.gross_sales_change);
-      const profitMomPrior = netSalesMomPrior - live.mom.pnl_total_cost_actual * momSheetCostFactor(live);
+      // 2026-11-24: the prior month's sheet Product Cost row (20% of Gross
+      // Sales) swapped for the dashboard's (20% of Net Sales), as for the
+      // month itself (applyProfitRule).
+      const pcPct = COGS_PCT_OF_NET[site] != null ? COGS_PCT_OF_NET[site] : 0;
+      const profitMomPrior = netSalesMomPrior - (live.mom.pnl_total_cost_actual * momSheetCostFactor(live) - pcPct * (grossSalesMomPrior - netSalesMomPrior));
       const marginMomPrior = grossSalesMomPrior ? profitMomPrior / grossSalesMomPrior : null;
       // profit/margin (this sync's actual) are computed just below — compute
       // them here too so this block doesn't depend on evaluation order.
@@ -1577,6 +1581,7 @@ function mergeLiveIntoMonthData(monthData, live, site) {
         // ÷ |prior| like the backend's pctChange: a loss last month used to flip the sign
         // (−$67K → +$84K showed −225%) — 2026-10-29 review.
         profitMomChange = profitMomPrior ? (profitNow - profitMomPrior) / Math.abs(profitMomPrior) : null;
+        merged.profit_mom_prior = { profit: profitMomPrior, margin: marginMomPrior };
         marginMomChange = (marginMomPrior && marginNow !== null) ? (marginNow - marginMomPrior) / Math.abs(marginMomPrior) : null;
       }
     }
@@ -1607,6 +1612,7 @@ function mergeLiveIntoMonthData(monthData, live, site) {
   // server.js): the formula rules below leave its Other Costs / channels as
   // the sheet has them.
   merged.pnl_closed = live.pnl_closed || undefined;
+  merged.profit_live = true; // applyProfitRule recomputes Profit from the costs shown
   if (live.tiktok_shop) merged.tiktok_shop = ttFillDiscountChange(ttNormalizeNet(live.tiktok_shop), monthData && monthData.tiktok_shop);
   return merged;
 }
@@ -1617,7 +1623,56 @@ function mergeLiveIntoMonthData(monthData, live, site) {
 function getSingleSiteMonthData(site, month) {
   const base = DATA.sites[site].months[month];
   const cached = liveCache[site + '|' + month];
-  return applyPpcFeeRule(site, applyCollabsSpendRule(site, applyPickPackRule(site, applyCogsRule(site, cached ? mergeLiveIntoMonthData(base, cached.data, site) : base))));
+  return applyProfitRule(applyPpcFeeRule(site, applyCollabsSpendRule(site, applyPickPackRule(site, applyCogsRule(site, cached ? mergeLiveIntoMonthData(base, cached.data, site) : base)))));
+}
+// Profit / Profit Margin from the costs the dashboard shows (2026-11-24,
+// Tomer: "check the profit margin looks like the number is incorrect").
+// Profit was Net Sales − the P&L sheet's "Total Cost" row, but for the month
+// in progress the sheet's column fills in late (ND.COM Nov 1–23: sheet
+// $515,250 vs $720,736 of costs on the dashboard — Other Costs $451,027 +
+// channel spend $269,709), and the dashboard's own rules (Product Cost 20%
+// of Net Sales, Pick & Pack per line, PPC fee 9%, live ad spend) aren't in
+// the sheet — margin read 32.4% against a 16% goal. Now, for a synced
+// period:
+//  - month in progress / custom period: Profit = Net Sales − (Other Costs
+//    total + every channel's spend in Section 4) — the same costs as on
+//    screen (Other Costs excludes what Section 4 shows per channel);
+//  - closed month: the sheet's Total Cost with its Product Cost row (20% of
+//    Gross Sales) replaced by the dashboard's (20% of Net Sales) — every
+//    other cost is the sheet's (Oct: matches Other Costs + spend exactly).
+// Profit Margin stays Profit ÷ Gross Sales. Not-yet-synced snapshots keep
+// the sheet's Profit.
+function applyProfitRule(md) {
+  if (!md || !md.profit_live || !Array.isArray(md.kpis)) return md;
+  const kv = (l) => { const k = md.kpis.find(x => x.label === l); return k && !k.no_data && typeof k.actual === 'number' ? k.actual : null; };
+  const net = kv('Net Sales'), gross = kv('Gross Sales');
+  if (net === null) return md;
+  const oc = (md.other_costs || []).filter(o => !o.no_data);
+  const pcLine = oc.find(o => o.label === 'Product Cost');
+  let cost;
+  const pc = md.pnl_closed;
+  if (pc && typeof pc.total_cost === 'number' && typeof pc.product_cost === 'number' && pcLine) {
+    cost = pc.total_cost - pc.product_cost + (pcLine.actual || 0);
+  } else {
+    if (!oc.length) return md;
+    cost = oc.reduce((t, o) => t + (o.actual || 0), 0) + (md.channels || []).filter(c => !c.no_data).reduce((t, c) => t + (c.spend_actual || 0), 0);
+  }
+  const profit = net - cost;
+  const margin = gross ? profit / gross : null;
+  const pr = md.profit_mom_prior;
+  const out = Object.assign({}, md, { profit_total_cost: cost });
+  out.kpis = md.kpis.map(k => {
+    if (k.label === 'Profit') {
+      const mom = pr && pr.profit ? (profit - pr.profit) / Math.abs(pr.profit) : k.mom;
+      return Object.assign({}, k, { actual: profit, no_data: false, mom, pct_of_goal: k.goal > 0 ? profit / k.goal : null });
+    }
+    if (k.label === 'Profit Margin') {
+      const mom = pr && pr.margin && margin !== null ? (margin - pr.margin) / Math.abs(pr.margin) : k.mom;
+      return Object.assign({}, k, { actual: margin, no_data: margin === null, mom, pct_of_goal: k.goal > 0 && margin !== null ? margin / k.goal : null });
+    }
+    return k;
+  });
+  return out;
 }
 // ND.IL Product Cost / COGS (2026-10-15, Tomer: "the product cost for ND.IL
 // is wrong"; he chose "20% of Net Sales"). Same as the P&L sheet's IL
@@ -5449,7 +5504,7 @@ function renderChannels(monthData) {
         ${diff !== null ? `<span class="c4-recon-op" aria-hidden="true">${diff < 0 ? '−' : '+'}</span>
         <div class="c4-recon-item" title="${reconWhy}"><span class="c4-recon-lbl">Costs not tied to a channel &amp; other differences</span><span class="c4-recon-val">${fmtVal(Math.abs(diff), 'currency-full')}</span><span class="c4-recon-sub">Made up of the two lines below</span></div>
         <span class="c4-recon-op" aria-hidden="true">=</span>
-        <div class="c4-recon-item"><span class="c4-recon-lbl">Profit</span><span class="c4-recon-val">${pfMoney(profitKpi)}</span><span class="c4-recon-sub">As in Key Metrics (Net Sales − Total Cost)</span></div>` : ''}
+        <div class="c4-recon-item"><span class="c4-recon-lbl">Profit</span><span class="c4-recon-val">${pfMoney(profitKpi)}</span><span class="c4-recon-sub">As in Key Metrics (Net Sales − all costs: Other Costs + channel spend)</span></div>` : ''}
         ${partsHtml}
       </div>`;
     } else if (chgLoading) {
