@@ -1567,11 +1567,7 @@ function mergeLiveIntoMonthData(monthData, live, site) {
         && live.mom.pnl_total_cost_actual !== undefined && live.mom.pnl_total_cost_actual !== null) {
       const netSalesMomPrior = netSales / (1 + live.mom.net_sales_change);
       const grossSalesMomPrior = grossSales / (1 + live.mom.gross_sales_change);
-      // 2026-11-24: the prior month's sheet Product Cost row (20% of Gross
-      // Sales) swapped for the dashboard's (20% of Net Sales), as for the
-      // month itself (applyProfitRule).
-      const pcPct = COGS_PCT_OF_NET[site] != null ? COGS_PCT_OF_NET[site] : 0;
-      const profitMomPrior = netSalesMomPrior - (live.mom.pnl_total_cost_actual * momSheetCostFactor(live) - pcPct * (grossSalesMomPrior - netSalesMomPrior));
+      const profitMomPrior = netSalesMomPrior - live.mom.pnl_total_cost_actual * momSheetCostFactor(live);
       const marginMomPrior = grossSalesMomPrior ? profitMomPrior / grossSalesMomPrior : null;
       // profit/margin (this sync's actual) are computed just below — compute
       // them here too so this block doesn't depend on evaluation order.
@@ -1581,7 +1577,6 @@ function mergeLiveIntoMonthData(monthData, live, site) {
         // ÷ |prior| like the backend's pctChange: a loss last month used to flip the sign
         // (−$67K → +$84K showed −225%) — 2026-10-29 review.
         profitMomChange = profitMomPrior ? (profitNow - profitMomPrior) / Math.abs(profitMomPrior) : null;
-        merged.profit_mom_prior = { profit: profitMomPrior, margin: marginMomPrior };
         marginMomChange = (marginMomPrior && marginNow !== null) ? (marginNow - marginMomPrior) / Math.abs(marginMomPrior) : null;
       }
     }
@@ -1612,7 +1607,8 @@ function mergeLiveIntoMonthData(monthData, live, site) {
   // server.js): the formula rules below leave its Other Costs / channels as
   // the sheet has them.
   merged.pnl_closed = live.pnl_closed || undefined;
-  merged.profit_live = true; // applyProfitRule recomputes Profit from the costs shown
+  // applyProfitRule: only when the sheet's Total Cost couldn't be read.
+  merged.profit_live = !(live.pnl_total_cost_actual !== undefined && live.pnl_total_cost_actual !== null);
   if (live.tiktok_shop) merged.tiktok_shop = ttFillDiscountChange(ttNormalizeNet(live.tiktok_shop), monthData && monthData.tiktok_shop);
   return merged;
 }
@@ -1642,6 +1638,13 @@ function getSingleSiteMonthData(site, month) {
 //    other cost is the sheet's (Oct: matches Other Costs + spend exactly).
 // Profit Margin stays Profit ÷ Gross Sales. Not-yet-synced snapshots keep
 // the sheet's Profit.
+// 2026-11-24, later (Tomer: "for the Profit you should take the net sales -
+// total costs, then for the profit margin take the profit/gross sales %";
+// asked which total costs, he chose "P&L sheet Total Cost"): back to Profit =
+// Net Sales − the P&L sheet's Total Cost row (mergeLiveIntoMonthData), the
+// same as the sheet's own Profit row (COM Nov 1–23: $1,077,718 − $883,746 =
+// $193,972, 11.2% of Gross Sales). This rule now only fills in when the
+// sheet's Total Cost couldn't be read for the period.
 function applyProfitRule(md) {
   if (!md || !md.profit_live || !Array.isArray(md.kpis)) return md;
   const kv = (l) => { const k = md.kpis.find(x => x.label === l); return k && !k.no_data && typeof k.actual === 'number' ? k.actual : null; };
@@ -5504,7 +5507,7 @@ function renderChannels(monthData) {
         ${diff !== null ? `<span class="c4-recon-op" aria-hidden="true">${diff < 0 ? '−' : '+'}</span>
         <div class="c4-recon-item" title="${reconWhy}"><span class="c4-recon-lbl">Costs not tied to a channel &amp; other differences</span><span class="c4-recon-val">${fmtVal(Math.abs(diff), 'currency-full')}</span><span class="c4-recon-sub">Made up of the two lines below</span></div>
         <span class="c4-recon-op" aria-hidden="true">=</span>
-        <div class="c4-recon-item"><span class="c4-recon-lbl">Profit</span><span class="c4-recon-val">${pfMoney(profitKpi)}</span><span class="c4-recon-sub">As in Key Metrics (Net Sales − all costs: Other Costs + channel spend)</span></div>` : ''}
+        <div class="c4-recon-item"><span class="c4-recon-lbl">Profit</span><span class="c4-recon-val">${pfMoney(profitKpi)}</span><span class="c4-recon-sub">As in Key Metrics (Net Sales − the P&amp;L sheet’s Total Cost)</span></div>` : ''}
         ${partsHtml}
       </div>`;
     } else if (chgLoading) {
