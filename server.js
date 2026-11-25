@@ -2,7 +2,7 @@ require('dotenv').config();
 const path = require('path');
 const express = require('express');
 const cors = require('cors');
-const { fetchProductImages, fetchSalesTimeseries, fetchRefundSplitByProduct, fetchCountrySessions, fetchOrders, fetchVoidedOrders, fetchOrdersLight, fetchOrdersForTierRevenue, fetchSalesReversals, fetchCostOfGoodsSold, fetchShopCampaignSpend, fetchTopReturnsByProduct, fetchCountryBreakdown, fetchUsStateBreakdown, fetchSalesSummary, fetchCustomerAcquisition, fetchProductRetailPrices, fetchCollabsCodeSales, fetchTopProductsAnalytics, fetchSalesByProductForTags, getAuthorizeUrl, exchangeCodeForToken, graphql: shopifyGraphql } = require('./src/shopify');
+const { fetchProductImages, fetchSalesTimeseries, fetchRefundSplitByProduct, fetchCountrySessions, fetchOrders, fetchVoidedOrders, fetchOrdersLight, fetchOrdersForTierRevenue, fetchSalesReversals, fetchCostOfGoodsSold, fetchShopCampaignSpend, fetchTopReturnsByProduct, fetchCountryBreakdown, fetchUsStateBreakdown, fetchSalesSummary, fetchCustomerAcquisition, fetchProductRetailPrices, fetchCollabsCodeSales, fetchTopProductsAnalytics, fetchSalesByProductForTags, getAuthorizeUrl, exchangeCodeForToken, withFreshOrders, graphql: shopifyGraphql } = require('./src/shopify');
 const { aggregate } = require('./src/aggregate');
 const { singleFlight } = require('./src/singleflight');
 const { fetchDiscountTags, classify: classifyDiscountTags, FALLBACK: DISCOUNT_TAGS_COPY } = require('./src/discount-tags');
@@ -67,6 +67,11 @@ app.use(express.json());
 // live, Sync-capable dashboard — the claude.ai artifact link can stay
 // around as a snapshot-only preview, but Sync will never work there.
 // express.static serves public/index.html automatically for GET /.
+// 2026-11-25: the page's embedded DATA snapshot is served as its own, long-cached
+// file (src/index-split.js); anything unexpected falls through to express.static.
+const indexSplit = require('./src/index-split').createSplitServer(path.join(__dirname, 'public', 'index.html'));
+app.get(['/', '/index.html'], indexSplit.page);
+app.get('/:name(snapshot-[0-9a-f]{12}.js)', indexSplit.snapshot);
 app.use(express.static(path.join(__dirname, 'public')));
 
 // Identical API requests that arrive while one is being answered share that
@@ -1226,11 +1231,14 @@ app.get('/api/data', async (req, res) => {
     .map((s) => s.trim())
     .filter(Boolean);
   const refresh = req.query.refresh === '1' || req.query.refresh === 'true';
+  // orders=fresh (2026-11-25): ignore the stored per-day orders (src/order-day-cache.js)
+  // for this request — a full manual re-pull straight from Shopify.
+  const run = req.query.orders === 'fresh' ? withFreshOrders : (fn) => fn();
   try {
-    const { payload, cache, fetchedAt } = await getWithMonthCache(
+    const { payload, cache, fetchedAt } = await run(() => getWithMonthCache(
       { site: req.query.site, start: req.query.start, end: req.query.end, compare, refresh },
       () => buildDataResponse({ ...req.query, compare })
-    );
+    ));
     res.set('X-Month-Cache', cache);
     if (fetchedAt) res.set('X-Month-Cache-Fetched-At', new Date(fetchedAt).toISOString());
     const out = await applySaleTagsSource(await applyTikTokFunding(await applyAttentiveCost(await applyAttentiveRevenue(payload, req.query.site, req.query.start, req.query.end), req.query.site, req.query.start, req.query.end), req.query.site, req.query.start, req.query.end), req.query.site);
@@ -2600,7 +2608,58 @@ app.listen(PORT, () => {
   // months below the current discounts_version (5 since 2026-11-02) are re-pulled one at a time, and months
   // never stored are pulled once — so nothing waits for someone to open it.
   setTimeout(() => upgradeClosedMonths().catch((err) => console.error('month upgrade sweep failed:', err.message)), 120000);
+  startOpenMonthWarmer();
 });
+
+// 2026-11-25 (loading time): the month in progress is re-pulled in the background
+// — once shortly after boot, then every 10 minutes while it is daytime in
+// Jerusalem (06:00–23:00) — so the first person to open the dashboard in the
+// morning, or after a deploy, gets a copy that is minutes old instead of waiting
+// for a cold pull. Results land in the same open-period cache (memory + Postgres)
+// the page reads. One site at a time, never two rounds at once.
+const WARM_EVERY_MS = 10 * 60 * 1000;
+let warmerRunning = false;
+function jerusalemNow() {
+  const parts = new Intl.DateTimeFormat('en-CA', { timeZone: 'Asia/Jerusalem', year: 'numeric', month: '2-digit', day: '2-digit', hour: '2-digit', hourCycle: 'h23' })
+    .formatToParts(new Date()).reduce((o, p) => { o[p.type] = p.value; return o; }, {});
+  return { date: `${parts.year}-${parts.month}-${parts.day}`, hour: Number(parts.hour) };
+}
+const addDaysISO = (iso, n) => new Date(Date.parse(iso + 'T00:00:00Z') + n * 86400000).toISOString().slice(0, 10);
+async function warmOpenMonthOnce(reason) {
+  if (warmerRunning) return;
+  warmerRunning = true;
+  const t0 = Date.now();
+  try {
+    const { date } = jerusalemNow();
+    const start = date.slice(0, 8) + '01';
+    // The page asks for end = tomorrow (by the viewer's own date). Jerusalem's
+    // tomorrow is what the team sees; a viewer in another time zone is served
+    // from the stored copy of the same site/start/compare (src/month-cache.js).
+    const end = addDaysISO(date, 1);
+    for (const site of VALID_SITES) {
+      try {
+        await getWithMonthCache(
+          { site, start, end, compare: ['yoy', 'mom'], refresh: true },
+          () => buildDataResponse({ site, start, end, compare: ['yoy', 'mom'] })
+        );
+      } catch (err) {
+        console.error(`open-month warmer (${reason}, site=${site} ${start}..${end}): ${err.message}`);
+      }
+    }
+    console.log(`open-month warmer (${reason}): ${VALID_SITES.length} sites in ${Math.round((Date.now() - t0) / 1000)}s`);
+  } finally {
+    warmerRunning = false;
+  }
+}
+function startOpenMonthWarmer() {
+  if (process.env.OPEN_MONTH_WARMER === 'off') return;
+  setTimeout(() => warmOpenMonthOnce('boot').catch((err) => console.error('open-month warmer failed:', err.message)), 25000);
+  setInterval(() => {
+    const { hour } = jerusalemNow();
+    if (hour < 6 || hour >= 23) return;
+    warmOpenMonthOnce('timer').catch((err) => console.error('open-month warmer failed:', err.message));
+  }, WARM_EVERY_MS).unref();
+}
 
 async function upgradeClosedMonths() {
   const now = new Date();
