@@ -392,7 +392,7 @@ async function fetchChannelPerformance(site, start, end) {
     byChannelId.set(r.channel, acc);
   });
 
-  return CHANNEL_MAP.filter((c) => inWindow(c, start, end)).map((c) => {
+  const channelRows = CHANNEL_MAP.filter((c) => inWindow(c, start, end)).map((c) => {
     // Several ids for one entry (e.g. the hidden organic one) are added up.
     const found = c.ids.map((id) => byChannelId.get(id)).filter(Boolean);
     const row = found.length > 1
@@ -417,6 +417,67 @@ async function fetchChannelPerformance(site, start, end) {
       cv_model: c.cv === 'pixel' ? (c.model || 'Last Click') : undefined,
     };
   });
+  // RTB House revenue / orders by UTM source + medium (2026-11-25, Tomer:
+  // "the Revenue is wrong you should take it from source rtbhouse/retargeting
+  // and there the order revenue is $11,371.87"): every order whose link
+  // carried utm_source=rtbhouse & utm_medium=retargeting, Triple Attribution —
+  // it includes the orders Triple Whale credits to another channel (e.g. TikTok
+  // Ads) — instead of the "rtbhouse" channel row only (Last Click $935 / 15
+  // orders for ND.COM Nov 1–25; the channel row under Triple Attribution is
+  // $10,972 / 133 orders).
+  const rtbIdx = channelRows.findIndex((r) => r.label === 'RTB House');
+  if (rtbIdx !== -1) {
+    const utm = await fetchRtbHouseUtmRevenue(shopId, site, start, end);
+    const cur0 = channelRows[rtbIdx];
+    if (utm && (utm.orders > 0 || !cur0.no_data)) {
+      const cur = cur0;
+      channelRows[rtbIdx] = {
+        ...cur,
+        label: 'RTB House',
+        no_data: false,
+        spend_actual: cur.spend_actual || 0,
+        revenue_actual: utm.revenue,
+        orders: utm.orders,
+        cv_source: 'pixel',
+        cv_model: 'Triple Attribution',
+        revenue_basis: 'utm_rtbhouse_retargeting',
+      };
+    }
+  }
+  return channelRows;
+}
+
+// Orders from utm_source = rtbhouse / utm_medium = retargeting (see above):
+// Triple Attribution rows of pixel_orders_table, distinct orders, order revenue
+// = Gross Sales − product discounts + shipping + taxes + fees + additional
+// revenue (Triple Whale's "Order Revenue", the same figure pixel_joined_tvf
+// sums). `end` is exclusive. Returns { revenue, orders } or null on failure.
+async function fetchRtbHouseUtmRevenue(shopId, site, start, end) {
+  const query = `
+    SELECT
+      uniq(order_id) AS orders,
+      SUM(gross_product_sales - discount_amount_for_product + shipping_price + taxes + fees + additional_revenue) AS revenue
+    FROM pixel_orders_table
+    WHERE event_date >= '${start}' AND event_date < '${end}'
+      AND model = 'Triple Attribution'
+      AND lower(utm_source) = 'rtbhouse' AND lower(utm_medium) = 'retargeting'
+  `.trim();
+  try {
+    const res = await twSqlRequest(shopId, query, start, end);
+    if (!res.ok) {
+      const body = await res.text().catch(() => '');
+      console.error(`Triple Whale RTB House UTM revenue failed for site=${site} (${res.status}): ${body.slice(0, 300)}`);
+      return null;
+    }
+    const json = await res.json();
+    const rows = Array.isArray(json) ? json : json.rows || json.data || [];
+    const r = Array.isArray(rows) && rows[0];
+    if (!r) return null;
+    return { orders: Number(r.orders || 0), revenue: Number(r.revenue || 0) };
+  } catch (err) {
+    console.error(`Triple Whale RTB House UTM revenue errored for site=${site}:`, err.message);
+    return null;
+  }
 }
 
 // Attentive's 4 channels split from Triple Whale (2026-10-20, Tomer: "separate

@@ -32,7 +32,7 @@ const STALE_AFTER_HOURS = 6;
 const REFRESH_WINDOW_DAYS = 45;
 // Newest payload shape (aggregate.js discounts_version). A stored copy below it is
 // never served for the month in progress.
-const PAYLOAD_VERSION = 26;
+const PAYLOAD_VERSION = 27;
 
 let schemaReady = null;
 function ensureMonthCacheSchema() {

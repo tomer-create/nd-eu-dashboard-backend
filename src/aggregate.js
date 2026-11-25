@@ -986,7 +986,7 @@ function aggregate(orders, { tagLabels = DEFAULT_TAG_LABELS, discountTags = null
     // 23 (2026-11-19): Pinterest revenue on Triple Attribution Pixel CV.
     // 24 (2026-11-22): sheet tags match DISCOUNT-/OFFER- spellings; ND.IL /
     //   ND.EU sheet gift rows as their own GWP lines.
-    discounts_version: orders.length === 0 ? 26 : (sawDiscountApps ? (byApp && sawSourceName ? 26 : byApp ? 5 : 3) : 1),
+    discounts_version: orders.length === 0 ? 27 : (sawDiscountApps ? (byApp && sawSourceName ? 27 : byApp ? 5 : 3) : 1),
     discounts_by_app: byApp,
   };
 }
