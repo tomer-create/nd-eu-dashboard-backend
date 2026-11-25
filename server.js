@@ -1233,7 +1233,11 @@ app.get('/api/data', async (req, res) => {
     );
     res.set('X-Month-Cache', cache);
     if (fetchedAt) res.set('X-Month-Cache-Fetched-At', new Date(fetchedAt).toISOString());
-    res.json(await applyPnlClosedMonth(await applySaleTagsSource(await applyTikTokFunding(await applyAttentiveCost(await applyAttentiveRevenue(payload, req.query.site, req.query.start, req.query.end), req.query.site, req.query.start, req.query.end), req.query.site, req.query.start, req.query.end), req.query.site), req.query.site, req.query.start, req.query.end));
+    const out = await applySaleTagsSource(await applyTikTokFunding(await applyAttentiveCost(await applyAttentiveRevenue(payload, req.query.site, req.query.start, req.query.end), req.query.site, req.query.start, req.query.end), req.query.site, req.query.start, req.query.end), req.query.site);
+    // live=1 (2026-11-25, P&L sheet feed): the dashboard's own figures even for
+    // a closed month — the feed writes them INTO the sheet, so reading the
+    // sheet back here would only copy the sheet onto itself.
+    res.json(req.query.live === '1' ? out : await applyPnlClosedMonth(out, req.query.site, req.query.start, req.query.end));
   } catch (err) {
     console.error(err);
     res.status(err.status || 502).json({ error: err.message });
