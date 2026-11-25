@@ -1656,7 +1656,7 @@ function getSingleSiteMonthData(site, month) {
 //  - values: Gross Sales, Returns / Discounts (negative, as the sheet keeps
 //    them), Orders, each channel's revenue and spend (Section 4), ND.COM's
 //    TikTok affiliate commission and transaction fee (TikTok settlement, as
-//    in the TikTok Shop section).
+//    in the TikTok Shop section) and TikTok Gifting (samples, same section).
 //  - formulas ("{col}" = the Actual column): Pick & Pack (lines × rate) and
 //    the PPC Agency Fee (9% of the six ad channels' spend rows).
 // live=1 makes the backend skip the closed-month sheet read.
@@ -1699,6 +1699,16 @@ async function buildSheetFeed(site, start, end) {
         values[58] = r2(sum(Object.keys(TX_FEE_KEYS_FEED)));
       } else notes.push('TikTok settlement not available — commission / transaction fee left as they are');
     } catch (e) { notes.push('TikTok settlement failed: ' + e.message); }
+    // TikTok Gifting (samples): the same figure as the TikTok Shop section —
+    // Shopify product cost of the $0 TikTok orders. That endpoint's end date is
+    // inclusive, the feed's is exclusive, so it asks for the day before.
+    try {
+      const ge = new Date(end + 'T00:00:00Z'); ge.setUTCDate(ge.getUTCDate() - 1);
+      const gres = await fetch(`${BACKEND_URL}/api/tiktok-shop/gifting?start=${start}&end=${ge.toISOString().slice(0, 10)}`);
+      const gb = JSON.parse(await gres.text());
+      if (gres.ok && typeof gb.cost === 'number') values[57] = r2(gb.cost);
+      else notes.push('TikTok Gifting not available — left as it is');
+    } catch (e) { notes.push('TikTok Gifting failed: ' + e.message); }
   }
   const pp = md.pick_pack;
   if (site === 'il' && pp && pp.all_lines > 0) formulas[48] = `=${Math.round(pp.all_lines)}*${IL_PICK_PACK_PER_LINE}`;
