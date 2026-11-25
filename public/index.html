@@ -5217,7 +5217,7 @@ function renderChannels(monthData) {
     // Shop App / RTB House spend (2026-11-22): Shopify's Shop campaigns spend
     // and Triple Whale's custom ad spend; the P&L sheet only as a fallback.
     if (tw) return c.label === 'Shop App' ? (c.spend_source === 'shopify' ? 'Triple Whale · spend: Shopify Shop campaigns' : 'Triple Whale · spend from P&amp;L sheet')
-      : c.label === 'RTB House' ? (c.spend_source === 'triple_whale' ? 'Triple Whale · spend: Triple Whale custom ad spend' : 'Triple Whale · spend from P&amp;L sheet')
+      : c.label === 'RTB House' ? (c.spend_source === 'triple_whale' ? 'Triple Whale · revenue: rtbhouse / retargeting orders · spend: Triple Whale custom ad spend' : 'Triple Whale · revenue: rtbhouse / retargeting orders · spend from P&amp;L sheet')
       : c.label === 'Pinterest' ? 'Triple Whale · Pinterest platform CV' : 'Triple Whale';
     return 'P&amp;L sheet';
   };
