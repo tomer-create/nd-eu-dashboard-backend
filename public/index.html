@@ -4335,21 +4335,32 @@ function renderTikTokShop(monthData, opts = {}) {
     ? apCur.products.map(p => ({ ...p, yoyV: apYMap ? (apYMap.get(p.title) || 0) : undefined, momV: apMMap ? (apMMap.get(p.title) || 0) : undefined }))
     : apFallback ? (tt.top_products || []).map(p => ({ ...p, yoyV: p.yoy_gross, momV: multi ? (qoqOk ? p.prev3_gross : undefined) : p.prev_gross })) : [];
   const apDen = apCur ? (tt.gross_sales || 0) : gmv;
-  const apTot = prods.reduce((a, p) => ({ g: a.g + (p.gross_sales || 0), u: a.u + (p.units || 0) }), { g: 0, u: 0 });
   const apKey = apPr.r ? apPr.r.start + '|' + apPr.r.end : '';
-  const apOpen = !!ttProductsOpen[apKey];
-  const apShown = apOpen ? prods : prods.slice(0, TOP_PRODUCTS_PAGE);
-  const apBundles = prods.filter(p => p.is_bundle).length;
-  const apMore = prods.length > TOP_PRODUCTS_PAGE
-    ? `<tr class="show-more-row"><td colspan="6"><button type="button" class="show-more-btn" id="tt-products-more" aria-expanded="${apOpen}">${apOpen ? '− Show top ' + TOP_PRODUCTS_PAGE : '+ ' + (prods.length - TOP_PRODUCTS_PAGE) + ' more products'}</button></td></tr>`
-    : '';
+  // Regular products and bundles / sets in two lists (2026-11-25, Tomer: "under
+  // Top TikTok Shop products split between Bundles and regular orders, show
+  // them on 2 different lists"): each list has its own top 10, "+ N more" toggle,
+  // ranking and total; the two totals add up to the Gross Sales tile.
+  const apBund = prods.filter(p => p.is_bundle), apReg = prods.filter(p => !p.is_bundle);
+  const apOpenR = !!ttProductsOpen[apKey], apOpenB = !!ttProductsOpen[apKey + '|bundles'];
   const apStatus = apCur ? '' : apE && apE.status === 'error' ? 'The full product list couldn’t be loaded (' + escText(apE.error || '') + ') — showing the synced top 10 (TikTok’s line prices, after seller discounts). ' : '';
   const apChgNote = apCur && ((apPr.yoy && !apYMap) || (apPr.mom && !apMMap)) ? 'Loading the comparison periods… ' : '';
-  const prodTable = prods.length ? `
+  const apList = (list, open, btnId, what, whatOne) => {
+    const shown = open ? list : list.slice(0, TOP_PRODUCTS_PAGE);
+    const more = list.length > TOP_PRODUCTS_PAGE
+      ? `<tr class="show-more-row"><td colspan="6"><button type="button" class="show-more-btn" id="${btnId}" aria-expanded="${open}">${open ? '− Show top ' + TOP_PRODUCTS_PAGE : '+ ' + (list.length - TOP_PRODUCTS_PAGE) + ' more ' + what}</button></td></tr>`
+      : '';
+    const tot = list.reduce((a, p) => ({ g: a.g + (p.gross_sales || 0), u: a.u + (p.units || 0) }), { g: 0, u: 0 });
+    return `
     <table class="dtable">
-      <thead><tr><th style="text-align:left">Product</th><th title="Before discounts">Gross sales</th><th>Units</th><th>% of gross</th><th>YoY</th><th>${mLabel}</th></tr></thead>
-      <tbody>${apShown.map((p, i) => `<tr><td><div class="tt-title" title="${escText(p.title)}">${productCell(p.title, i + 1)}</div>${p.is_bundle ? '<span class="pill tt-bundle-pill">Bundle</span>' : ''}</td><td>${fmtVal(p.gross_sales,'currency-full')}</td><td>${fmtVal(p.units,'number')}</td><td>${apDen ? fmtVal(p.gross_sales/apDen,'percent') : '—'}</td><td>${pCell(p.gross_sales, p.yoyV)}</td><td>${pCell(p.gross_sales, p.momV)}</td></tr>`).join('')}${apMore}${apCur ? `<tr class="total-row"><td>Total (all ${fmtVal(prods.length, 'number')} products)</td><td>${fmtVal(apTot.g, 'currency-full')}</td><td>${fmtVal(apTot.u, 'number')}</td><td>${apDen ? fmtVal(apTot.g / apDen, 'percent') : '—'}</td><td>—</td><td>—</td></tr>` : ''}</tbody>
-    </table><div class="tt-note">${apStatus}${apChgNote}${apCur ? `All ${fmtVal(prods.length, 'number')} products sold on TikTok Shop in the period${apBundles ? `, ${fmtVal(apBundles, 'number')} of them bundles / sets (tagged “Bundle”)` : ''}, by gross sales before discounts (price × units + the line’s discounts — TikTok’s order records via Triple Whale), so the Total matches the Gross Sales tile (small rounding aside); % of gross = ÷ the Gross Sales tile. YoY / ${mLabel}: the same product’s gross sales in the comparison period (“New” = no sales then; TikTok listing titles that changed count as new).` : (tt.top_products_note || '')}</div>` : (apE && apE.status === 'loading' ? `<div class="tt-pending"><span class="tt-loading" aria-hidden="true"></span>Loading TikTok Shop products…</div>` : `<div class="tt-pending">No product-level TikTok Shop data for this period.</div>`);
+      <thead><tr><th style="text-align:left">${whatOne}</th><th title="Before discounts">Gross sales</th><th>Units</th><th>% of gross</th><th>YoY</th><th>${mLabel}</th></tr></thead>
+      <tbody>${shown.map((p, i) => `<tr><td><div class="tt-title" title="${escText(p.title)}">${productCell(p.title, i + 1)}</div></td><td>${fmtVal(p.gross_sales,'currency-full')}</td><td>${fmtVal(p.units,'number')}</td><td>${apDen ? fmtVal(p.gross_sales/apDen,'percent') : '—'}</td><td>${pCell(p.gross_sales, p.yoyV)}</td><td>${pCell(p.gross_sales, p.momV)}</td></tr>`).join('')}${more}${apCur ? `<tr class="total-row"><td>Total (${fmtVal(list.length, 'number')} ${what})</td><td>${fmtVal(tot.g, 'currency-full')}</td><td>${fmtVal(tot.u, 'number')}</td><td>${apDen ? fmtVal(tot.g / apDen, 'percent') : '—'}</td><td>—</td><td>—</td></tr>` : ''}</tbody>
+    </table>`;
+  };
+  const prodTable = prods.length
+    ? (apReg.length ? apList(apReg, apOpenR, 'tt-products-more', 'products', 'Product') : `<div class="tt-pending">No regular (non-bundle) products sold in this period.</div>`)
+    : (apE && apE.status === 'loading' ? `<div class="tt-pending"><span class="tt-loading" aria-hidden="true"></span>Loading TikTok Shop products…</div>` : `<div class="tt-pending">No product-level TikTok Shop data for this period.</div>`);
+  const bundleBlock = apCur && apBund.length ? `<div class="tt-subhead">Top TikTok Shop bundles &amp; sets</div>${apList(apBund, apOpenB, 'tt-bundles-more', 'bundles / sets', 'Bundle / set')}` : '';
+  const prodNote = prods.length ? `<div class="tt-note">${apStatus}${apChgNote}${apCur ? `${fmtVal(apReg.length, 'number')} regular products and ${fmtVal(apBund.length, 'number')} bundles / sets sold on TikTok Shop in the period, listed separately, by gross sales before discounts (price × units + the line’s discounts — TikTok’s order records via Triple Whale); the two totals add up to the Gross Sales tile (small rounding aside); % of gross = ÷ the Gross Sales tile. YoY / ${mLabel}: the same product’s gross sales in the comparison period (“New” = no sales then; TikTok listing titles that changed count as new).` : (tt.top_products_note || '')}</div>` : '';
 
   const partial = tt.months_with_data && tt.months_total && tt.months_with_data < tt.months_total
     ? ` Covers ${tt.months_with_data} of ${tt.months_total} months in this period (months not yet synced aren't included).` : '';
@@ -4362,9 +4373,13 @@ function renderTikTokShop(monthData, opts = {}) {
     ${costTable}
     <div class="tt-subhead">Top TikTok Shop products</div>
     ${prodTable}
+    ${bundleBlock}
+    ${prodNote}
     <div class="tt-note">Source: Triple Whale's TikTok Shop integration (TikTok's own order records; refunds by refund date; TikTok Ads = TikTok's own Shop conversion value for its ads). Affiliate and Organic split TikTok Shop GMV − TikTok Ads (see “Revenue &amp; costs by source”). TikTok Shop orders also sync into Shopify, so they're already included in ND.COM's Gross Sales in Section 1 — this section is a breakdown and isn't added to any total.${partial}</div>`;
   const apBtn = el.querySelector('#tt-products-more');
-  if (apBtn) apBtn.addEventListener('click', () => { ttProductsOpen[apKey] = !apOpen; renderTikTokShop(getMonthData()); });
+  if (apBtn) apBtn.addEventListener('click', () => { ttProductsOpen[apKey] = !apOpenR; renderTikTokShop(getMonthData()); });
+  const apBtnB = el.querySelector('#tt-bundles-more');
+  if (apBtnB) apBtnB.addEventListener('click', () => { ttProductsOpen[apKey + '|bundles'] = !apOpenB; renderTikTokShop(getMonthData()); });
   if (typeof applyMobileTableLabels === 'function') applyMobileTableLabels(el);
 }
 
