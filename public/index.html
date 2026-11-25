@@ -1645,6 +1645,68 @@ function getSingleSiteMonthData(site, month) {
 // same as the sheet's own Profit row (COM Nov 1–23: $1,077,718 − $883,746 =
 // $193,972, 11.2% of Gross Sales). This rule now only fills in when the
 // sheet's Total Cost couldn't be read for the period.
+// P&L sheet feed (2026-11-25, Tomer: "no the sheet should show the data from
+// the dashboard"; he chose "every data row" and a daily scheduled task).
+// buildSheetFeed(site, start, end) returns the dashboard's figures for
+// [start, end) keyed by the P&L sheet's row number (same layout on the COM,
+// EU and IL tabs), for the scheduled task to write into that month's Actual
+// column (tools/sheet-feed.js runs it in a browser). Only rows the dashboard
+// has its own figure for; the sheet's formula rows (Net Sales, Organic,
+// Product Cost, Boxes, Total Cost, Profit…) stay and recalculate.
+//  - values: Gross Sales, Returns / Discounts (negative, as the sheet keeps
+//    them), Orders, each channel's revenue and spend (Section 4), ND.COM's
+//    TikTok affiliate commission and transaction fee (TikTok settlement, as
+//    in the TikTok Shop section).
+//  - formulas ("{col}" = the Actual column): Pick & Pack (lines × rate) and
+//    the PPC Agency Fee (9% of the six ad channels' spend rows).
+// live=1 makes the backend skip the closed-month sheet read.
+const SHEET_FEED_REV_ROWS = { 'Google Ads': 21, 'Meta Ads': 22, 'TikTok Ads': 23, 'TikTok Affiliates': 24, 'TikTok Organic': 25, 'RTB House': 26, 'Shop App': 27, 'impact.com': 28, 'Collabs Affiliate': 29, 'Attentive - SMS Journey': 30, 'Attentive - SMS Campaign': 31, 'Attentive - Email Journey': 32, 'Attentive - Email Campaign (Newsletter)': 33, 'Pinterest': 34, 'Snapchat': 35, 'Microsoft Ads': 36 };
+const SHEET_FEED_SPEND_ROWS = { 'Google Ads': 50, 'Meta Ads': 51, 'TikTok Ads': 52, 'Snapchat': 53, 'Pinterest': 54, 'Microsoft Ads': 55, 'TikTok Affiliates': 56, 'RTB House': 59, 'Shop App': 61, 'impact.com': 69, 'Collabs Affiliate': 70, 'Attentive - SMS Journey': 74, 'Attentive - SMS Campaign': 75, 'Attentive - Email Journey': 76, 'Attentive - Email Campaign (Newsletter)': 77 };
+async function buildSheetFeed(site, start, end) {
+  if (!/^2026-\d{2}-01$/.test(start) || !/^\d{4}-\d{2}-\d{2}$/.test(end) || end <= start) throw new Error('start must be the 1st of a 2026 month, end after it');
+  const mKey = ['Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun', 'Jul', 'Aug', 'Sep', 'Oct', 'Nov', 'Dec'][Number(start.slice(5, 7)) - 1];
+  const base = DATA.sites[site] && DATA.sites[site].months[mKey];
+  if (!base) throw new Error('no ' + mKey + ' for ' + site);
+  let live = null;
+  for (let attempt = 0; attempt < 8 && !live; attempt++) {
+    if (attempt) await new Promise(r => setTimeout(r, 15000));
+    try {
+      const res = await fetch(`${BACKEND_URL}/api/data?site=${encodeURIComponent(site)}&start=${start}&end=${end}&live=1`);
+      const body = JSON.parse(await res.text());
+      if (!res.ok) throw new Error(body.error || ('Backend returned ' + res.status));
+      live = body;
+    } catch (e) { if (attempt === 7) throw e; }
+  }
+  const md = applyProfitRule(applyPpcFeeRule(site, applyCollabsSpendRule(site, applyPickPackRule(site, applyCogsRule(site, mergeLiveIntoMonthData(base, live, site))))));
+  const r2 = v => Math.round(v * 100) / 100;
+  const values = {}, formulas = {}, notes = [];
+  const kv = l => { const k = (md.kpis || []).find(x => x.label === l); return k && !k.no_data && typeof k.actual === 'number' ? k.actual : null; };
+  if (kv('Gross Sales') !== null) values[5] = r2(kv('Gross Sales'));
+  if (kv('Returns') !== null) values[7] = -r2(kv('Returns'));
+  if (kv('Discounts') !== null) values[8] = -r2(kv('Discounts'));
+  if (kv('Number of Orders') !== null) values[17] = Math.round(kv('Number of Orders'));
+  (md.channels || []).filter(c => !c.no_data).forEach(c => {
+    if (SHEET_FEED_REV_ROWS[c.label] && typeof c.revenue_actual === 'number') values[SHEET_FEED_REV_ROWS[c.label]] = r2(c.revenue_actual);
+    if (SHEET_FEED_SPEND_ROWS[c.label] && typeof c.spend_actual === 'number') values[SHEET_FEED_SPEND_ROWS[c.label]] = r2(c.spend_actual);
+  });
+  if (site === 'com') {
+    try {
+      const sc = await fetchSellerCenter(start, end);
+      const lines = sc && sc.fees && Array.isArray(sc.fees.lines) && sc.fees.statements ? sc.fees.lines : null;
+      if (lines) {
+        const sum = keys => lines.filter(l => keys.includes(l.key)).reduce((a, l) => a + (l.amount || 0), 0);
+        values[56] = r2(sum(['affiliate_commission', 'affiliate_ads_commission']) + ttCommissionAdj({ start, end }));
+        values[58] = r2(sum(Object.keys(TX_FEE_KEYS_FEED)));
+      } else notes.push('TikTok settlement not available — commission / transaction fee left as they are');
+    } catch (e) { notes.push('TikTok settlement failed: ' + e.message); }
+  }
+  const pp = md.pick_pack;
+  if (site === 'il' && pp && pp.all_lines > 0) formulas[48] = `=${Math.round(pp.all_lines)}*${IL_PICK_PACK_PER_LINE}`;
+  else if ((site === 'com' || site === 'eu') && pp && pp.orders > 0) formulas[48] = `=${Math.round(pp.lines)}*${PICK_PACK_PER_LINE}`;
+  formulas[60] = `=({col}50+{col}51+{col}52+{col}53+{col}54+{col}55)*${PPC_FEE_PCT * 100}%`;
+  return { site, month: mKey, start, end, values, formulas, notes, check: { net_sales: r2(kv('Net Sales') || 0), gross_sales: r2(kv('Gross Sales') || 0) } };
+}
+const TX_FEE_KEYS_FEED = { referral_fee: 1, transaction_fee: 1, platform_commission: 1 };
 function applyProfitRule(md) {
   if (!md || !md.profit_live || !Array.isArray(md.kpis)) return md;
   const kv = (l) => { const k = md.kpis.find(x => x.label === l); return k && !k.no_data && typeof k.actual === 'number' ? k.actual : null; };
