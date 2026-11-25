@@ -19,6 +19,8 @@
 // land on /auth/callback showing a permanent access token. Copy that into
 // Render as SHOPIFY_<SITE>_ACCESS_TOKEN. See README.md.
 
+const orderDayCache = require('./order-day-cache');
+
 const API_VERSION = process.env.SHOPIFY_API_VERSION || '2026-07';
 // read_reports added 2026-08-24 for fetchSalesReversals() (shopifyqlQuery) —
 // re-authorizing each store (visit /auth/<site> again) is required to mint a
@@ -248,7 +250,7 @@ function orderSearchQuery(startISO, endISO, voided = false) {
 }
 // Every order created in [startISO, endISO) (voided orders excluded), for
 // the given orders query.
-async function fetchOrdersChunked(site, query, startISO, endISO, label, { voided = false } = {}) {
+async function fetchOrdersRangeLive(site, query, startISO, endISO, label, { voided = false, quiet = false } = {}) {
   const t0 = Date.now();
   const thr0 = ordersStats.throttled;
   let pages = 0;
@@ -275,7 +277,75 @@ async function fetchOrdersChunked(site, query, startISO, endISO, label, { voided
     if (o.id) { if (seen.has(o.id)) continue; seen.add(o.id); }
     all.push(o);
   }
-  console.log(`shopify orders ${label} site=${site} ${startISO}..${endISO}: ${all.length} orders, ${pages} pages, ${chunks.length} chunks, ${Date.now() - t0}ms (throttle retries during: ${ordersStats.throttled - thr0})`);
+  if (!quiet) console.log(`shopify orders ${label} site=${site} ${startISO}..${endISO}: ${all.length} orders, ${pages} pages, ${chunks.length} chunks, ${Date.now() - t0}ms (throttle retries during: ${ordersStats.throttled - thr0})`);
+  return all;
+}
+
+// Same result as fetchOrdersRangeLive, but days that were pulled before are
+// reused from the Postgres per-day cache (src/order-day-cache.js): the last few
+// days and days too old to store are pulled live as before, older stored days
+// are read from the database, and a stored day that has expired is pulled
+// again (one query per day) and stored. Any database problem -> live pull.
+async function fetchOrdersChunked(site, query, startISO, endISO, label, opts = {}) {
+  const re = /^\d{4}-\d{2}-\d{2}$/;
+  if (!orderDayCache.enabled() || !re.test(startISO) || !re.test(endISO) || endISO <= startISO) {
+    return fetchOrdersRangeLive(site, query, startISO, endISO, label, opts);
+  }
+  const days = orderDayCache.listDays(startISO, endISO);
+  if (days.length > orderDayCache.MAX_RANGE_DAYS) return fetchOrdersRangeLive(site, query, startISO, endISO, label, opts);
+  const t0 = Date.now();
+  const kind = String(label);
+  const qkey = orderDayCache.qkeyOf(query, !!opts.voided);
+  const today = orderDayCache.todayISO();
+  let stored;
+  try {
+    stored = orderDayCache.isFresh() ? new Map() : await orderDayCache.readDays(site, qkey, startISO, endISO);
+  } catch (err) {
+    console.error(`order-day-cache: read failed (${err.message}) — pulling from Shopify`);
+    return fetchOrdersRangeLive(site, query, startISO, endISO, label, opts);
+  }
+  const quiet = { ...opts, quiet: true };
+  const jobs = []; // in day order
+  const counts = { cached: 0, pulled: 0, live: 0 };
+  let liveRun = null;
+  const flushLive = () => {
+    if (!liveRun) return;
+    const run = liveRun;
+    counts.live += run.days.length;
+    jobs.push(() => fetchOrdersRangeLive(site, query, run.days[0], orderDayCache.nextDay(run.days[run.days.length - 1]), label, quiet));
+    liveRun = null;
+  };
+  for (const d of days) {
+    const pol = orderDayCache.policyFor(kind, d, today);
+    if (pol === 'live' || pol === 'skip') {
+      if (!liveRun) liveRun = { days: [] };
+      liveRun.days.push(d);
+      continue;
+    }
+    flushLive();
+    const row = stored.get(d);
+    if (row && Date.now() - row.fetchedAt < pol) {
+      counts.cached++;
+      jobs.push(async () => row.orders);
+    } else {
+      counts.pulled++;
+      jobs.push(async () => {
+        const orders = await fetchOrdersRangeLive(site, query, d, orderDayCache.nextDay(d), label, quiet);
+        orderDayCache.writeDay(site, qkey, kind, d, orders).catch((err) => console.error(`order-day-cache: write ${site} ${d} failed:`, err.message));
+        return orders;
+      });
+    }
+  }
+  flushLive();
+  const lists = await Promise.all(jobs.map((j) => j()));
+  const seen = new Set();
+  const all = [];
+  for (const list of lists) for (const o of list) {
+    if (o.id) { if (seen.has(o.id)) continue; seen.add(o.id); }
+    all.push(o);
+  }
+  console.log(`shopify orders ${label} site=${site} ${startISO}..${endISO}: ${all.length} orders, days: ${counts.cached} from cache, ${counts.pulled} pulled+stored, ${counts.live} live, ${Date.now() - t0}ms`);
+  orderDayCache.pruneOccasionally().catch(() => {});
   return all;
 }
 
@@ -1670,6 +1740,7 @@ module.exports = {
   getAuthorizeUrl,
   exchangeCodeForToken,
   graphql,
+  withFreshOrders: orderDayCache.withFreshOrders,
   fetchOrders,
   fetchOrdersLight,
   fetchOrdersForTierRevenue,
