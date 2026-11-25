@@ -30,6 +30,9 @@ const { getPool } = require('./yotpo');
 
 const STALE_AFTER_HOURS = 6;
 const REFRESH_WINDOW_DAYS = 45;
+// Newest payload shape (aggregate.js discounts_version). A stored copy below it is
+// never served for the month in progress.
+const PAYLOAD_VERSION = 26;
 
 let schemaReady = null;
 function ensureMonthCacheSchema() {
@@ -141,9 +144,69 @@ function pullAndStore(key, args, build) {
 const OPEN_FRESH_MS = 5 * 60 * 1000;
 const OPEN_MAX_STALE_MS = 30 * 60 * 1000;
 const OPEN_JUST_PULLED_MS = 60 * 1000;
+// 2026-11-25: the month in progress is also kept in Postgres, so a deploy or
+// restart (which empties the memory copy) no longer means the next viewer waits
+// for a cold pull (up to ~70 s for ND.COM). A copy up to OPEN_DB_MAX_STALE_MS old
+// is served at once and a new pull runs in the background. The copy is looked up
+// by site + start + compare only: after midnight the requested `end` changes,
+// and yesterday's copy is still far better than nothing while the new pull runs.
+const OPEN_DB_MAX_STALE_MS = 6 * 3600 * 1000;
+let openSchemaReady = null;
+function ensureOpenSchema() {
+  const p = getPool();
+  if (!p) return Promise.resolve(false);
+  if (!openSchemaReady) {
+    openSchemaReady = p
+      .query(`
+        CREATE TABLE IF NOT EXISTS open_period_snapshots (
+          site TEXT NOT NULL,
+          start_date DATE NOT NULL,
+          end_date DATE NOT NULL,
+          compare TEXT NOT NULL,
+          payload JSONB NOT NULL,
+          fetched_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+          PRIMARY KEY (site, start_date, end_date, compare)
+        );
+      `)
+      .then(() => true)
+      .catch((err) => {
+        console.error('month-cache: open-period schema migration failed:', err.message);
+        openSchemaReady = null;
+        return false;
+      });
+  }
+  return openSchemaReady;
+}
+async function readOpenSnapshot(site, start, end, compareKey) {
+  const p = getPool();
+  if (!p || !(await ensureOpenSchema())) return null;
+  const { rows } = await p.query(
+    `SELECT payload, fetched_at FROM open_period_snapshots
+     WHERE site = $1 AND start_date = $2 AND compare = $3
+     ORDER BY (end_date = $4::date) DESC, fetched_at DESC LIMIT 1`,
+    [site, start, compareKey, end]
+  );
+  return rows[0] || null;
+}
+let lastOpenPrune = 0;
+async function writeOpenSnapshot(site, start, end, compareKey, payload) {
+  const p = getPool();
+  if (!p || !(await ensureOpenSchema())) return;
+  await p.query(
+    `INSERT INTO open_period_snapshots (site, start_date, end_date, compare, payload, fetched_at)
+     VALUES ($1, $2, $3, $4, $5, now())
+     ON CONFLICT (site, start_date, end_date, compare)
+     DO UPDATE SET payload = EXCLUDED.payload, fetched_at = now()`,
+    [site, start, end, compareKey, JSON.stringify(payload)]
+  );
+  if (Date.now() - lastOpenPrune > 3600 * 1000) {
+    lastOpenPrune = Date.now();
+    await p.query("DELETE FROM open_period_snapshots WHERE fetched_at < now() - interval '4 days'");
+  }
+}
 const openCache = new Map(); // key -> { payload, at, partial }
 const openInFlight = new Map(); // key -> { promise, startedAt }
-function openPull(key, build) {
+function openPull(key, build, meta) {
   const running = openInFlight.get(key);
   if (running) return running.promise;
   const startedAt = Date.now();
@@ -151,6 +214,10 @@ function openPull(key, build) {
     .then((payload) => {
       const partial = !!(payload && Array.isArray(payload.partial_sources) && payload.partial_sources.length);
       openCache.set(key, { payload, at: startedAt, partial });
+      if (!partial && meta && payload && payload.discounts_version >= PAYLOAD_VERSION) {
+        writeOpenSnapshot(meta.site, meta.start, meta.end, meta.compareKey, payload)
+          .catch((err) => console.error('month-cache: open-period write failed:', err.message));
+      }
       if (openCache.size > 60) openCache.delete(openCache.keys().next().value);
       return { payload, at: startedAt };
     })
@@ -159,8 +226,25 @@ function openPull(key, build) {
   return promise;
 }
 async function getOpenPeriod({ site, start, end, compare, refresh }, build) {
-  const key = [site, start, end, [...compare].sort().join(',')].join('|');
-  const hit = openCache.get(key);
+  const compareKey = [...compare].sort().join(',');
+  const key = [site, start, end, compareKey].join('|');
+  const meta = { site, start, end, compareKey };
+  let hit = openCache.get(key);
+  if (!hit && !refresh) {
+    try {
+      const snap = await readOpenSnapshot(site, start, end, compareKey);
+      if (snap && snap.payload && snap.payload.discounts_version >= PAYLOAD_VERSION && !(Array.isArray(snap.payload.partial_sources) && snap.payload.partial_sources.length)) {
+        const at = new Date(snap.fetched_at).getTime();
+        if (Date.now() - at < OPEN_DB_MAX_STALE_MS) {
+          hit = { payload: snap.payload, at, partial: false, fromDb: true };
+          openCache.set(key, hit);
+          if (openCache.size > 60) openCache.delete(openCache.keys().next().value);
+        }
+      }
+    } catch (err) {
+      console.error('month-cache: open-period read failed:', err.message);
+    }
+  }
   const age = hit ? Date.now() - hit.at : Infinity;
   const running = openInFlight.get(key);
   if (refresh) {
@@ -169,16 +253,16 @@ async function getOpenPeriod({ site, start, end, compare, refresh }, build) {
       return { payload: r.payload, cache: 'open-shared', fetchedAt: r.at };
     }
     if (hit && age < OPEN_JUST_PULLED_MS) return { payload: hit.payload, cache: 'open-hit', fetchedAt: hit.at };
-    const r = await openPull(key, build);
+    const r = await openPull(key, build, meta);
     return { payload: r.payload, cache: 'open-refresh', fetchedAt: r.at };
   }
   const maxFresh = hit && hit.partial ? OPEN_JUST_PULLED_MS : OPEN_FRESH_MS;
   if (hit && age < maxFresh) return { payload: hit.payload, cache: 'open-hit', fetchedAt: hit.at };
-  if (hit && !hit.partial && age < OPEN_MAX_STALE_MS) {
-    openPull(key, build).catch((err) => console.error('month-cache: background refresh of open period failed:', err.message));
+  if (hit && !hit.partial && age < (hit.fromDb ? OPEN_DB_MAX_STALE_MS : OPEN_MAX_STALE_MS)) {
+    openPull(key, build, meta).catch((err) => console.error('month-cache: background refresh of open period failed:', err.message));
     return { payload: hit.payload, cache: 'open-stale', fetchedAt: hit.at };
   }
-  const r = await openPull(key, build);
+  const r = await openPull(key, build, meta);
   return { payload: r.payload, cache: 'open-miss', fetchedAt: r.at };
 }
 
@@ -227,7 +311,7 @@ async function getWithMonthCache({ site, start, end, compare, refresh }, build) 
       // 22 (2026-11-18): Pinterest revenue on Pixel CV (channels re-pull).
       // 23 (2026-11-19): Pinterest on Triple Attribution Pixel CV.
       // 24 (2026-11-22): sheet tag spellings; ND.IL / ND.EU sheet gift lines.
-      const outdated = !(row.payload && row.payload.discounts_version >= 26) || partial;
+      const outdated = !(row.payload && row.payload.discounts_version >= PAYLOAD_VERSION) || partial;
       if (recentlyClosed && ageHours > STALE_AFTER_HOURS) {
         pullAndStore(key, args, build).catch((err) => console.error('month-cache: background refresh failed:', err.message));
         return { payload: row.payload, cache: 'stale', fetchedAt: row.fetched_at };
