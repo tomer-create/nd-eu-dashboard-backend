@@ -1703,7 +1703,7 @@ async function buildSheetFeed(site, start, end) {
   const pp = md.pick_pack;
   if (site === 'il' && pp && pp.all_lines > 0) formulas[48] = `=${Math.round(pp.all_lines)}*${IL_PICK_PACK_PER_LINE}`;
   else if ((site === 'com' || site === 'eu') && pp && pp.orders > 0) formulas[48] = `=${Math.round(pp.lines)}*${PICK_PACK_PER_LINE}`;
-  formulas[60] = `=({col}50+{col}51+{col}52+{col}53+{col}54+{col}55)*${PPC_FEE_PCT * 100}%`;
+  if (site !== 'il') formulas[60] = `=({col}50+{col}51+{col}52+{col}53+{col}54+{col}55)*${PPC_FEE_PCT * 100}%`; // IL: the sheet's fixed fee
   return { site, month: mKey, start, end, values, formulas, notes, check: { net_sales: r2(kv('Net Sales') || 0), gross_sales: r2(kv('Gross Sales') || 0) } };
 }
 const TX_FEE_KEYS_FEED = { referral_fee: 1, transaction_fee: 1, platform_commission: 1 };
@@ -1884,7 +1884,10 @@ const PPC_FEE_PCT = 0.09;
 // Pinterest ads + snapchat ads + Microsoft ads + TikTok ads"): ChatGPT Ads
 // no longer counted.
 const PPC_FEE_CHANNELS = ['TikTok Ads', 'Google Ads', 'Meta Ads', 'Snapchat', 'Microsoft Ads', 'Pinterest'];
+// ND.IL (2026-11-25, Tomer: "in ND.IL the PPC agency fee is not 9% is
+// according to the sheet as fix fee"): IL keeps the P&L sheet's fixed fee.
 function applyPpcFeeRule(site, md) {
+  if (site === 'il') return md;
   if (!md || !Array.isArray(md.other_costs) || !Array.isArray(md.channels) || md.pnl_closed) return md;
   const label = 'PPC Agency Fee';
   if (!md.other_costs.some(o => o.label === label)) return md;
